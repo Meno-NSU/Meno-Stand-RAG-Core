@@ -9,7 +9,7 @@ The backend never imports or starts `vllm.LLM`. It talks to external vLLM server
 ```bash
 cp example.env .env
 uv sync
-uv run meno-rag-api
+./scripts/run_backend.sh
 ```
 
 Meno-Web can use:
@@ -17,6 +17,21 @@ Meno-Web can use:
 ```bash
 BACKEND_URL=http://127.0.0.1:9006
 ```
+
+`scripts/run_backend.sh` starts the API in the background with `nohup`, so it keeps running after the terminal is
+closed. It writes logs to `logs/meno-rag-api.log` and a PID file to `var/meno-rag-api.pid`.
+
+Useful commands:
+
+```bash
+./scripts/run_backend.sh status
+./scripts/run_backend.sh logs
+./scripts/run_backend.sh stop
+./scripts/run_backend.sh restart
+```
+
+By default the backend binds to `127.0.0.1:9006`. Meno-Web listens on `0.0.0.0:9012` and proxies `/v1/*` to that
+backend, so the externally visible API endpoint is on the same host and port as Meno-Web: `http://<meno-web-host>:9012/v1`.
 
 ## Runtime Resources
 
