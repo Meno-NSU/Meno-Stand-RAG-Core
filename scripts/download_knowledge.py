@@ -14,9 +14,12 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-DEFAULT_PUBLIC_URL = "https://disk.yandex.ru/d/eklv6Scj9OpbmQ/knowledge"
+DEFAULT_PUBLIC_URL = "https://disk.yandex.ru/d/eklv6Scj9OpbmQ"
 DOWNLOAD_API_URL = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
 EXPECTED_FILES = (
+    "chunk_mapping_to_texts.json",
+    "chunked_texts_about_nsu_with_metadata.jsonl",
+    "abbreviations.json",
     "knowledge/faiss_frida.index",
     "knowledge/bm25/data.csc.index.npy",
     "knowledge/bm25/indices.csc.index.npy",
@@ -27,11 +30,11 @@ EXPECTED_FILES = (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download the Meno RAG knowledge resources from Yandex Disk.")
+    parser = argparse.ArgumentParser(description="Download the Meno RAG stand resources from Yandex Disk.")
     parser.add_argument(
         "--url",
         default=DEFAULT_PUBLIC_URL,
-        help=f"Yandex Disk public URL to the knowledge folder. Defaults to {DEFAULT_PUBLIC_URL!r}.",
+        help=f"Yandex Disk public URL to the full resources folder. Defaults to {DEFAULT_PUBLIC_URL!r}.",
     )
     parser.add_argument(
         "--output-dir",
@@ -43,7 +46,7 @@ def parse_args() -> argparse.Namespace:
         "--archive",
         type=Path,
         default=None,
-        help="Temporary zip archive path. Defaults to <output-dir>/knowledge.zip.",
+        help="Temporary zip archive path. Defaults to <output-dir>/meno-rag-data.zip.",
     )
     parser.add_argument(
         "--force",
@@ -203,7 +206,12 @@ def safe_extract(archive_path: Path, output_dir: Path) -> None:
 
 
 def normalize_extracted_layout(output_dir: Path) -> None:
+    data_dir = output_dir / "data"
+    if not (output_dir / "knowledge").is_dir() and (data_dir / "knowledge").is_dir():
+        move_children(data_dir, output_dir)
+
     if (output_dir / "knowledge").is_dir():
+        copy_abbreviations_to_root(output_dir)
         return
 
     root_faiss = output_dir / "faiss_frida.index"
@@ -215,6 +223,26 @@ def normalize_extracted_layout(output_dir: Path) -> None:
     knowledge_dir.mkdir()
     shutil.move(str(root_faiss), knowledge_dir / root_faiss.name)
     shutil.move(str(root_bm25), knowledge_dir / root_bm25.name)
+    copy_abbreviations_to_root(output_dir)
+
+
+def move_children(source_dir: Path, target_dir: Path) -> None:
+    for child in source_dir.iterdir():
+        target = target_dir / child.name
+        if target.exists():
+            continue
+        shutil.move(str(child), target)
+    try:
+        source_dir.rmdir()
+    except OSError:
+        pass
+
+
+def copy_abbreviations_to_root(output_dir: Path) -> None:
+    root_abbreviations = output_dir / "abbreviations.json"
+    nested_abbreviations = output_dir / "knowledge" / "abbreviations.json"
+    if not root_abbreviations.exists() and nested_abbreviations.is_file():
+        shutil.copy2(nested_abbreviations, root_abbreviations)
 
 
 def validate_output(output_dir: Path) -> None:
@@ -227,10 +255,10 @@ def validate_output(output_dir: Path) -> None:
 def main() -> int:
     args = parse_args()
     output_dir = args.output_dir.resolve()
-    archive_path = (args.archive or output_dir / "knowledge.zip").resolve()
+    archive_path = (args.archive or output_dir / "meno-rag-data.zip").resolve()
 
     if expected_files_exist(output_dir) and not args.force and not args.resolve_only:
-        print(f"Knowledge resources already exist in {output_dir / 'knowledge'}", flush=True)
+        print(f"Stand resources already exist in {output_dir}", flush=True)
         return 0
 
     print(f"Resolving Yandex Disk download URL for {args.url}", flush=True)
@@ -252,7 +280,7 @@ def main() -> int:
     else:
         archive_path.unlink(missing_ok=True)
 
-    print(f"Knowledge resources are ready in {output_dir / 'knowledge'}", flush=True)
+    print(f"Stand resources are ready in {output_dir}", flush=True)
     return 0
 
 

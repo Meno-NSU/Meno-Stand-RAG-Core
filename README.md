@@ -30,15 +30,15 @@ The implementation expects stand artifacts in `resources/stand_nsu/`:
 
 These files are loaded once during API startup and treated as read-only.
 
-Download the `knowledge/` directory from Yandex Disk before starting the API:
+Download the stand resources from Yandex Disk before starting the API:
 
 ```bash
 python3 scripts/download_knowledge.py
 ```
 
 The script uses the public Yandex Disk API directly, so no third-party downloader is required. It resolves
-`https://disk.yandex.ru/d/eklv6Scj9OpbmQ/knowledge`, downloads the folder as a zip archive, extracts it into
-`resources/stand_nsu/`, and verifies the expected FAISS and BM25 files.
+`https://disk.yandex.ru/d/eklv6Scj9OpbmQ`, downloads the full shared folder as a zip archive, extracts it into
+`resources/stand_nsu/`, and verifies the expected corpus, mapping, abbreviation, FAISS, and BM25 files.
 
 In a Jupyter notebook container, run it from the repository root:
 
@@ -46,8 +46,8 @@ In a Jupyter notebook container, run it from the repository root:
 !python3 scripts/download_knowledge.py
 ```
 
-The download needs about 3.5 GB of free space while it is running: roughly 1.4 GB for the temporary zip archive
-and 1.7 GB for the extracted `knowledge/` directory. The temporary archive is removed after a successful extract.
+The download needs about 5.5 GB of free space while it is running: the full temporary zip archive is about 1.8 GB,
+and the extracted folder is about 3.5 GB. The temporary archive is removed after a successful extract.
 
 To print the temporary direct download URL without downloading the archive:
 
