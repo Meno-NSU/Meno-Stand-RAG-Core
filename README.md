@@ -33,22 +33,26 @@ These files are loaded once during API startup and treated as read-only.
 Download the `knowledge/` directory from Yandex Disk before starting the API:
 
 ```bash
-KNOWLEDGE_URL="https://disk.yandex.ru/d/eklv6Scj9OpbmQ/knowledge"
-ARCHIVE="/tmp/meno-rag-knowledge.zip"
-
-mkdir -p resources/stand_nsu
-curl -L "$(uvx --from wldhx.yadisk-direct yadisk-direct "$KNOWLEDGE_URL")" -o "$ARCHIVE"
-unzip -q "$ARCHIVE" -d resources/stand_nsu
-
-test -f resources/stand_nsu/knowledge/faiss_frida.index
-test -d resources/stand_nsu/knowledge/bm25
+python3 scripts/download_knowledge.py
 ```
 
-If `uvx` is not available, install the helper explicitly and run the same download command:
+The script uses the public Yandex Disk API directly, so no third-party downloader is required. It resolves
+`https://disk.yandex.ru/d/eklv6Scj9OpbmQ/knowledge`, downloads the folder as a zip archive, extracts it into
+`resources/stand_nsu/`, and verifies the expected FAISS and BM25 files.
+
+In a Jupyter notebook container, run it from the repository root:
+
+```python
+!python3 scripts/download_knowledge.py
+```
+
+The download needs about 3.5 GB of free space while it is running: roughly 1.4 GB for the temporary zip archive
+and 1.7 GB for the extracted `knowledge/` directory. The temporary archive is removed after a successful extract.
+
+To print the temporary direct download URL without downloading the archive:
 
 ```bash
-python -m pip install --user wldhx.yadisk-direct
-curl -L "$(yadisk-direct "https://disk.yandex.ru/d/eklv6Scj9OpbmQ/knowledge")" -o /tmp/meno-rag-knowledge.zip
+python3 scripts/download_knowledge.py --resolve-only
 ```
 
 ## API
