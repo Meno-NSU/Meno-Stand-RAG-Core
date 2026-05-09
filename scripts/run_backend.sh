@@ -14,18 +14,49 @@ API_BIN="${API_BIN:-$ROOT_DIR/.venv/bin/meno-rag-api}"
 
 mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
 
+pid_from_file() {
+    [[ -f "$PID_FILE" ]] || return 1
+    cat "$PID_FILE"
+}
+
+pid_is_alive() {
+    local pid="${1:-}"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+pid_command() {
+    local pid="${1:-}"
+    ps -p "$pid" -o command= 2>/dev/null || true
+}
+
+is_managed_process() {
+    local pid="${1:-}"
+    local command
+    command="$(pid_command "$pid")"
+    if [[ -z "$command" ]]; then
+        return 0
+    fi
+    [[ "$command" == *"$API_BIN"* || "$command" == *"meno-rag-api"* ]]
+}
+
 is_running() {
-    [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+    local pid
+    pid="$(pid_from_file)" || return 1
+    pid_is_alive "$pid" && is_managed_process "$pid"
 }
 
 start() {
     if is_running; then
-        echo "Meno RAG API is already running with PID $(cat "$PID_FILE")."
-        echo "Logs: $LOG_FILE"
-        return 0
+        echo "Meno RAG API is already running with PID $(cat "$PID_FILE"); restarting it."
+        stop
     fi
 
     if [[ -f "$PID_FILE" ]]; then
+        local stale_pid
+        stale_pid="$(cat "$PID_FILE")"
+        if pid_is_alive "$stale_pid"; then
+            echo "PID file points to a non-managed live process ($stale_pid); leaving it alone."
+        fi
         rm -f "$PID_FILE"
     fi
 
@@ -62,10 +93,18 @@ start() {
 stop() {
     if ! is_running; then
         echo "Meno RAG API is not running."
+        if [[ -f "$PID_FILE" ]]; then
+            local stale_pid
+            stale_pid="$(cat "$PID_FILE")"
+            if pid_is_alive "$stale_pid"; then
+                echo "PID file points to a non-managed live process ($stale_pid); leaving it alone."
+            fi
+        fi
         rm -f "$PID_FILE"
         return 0
     fi
 
+    local pid
     pid="$(cat "$PID_FILE")"
     echo "Stopping Meno RAG API with PID $pid..."
     kill "$pid"

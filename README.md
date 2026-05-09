@@ -19,7 +19,8 @@ BACKEND_URL=http://127.0.0.1:9006
 ```
 
 `scripts/run_backend.sh` starts the API in the background with `nohup`, so it keeps running after the terminal is
-closed. It writes logs to `logs/meno-rag-api.log` and a PID file to `var/meno-rag-api.pid`.
+closed. Re-running the script restarts the existing background process gracefully before starting a new one. It
+writes logs to `logs/meno-rag-api.log` and a PID file to `var/meno-rag-api.pid`.
 
 Useful commands:
 
