@@ -44,6 +44,20 @@ class ModelRuntime:
     provider: str = "vllm"  # "vllm" | "openrouter"
 
 
+@dataclass(frozen=True)
+class PipelineRuntime:
+    core: ModelRuntime
+    generation: ModelRuntime
+
+    @staticmethod
+    def uniform(runtime: ModelRuntime) -> "PipelineRuntime":
+        return PipelineRuntime(core=runtime, generation=runtime)
+
+    @property
+    def uses_openrouter(self) -> bool:
+        return self.generation.provider == "openrouter"
+
+
 class StandRagPipeline:
     def __init__(
         self,
