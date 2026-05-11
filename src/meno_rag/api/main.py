@@ -272,29 +272,92 @@ async def healthz(request: Request):
 
 @app.get("/v1/models")
 async def list_models(request: Request):
+    from meno_rag.api.runtime_resolver import resolve_core_model_id_sync
+
     settings: Settings = request.app.state.settings
-    registry: VLLMRegistry = request.app.state.vllm_registry
-    models = await registry.list_models()
-    if models:
-        return {"object": "list", "data": models}
-    return {
-        "object": "list",
-        "data": [
+    vllm_registry: VLLMRegistry = request.app.state.vllm_registry
+    or_registry = request.app.state.openrouter_registry
+    status_store = request.app.state.model_status_store
+
+    vllm_models = await vllm_registry.list_models()
+    or_models = await or_registry.list_models() if or_registry is not None else []
+
+    merged: list[dict] = []
+    for m in vllm_models:
+        merged.append(
+            {
+                "id": m["id"],
+                "object": "model",
+                "created": m.get("created", int(time.time())),
+                "owned_by": m.get("owned_by", "vllm"),
+                "provider": "vllm",
+                "featured": False,
+                "stages": ["rewrite", "rerank", "generation"],
+                "status": {"state": "available", "until": None, "last_error": None},
+                "display_name": m["id"],
+                "context_length": m.get("context_length"),
+                "endpoint": m.get("endpoint"),
+            }
+        )
+    statuses = await status_store.list_all()
+    for m in or_models:
+        status = statuses.get(m["id"])
+        merged.append(
+            {
+                "id": m["id"],
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "openrouter",
+                "provider": "openrouter",
+                "featured": m.get("featured", False),
+                "stages": ["generation"],
+                "status": (
+                    status.to_dict()
+                    if status
+                    else {
+                        "state": "available",
+                        "until": None,
+                        "last_error": None,
+                        "consecutive_failures": 0,
+                        "updated_at": None,
+                    }
+                ),
+                "display_name": m.get("display_name") or m["id"],
+                "context_length": m.get("context_length"),
+            }
+        )
+
+    if not merged:
+        merged = [
             {
                 "id": settings.default_model or "menon-1",
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "menon",
+                "provider": "vllm",
+                "featured": False,
+                "stages": ["rewrite", "rerank", "generation"],
+                "status": {"state": "available", "until": None, "last_error": None},
+                "display_name": settings.default_model or "menon-1",
+                "context_length": None,
             }
-        ],
-    }
+        ]
+
+    core_model_id = resolve_core_model_id_sync(
+        vllm_models, settings.rag_rewrite_rerank_model, settings.vllm_endpoint_list
+    )
+
+    return {"object": "list", "data": merged, "core_model_id": core_model_id}
 
 
 @app.post("/v1/models/refresh")
 async def refresh_models(request: Request):
-    registry: VLLMRegistry = request.app.state.vllm_registry
-    models = await registry.refresh()
-    return {"object": "list", "data": models}
+    vllm_registry: VLLMRegistry = request.app.state.vllm_registry
+    or_registry = request.app.state.openrouter_registry
+    await vllm_registry.refresh()
+    if or_registry is not None:
+        await or_registry.discover()
+    return await list_models(request)
 
 
 @app.get("/v1/knowledge-bases")
