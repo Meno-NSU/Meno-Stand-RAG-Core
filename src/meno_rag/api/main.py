@@ -12,6 +12,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy import text
 
 from meno_rag.api import arena
 from meno_rag.api.events import (
@@ -39,6 +40,8 @@ logger = structlog.get_logger(__name__)
 KB_ID = "nsu-stand-faiss-bm25"
 KB_NAME = "НГУ: стендовый FAISS+BM25"
 RAG_ENGINE_ID = "stand_rag"
+
+_HEALTH_QUERY = text("SELECT 1")
 
 
 @asynccontextmanager
@@ -141,11 +144,50 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+    structlog.contextvars.bind_contextvars(request_id=request_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
+    finally:
+        structlog.contextvars.unbind_contextvars("request_id")
+
+
 @app.get("/healthz")
 async def healthz(request: Request):
+    state = request.app.state
+    pipeline = state.pipeline
+    db_status = "ok"
+    try:
+        async with state.database.engine.connect() as conn:
+            await conn.execute(_HEALTH_QUERY)
+    except Exception:
+        db_status = "error"
+
+    redis_status: str
+    if state.redis is None:
+        redis_status = "disabled"
+    else:
+        try:
+            await state.redis.ping()
+            redis_status = "ok"
+        except Exception:
+            redis_status = "error"
+
+    embedder_device = "unknown"
+    if state.resources is not None:
+        embedder_device = state.resources.embedder[2]
+
+    overall = "ok" if pipeline is not None and db_status == "ok" else "degraded"
     return {
-        "status": "ok" if request.app.state.pipeline is not None else "degraded",
-        "rag_ready": request.app.state.pipeline is not None,
+        "status": overall,
+        "rag_ready": pipeline is not None,
+        "db": db_status,
+        "redis": redis_status,
+        "embedder_device": embedder_device,
         "knowledge_base_id": KB_ID,
     }
 
