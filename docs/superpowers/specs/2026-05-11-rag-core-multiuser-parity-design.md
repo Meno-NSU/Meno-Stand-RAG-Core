@@ -37,7 +37,7 @@ These were verified by direct file diff during brainstorming.
 
 - **Current** (`src/meno_rag/stand/pipeline.py:160-195`): `temperature=settings.generation_temperature` (`0.1`), `max_tokens=settings.max_output_tokens` (`1024`). **No seed.**
 - **meno_stand**: same `SamplingParams` as rewrite — `temperature=0.1, max_tokens=1024, seed=42`.
-- **Fix:** add `seed=42` to rewrite, QA generation, and the rerank scoring call. The seed is a top-level OpenAI chat-completions field supported by vLLM since v0.4; `VLLMClient` is extended to pass it through. (vLLM-version-specific fallback to `extra_body={"seed": 42}` is acceptable if needed — see Risks.)
+- **Fix:** add `seed=42` to rewrite (D1) and QA generation (rerank in meno_stand uses a separate `SamplingParams` without seed at `rerank_utils.py:172-176` — temperature is 0.0 there, so seed is irrelevant; we do not add seed to rerank for strict parity). The seed is a top-level OpenAI chat-completions field supported by vLLM since v0.4; `VLLMClient` is extended to pass it through. (vLLM-version-specific fallback to `extra_body={"seed": 42}` is acceptable if needed — see Risks.)
 
 ### D3. Rerank JSON-fallback scoring
 
