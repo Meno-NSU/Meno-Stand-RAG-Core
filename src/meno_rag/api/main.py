@@ -6,6 +6,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 import structlog
 import uvicorn
 from fastapi import FastAPI, Request
@@ -45,6 +46,10 @@ async def lifespan(app: FastAPI):
     database = Database(settings.database_url)
     await database.init_models()
 
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0)
+    )
+
     registry = VLLMRegistry(
         settings.vllm_endpoint_list,
         timeout=settings.model_discovery_timeout_seconds,
@@ -62,7 +67,7 @@ async def lifespan(app: FastAPI):
         pipeline = StandRagPipeline(
             settings=settings,
             resources=resources,
-            llm_client=VLLMClient(api_key=settings.openai_api_key),
+            llm_client=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
             rewrite_semaphore=asyncio.Semaphore(settings.rewrite_concurrency),
             rerank_semaphore=asyncio.Semaphore(settings.rerank_concurrency),
             generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
@@ -72,12 +77,14 @@ async def lifespan(app: FastAPI):
 
     app.state.settings = settings
     app.state.database = database
+    app.state.http_client = http_client
     app.state.vllm_registry = registry
     app.state.resources = resources
     app.state.pipeline = pipeline
 
     yield
 
+    await http_client.aclose()
     await database.close()
 
 

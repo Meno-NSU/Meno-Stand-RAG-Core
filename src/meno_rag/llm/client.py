@@ -8,7 +8,11 @@ import httpx
 
 
 class VLLMClient:
-    def __init__(self, *, api_key: str = "EMPTY") -> None:
+    """OpenAI-compatible vLLM HTTP client. Shares a single httpx.AsyncClient
+    across requests via DI to keep TCP/TLS connections warm."""
+
+    def __init__(self, *, http_client: httpx.AsyncClient, api_key: str = "EMPTY") -> None:
+        self._http = http_client
         self.api_key = api_key
 
     async def chat_completion(
@@ -19,6 +23,7 @@ class VLLMClient:
         messages: list[dict[str, str]],
         max_tokens: int | None = None,
         temperature: float | None = None,
+        seed: int | None = None,
         stream: bool = False,
         logprobs: bool | None = None,
         top_logprobs: int | None = None,
@@ -26,15 +31,13 @@ class VLLMClient:
         response_format: dict[str, Any] | None = None,
         timeout: float = 60.0,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "stream": stream,
-        }
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
+        if seed is not None:
+            payload["seed"] = seed
         if logprobs is not None:
             payload["logprobs"] = logprobs
         if top_logprobs is not None:
@@ -44,14 +47,14 @@ class VLLMClient:
         if extra_body:
             payload.update(extra_body)
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                self._url(base_url, "chat/completions"),
-                headers=self._headers(),
-                json=payload,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._http.post(
+            self._url(base_url, "chat/completions"),
+            headers=self._headers(),
+            json=payload,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def chat_completion_text(self, **kwargs: Any) -> str:
         data = await self.chat_completion(stream=False, **kwargs)
@@ -65,43 +68,38 @@ class VLLMClient:
         messages: list[dict[str, str]],
         max_tokens: int | None = None,
         temperature: float | None = None,
+        seed: int | None = None,
         timeout: float = 240.0,
     ) -> AsyncIterator[str]:
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "stream": True,
-        }
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
+        if seed is not None:
+            payload["seed"] = seed
 
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST",
-                self._url(base_url, "chat/completions"),
-                headers=self._headers(),
-                json=payload,
-                timeout=timeout,
-            ) as response:
-                response.raise_for_status()
-                buffer = ""
-                async for chunk in response.aiter_text():
-                    buffer += chunk
-                    while "\n\n" in buffer:
-                        event_block, buffer = buffer.split("\n\n", 1)
-                        for content in self._parse_sse_content(event_block):
-                            yield content
-                if buffer.strip():
-                    for content in self._parse_sse_content(buffer):
+        async with self._http.stream(
+            "POST",
+            self._url(base_url, "chat/completions"),
+            headers=self._headers(),
+            json=payload,
+            timeout=timeout,
+        ) as response:
+            response.raise_for_status()
+            buffer = ""
+            async for chunk in response.aiter_text():
+                buffer += chunk
+                while "\n\n" in buffer:
+                    event_block, buffer = buffer.split("\n\n", 1)
+                    for content in self._parse_sse_content(event_block):
                         yield content
+            if buffer.strip():
+                for content in self._parse_sse_content(buffer):
+                    yield content
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
     @staticmethod
     def _url(base_url: str, suffix: str) -> str:
