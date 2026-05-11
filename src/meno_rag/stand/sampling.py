@@ -3,8 +3,10 @@
 SOURCE OF TRUTH:
 - Rewrite + QA: /Users/sckwoky/Projects/meno_stand/code/chat.py:184-189
   (a single SamplingParams reused for both stages).
-- Rerank: /Users/sckwoky/Projects/meno_stand/code/rerank_utils/rerank_utils.py:172-176
-  (separate SamplingParams; no seed because temperature=0 -> greedy).
+- Rerank (OpenAI HTTP API path used by RAG-Core):
+  /Users/sckwoky/Projects/meno_stand/code/rerank_utils/rerank_utils.py:90-98.
+  The vLLM-direct path at lines 172-176 uses logprobs=20 and is intentionally
+  not mirrored — RAG-Core only ever speaks the OpenAI API.
 """
 
 from __future__ import annotations

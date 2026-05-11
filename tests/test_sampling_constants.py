@@ -1,8 +1,11 @@
 # tests/test_sampling_constants.py
 """Sampling parameters are pipeline canon. Drift here means we no longer match
 meno_stand. Tests assert the exact values from
-/Users/sckwoky/Projects/meno_stand/code/chat.py:184-189 and
-/Users/sckwoky/Projects/meno_stand/code/rerank_utils/rerank_utils.py:172-176."""
+/Users/sckwoky/Projects/meno_stand/code/chat.py:184-189 and the OpenAI HTTP
+API rerank path at
+/Users/sckwoky/Projects/meno_stand/code/rerank_utils/rerank_utils.py:90-98
+(RAG-Core does not use the vLLM-direct path at lines 172-176, which encodes
+logprobs=20)."""
 
 
 def test_rewrite_sampling_matches_meno_stand():
