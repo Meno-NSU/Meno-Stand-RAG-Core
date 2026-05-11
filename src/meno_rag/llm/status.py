@@ -6,6 +6,7 @@ reachable; if they go down, the entire backend goes down."""
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -139,6 +140,90 @@ class InMemoryModelStatusStore:
             "model_status_transition",
             model_id=model_id,
             from_state=previous.state.value if previous else "available",
+            to_state="unreachable",
+            until=until.isoformat(),
+            consecutive_failures=failures,
+            cause="5xx_or_network",
+        )
+
+
+REDIS_NAMESPACE = "meno_rag:model_status"
+
+
+class RedisModelStatusStore:
+    """Multi-worker-safe status store backed by Redis. TTL on the key auto-clears
+    rate_limited / unreachable states without any background job."""
+
+    def __init__(self, *, redis: Any, backoff_seconds: int, backoff_max_seconds: int) -> None:
+        self._redis = redis
+        self._backoff = backoff_seconds
+        self._backoff_max = backoff_max_seconds
+
+    def _key(self, model_id: str) -> str:
+        return f"{REDIS_NAMESPACE}:{model_id}"
+
+    async def get(self, model_id: str) -> ModelStatus:
+        payload = await self._redis.get(self._key(model_id))
+        if not payload:
+            return ModelStatus.available()
+        status = ModelStatus.from_dict(json.loads(payload))
+        if status.until is not None and status.until <= _utcnow():
+            return ModelStatus.available()
+        return status
+
+    async def list_all(self) -> dict[str, ModelStatus]:
+        result: dict[str, ModelStatus] = {}
+        async for key in self._redis.scan_iter(match=f"{REDIS_NAMESPACE}:*"):
+            model_id = key.removeprefix(f"{REDIS_NAMESPACE}:")
+            value = await self._redis.get(key)
+            if value:
+                result[model_id] = ModelStatus.from_dict(json.loads(value))
+        return result
+
+    async def _write(self, model_id: str, status: ModelStatus, *, ttl_seconds: int | None) -> None:
+        payload = json.dumps(status.to_dict())
+        if ttl_seconds and ttl_seconds > 0:
+            await self._redis.set(self._key(model_id), payload, ex=ttl_seconds)
+        else:
+            await self._redis.set(self._key(model_id), payload)
+
+    async def mark_ok(self, model_id: str) -> None:
+        previous = await self.get(model_id)
+        await self._redis.delete(self._key(model_id))
+        if previous.state != ModelStatusState.AVAILABLE:
+            logger.info(
+                "model_status_transition",
+                model_id=model_id,
+                from_state=previous.state.value,
+                to_state="available",
+                cause="ok_response",
+            )
+
+    async def mark_rate_limited(self, model_id: str, *, until: datetime, error: str | None) -> None:
+        previous = await self.get(model_id)
+        status = ModelStatus.rate_limited(until=until, error=error)
+        ttl = max(1, int((until - _utcnow()).total_seconds()))
+        await self._write(model_id, status, ttl_seconds=ttl)
+        logger.info(
+            "model_status_transition",
+            model_id=model_id,
+            from_state=previous.state.value,
+            to_state="rate_limited",
+            until=until.isoformat(),
+            cause="429_response",
+        )
+
+    async def mark_unreachable(self, model_id: str, *, error: str | None) -> None:
+        previous = await self.get(model_id)
+        failures = previous.consecutive_failures + 1
+        delay = min(self._backoff * (2 ** (failures - 1)), self._backoff_max)
+        until = _utcnow() + timedelta(seconds=delay)
+        status = ModelStatus.unreachable(until=until, error=error, consecutive_failures=failures)
+        await self._write(model_id, status, ttl_seconds=delay)
+        logger.info(
+            "model_status_transition",
+            model_id=model_id,
+            from_state=previous.state.value,
             to_state="unreachable",
             until=until.isoformat(),
             consecutive_failures=failures,
