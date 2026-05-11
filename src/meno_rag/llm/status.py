@@ -106,14 +106,14 @@ class InMemoryModelStatusStore:
         async with self._lock:
             previous = self._states.get(model_id)
             self._states[model_id] = ModelStatus.available()
-            if previous and previous.state != ModelStatusState.AVAILABLE:
-                logger.info(
-                    "model_status_transition",
-                    model_id=model_id,
-                    from_state=previous.state.value,
-                    to_state="available",
-                    cause="ok_response",
-                )
+        if previous and previous.state != ModelStatusState.AVAILABLE:
+            logger.info(
+                "model_status_transition",
+                model_id=model_id,
+                from_state=previous.state.value,
+                to_state="available",
+                cause="ok_response",
+            )
 
     async def mark_rate_limited(self, model_id: str, *, until: datetime, error: str | None) -> None:
         async with self._lock:
