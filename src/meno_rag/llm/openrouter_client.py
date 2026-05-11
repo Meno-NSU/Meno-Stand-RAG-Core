@@ -53,6 +53,7 @@ class OpenRouterClient:
         temperature: float | None = None,
         seed: int | None = None,
         stream: bool = False,
+        timeout: float | None = None,
         extra_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
@@ -65,7 +66,8 @@ class OpenRouterClient:
         if extra_body:
             payload.update(extra_body)
 
-        return await self._send(model=model, payload=payload, stream=False)
+        effective_timeout = timeout if timeout is not None else self._timeout
+        return await self._send(model=model, payload=payload, stream=False, timeout=effective_timeout)
 
     async def chat_completion_text(self, **kwargs: Any) -> str:
         data = await self.chat_completion(stream=False, **kwargs)
@@ -79,6 +81,7 @@ class OpenRouterClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         seed: int | None = None,
+        timeout: float | None = None,
     ) -> AsyncIterator[str]:
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if max_tokens is not None:
@@ -88,11 +91,12 @@ class OpenRouterClient:
         if seed is not None:
             payload["seed"] = seed
 
+        effective_timeout = timeout if timeout is not None else self._timeout
         async with self._semaphore:
             url = f"{self._base_url}/chat/completions"
             try:
                 async with self._http.stream(
-                    "POST", url, headers=self._headers(), json=payload, timeout=self._timeout
+                    "POST", url, headers=self._headers(), json=payload, timeout=effective_timeout
                 ) as response:
                     if response.status_code == 429:
                         await self._handle_429(model, response)
@@ -114,11 +118,14 @@ class OpenRouterClient:
                 raise OpenRouterUnreachableError(model_id=model, cause=type(exc).__name__) from exc
             await self._status_store.mark_ok(model)
 
-    async def _send(self, *, model: str, payload: dict[str, Any], stream: bool) -> dict[str, Any]:
+    async def _send(
+        self, *, model: str, payload: dict[str, Any], stream: bool, timeout: float | None = None
+    ) -> dict[str, Any]:
+        effective_timeout = timeout if timeout is not None else self._timeout
         async with self._semaphore:
             url = f"{self._base_url}/chat/completions"
             try:
-                response = await self._http.post(url, headers=self._headers(), json=payload, timeout=self._timeout)
+                response = await self._http.post(url, headers=self._headers(), json=payload, timeout=effective_timeout)
             except (httpx.HTTPError, httpx.NetworkError) as exc:
                 await self._status_store.mark_unreachable(model, error=type(exc).__name__)
                 raise OpenRouterUnreachableError(model_id=model, cause=type(exc).__name__) from exc

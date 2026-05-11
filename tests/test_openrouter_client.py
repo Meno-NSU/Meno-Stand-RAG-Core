@@ -181,3 +181,23 @@ async def test_stream_429_raises_and_marks_rate_limited():
                 pass
         s = await status_store.get("m")
         assert s.state.value == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_accepts_per_call_timeout():
+    captured: dict = {}
+    transport = _ok_transport(captured)
+    async with httpx.AsyncClient(transport=transport) as http:
+        status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
+        client = OpenRouterClient(
+            http_client=http,
+            api_key="k",
+            base_url="http://x",
+            http_referer="",
+            x_title="t",
+            status_store=status_store,
+            concurrency=8,
+            timeout_seconds=30.0,
+        )
+        # Should not raise TypeError on `timeout` kwarg
+        await client.chat_completion(model="m", messages=[{"role": "user", "content": "hi"}], timeout=99.0)

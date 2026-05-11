@@ -79,8 +79,8 @@ async def test_pipeline_routes_rewrite_through_core_and_generation_through_gen()
     assert rewrite_calls and all(rt.model_id == "menon-core" for rt in rewrite_calls)
     assert rerank_calls and all(rt.model_id == "menon-core" for rt in rerank_calls)
 
-    # generation uses runtime.generation
+    # generation uses runtime.generation; generate_text calls chat_completion_text (not streaming)
     answer = await pipeline.generate_text(outcome=outcome, runtime=pipeline_runtime)
-    assert answer == "answer"  # CaptureRouter streams "answer"
+    assert answer == "rewrite-out"  # CaptureRouter.chat_completion_text returns this
     # Last call recorded should be the generation call with provider=openrouter
     assert router.calls[-1][1].provider == "openrouter"
