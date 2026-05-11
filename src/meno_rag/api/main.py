@@ -65,12 +65,15 @@ async def lifespan(app: FastAPI):
     pipeline = None
     try:
         resources = await asyncio.to_thread(load_stand_resources, settings)
-        await asyncio.to_thread(
-            vectorize_search_query,
-            "прогрев",
-            resources.embedder[0],
-            resources.embedder[1],
-        )
+        try:
+            await asyncio.to_thread(
+                vectorize_search_query,
+                "прогрев",
+                resources.embedder[0],
+                resources.embedder[1],
+            )
+        except Exception as exc:
+            logger.warning("frida_warmup_failed", error=str(exc))
         pipeline = StandRagPipeline(
             settings=settings,
             resources=resources,
