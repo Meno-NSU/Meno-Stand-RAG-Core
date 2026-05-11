@@ -55,3 +55,13 @@ async def test_mark_ok_clears_failures(redis):
     s = await store.get("m")
     assert s.state == ModelStatusState.AVAILABLE
     assert s.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_list_all_returns_marked_models(redis):
+    store = RedisModelStatusStore(redis=redis, backoff_seconds=60, backoff_max_seconds=3600)
+    await store.mark_unreachable("model-a", error="timeout")
+    until = datetime.now(timezone.utc) + timedelta(seconds=100)
+    await store.mark_rate_limited("model-b", until=until, error="429")
+    items = await store.list_all()
+    assert set(items.keys()) == {"model-a", "model-b"}
