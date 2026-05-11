@@ -10,12 +10,25 @@ class Base(DeclarativeBase):
 
 
 class Database:
-    def __init__(self, database_url: str):
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        pool_size: int | None = None,
+        max_overflow: int | None = None,
+    ):
         if database_url.startswith("sqlite+aiosqlite:///"):
             sqlite_path = database_url.removeprefix("sqlite+aiosqlite:///")
             if sqlite_path and sqlite_path != ":memory:":
                 Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-        self.engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
+            engine_kwargs: dict = {"pool_pre_ping": True}
+        else:
+            engine_kwargs = {"pool_pre_ping": True}
+            if pool_size is not None:
+                engine_kwargs["pool_size"] = pool_size
+            if max_overflow is not None:
+                engine_kwargs["max_overflow"] = max_overflow
+        self.engine: AsyncEngine = create_async_engine(database_url, **engine_kwargs)
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 
     async def init_models(self) -> None:

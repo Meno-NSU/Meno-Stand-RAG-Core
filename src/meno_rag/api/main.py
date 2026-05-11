@@ -6,11 +6,13 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 import structlog
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy import text
 
 from meno_rag.api import arena
 from meno_rag.api.events import (
@@ -22,6 +24,7 @@ from meno_rag.api.events import (
     sse_data,
     sse_event,
 )
+from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings
 from meno_rag.db import repositories
 from meno_rag.db.session import Database
@@ -30,6 +33,7 @@ from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest, ClearHistoryRequest, ClearHistoryResponse
 from meno_rag.stand.pipeline import ModelRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
+from meno_rag.stand.search import vectorize_search_query
 
 logger = structlog.get_logger(__name__)
 
@@ -37,16 +41,43 @@ KB_ID = "nsu-stand-faiss-bm25"
 KB_NAME = "НГУ: стендовый FAISS+BM25"
 RAG_ENGINE_ID = "stand_rag"
 
+_HEALTH_QUERY = text("SELECT 1")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
-    database = Database(settings.database_url)
+    database = Database(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     await database.init_models()
+
+    http_client = httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_connections=settings.httpx_max_connections,
+            max_keepalive_connections=settings.httpx_max_keepalive,
+        ),
+        timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
+    )
+
+    redis = None
+    try:
+        redis = make_redis(settings.redis_url)
+        if redis is not None:
+            await redis.ping()
+            logger.info("redis_connected", url=settings.redis_url)
+    except Exception as exc:
+        logger.warning("redis_connect_failed_using_inprocess_lock", error=str(exc))
+        redis = None
+
+    arena_lock = ArenaLock(redis=redis)
 
     registry = VLLMRegistry(
         settings.vllm_endpoint_list,
+        http_client=http_client,
         timeout=settings.model_discovery_timeout_seconds,
         cache_ttl=settings.model_cache_ttl_seconds,
     )
@@ -59,25 +90,41 @@ async def lifespan(app: FastAPI):
     pipeline = None
     try:
         resources = await asyncio.to_thread(load_stand_resources, settings)
+        try:
+            await asyncio.to_thread(
+                vectorize_search_query,
+                "прогрев",
+                resources.embedder[0],
+                resources.embedder[1],
+            )
+        except Exception as exc:
+            logger.warning("frida_warmup_failed", error=str(exc))
         pipeline = StandRagPipeline(
             settings=settings,
             resources=resources,
-            llm_client=VLLMClient(api_key=settings.openai_api_key),
+            llm_client=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
             rewrite_semaphore=asyncio.Semaphore(settings.rewrite_concurrency),
             rerank_semaphore=asyncio.Semaphore(settings.rerank_concurrency),
             generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
+            embed_semaphore=asyncio.Semaphore(settings.embed_concurrency),
         )
     except Exception as exc:
         logger.exception("stand_resources_load_failed", error=str(exc))
 
     app.state.settings = settings
     app.state.database = database
+    app.state.http_client = http_client
     app.state.vllm_registry = registry
     app.state.resources = resources
     app.state.pipeline = pipeline
+    app.state.redis = redis
+    app.state.arena_lock = arena_lock
 
     yield
 
+    if redis is not None:
+        await redis.close()
+    await http_client.aclose()
     await database.close()
 
 
@@ -97,11 +144,50 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+    structlog.contextvars.bind_contextvars(request_id=request_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
+    finally:
+        structlog.contextvars.unbind_contextvars("request_id")
+
+
 @app.get("/healthz")
 async def healthz(request: Request):
+    state = request.app.state
+    pipeline = state.pipeline
+    db_status = "ok"
+    try:
+        async with state.database.engine.connect() as conn:
+            await conn.execute(_HEALTH_QUERY)
+    except Exception:
+        db_status = "error"
+
+    redis_status: str
+    if state.redis is None:
+        redis_status = "disabled"
+    else:
+        try:
+            await state.redis.ping()
+            redis_status = "ok"
+        except Exception:
+            redis_status = "error"
+
+    embedder_device = "unknown"
+    if state.resources is not None:
+        embedder_device = state.resources.embedder[2]
+
+    overall = "ok" if pipeline is not None and db_status == "ok" else "degraded"
     return {
-        "status": "ok" if request.app.state.pipeline is not None else "degraded",
-        "rag_ready": request.app.state.pipeline is not None,
+        "status": overall,
+        "rag_ready": pipeline is not None,
+        "db": db_status,
+        "redis": redis_status,
+        "embedder_device": embedder_device,
         "knowledge_base_id": KB_ID,
     }
 
@@ -176,7 +262,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     created_ts = int(time.time())
     session_id = payload.user or f"session-{completion_id}"
     max_tokens = payload.max_tokens or settings.max_output_tokens
-    temperature = settings.generation_temperature if payload.temperature is None else payload.temperature
+    temperature = payload.temperature  # pipeline applies QaSampling.temperature when None
 
     if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
         return _error_response(

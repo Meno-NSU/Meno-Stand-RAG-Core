@@ -82,3 +82,14 @@ def test_prepare_context_defaults_missing_quality_score_to_one():
 def test_rerank_merge_score_preserves_zero_filtering():
     assert rerank_merge_score(0.5, 0.0, 0.8) == 0.0
     assert rerank_merge_score(0.5, 0.75, 0.8) == pytest.approx(0.7)
+
+
+def test_score_from_json_response_returns_numeric_label():
+    """meno_stand rerank_utils.py:138 returns float(label) — preserves label=1 chunks
+    (with rerank_score=1.0 they pass the >0 filter) and weights label=2 strongly."""
+
+    from meno_rag.stand.rerank import score_from_json_response
+
+    assert score_from_json_response('{"label": "0"}') == 0.0
+    assert score_from_json_response('{"label": "1"}') == 1.0
+    assert score_from_json_response('{"label": "2"}') == 2.0

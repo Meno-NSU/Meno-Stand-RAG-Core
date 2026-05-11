@@ -40,9 +40,18 @@ class Settings(BaseSettings):
     rerank_timeout_seconds: float = Field(default=120.0, validation_alias="RERANK_TIMEOUT_SECONDS")
     generation_timeout_seconds: float = Field(default=240.0, validation_alias="GENERATION_TIMEOUT_SECONDS")
 
-    rewrite_concurrency: int = Field(default=8, validation_alias="REWRITE_CONCURRENCY")
-    rerank_concurrency: int = Field(default=4, validation_alias="RERANK_CONCURRENCY")
-    generation_concurrency: int = Field(default=8, validation_alias="GENERATION_CONCURRENCY")
+    rewrite_concurrency: int = Field(default=32, validation_alias="REWRITE_CONCURRENCY")
+    rerank_concurrency: int = Field(default=64, validation_alias="RERANK_CONCURRENCY")
+    generation_concurrency: int = Field(default=32, validation_alias="GENERATION_CONCURRENCY")
+    embed_concurrency: int = Field(default=8, validation_alias="EMBED_CONCURRENCY")
+
+    frida_device: str = Field(default="auto", validation_alias="FRIDA_DEVICE")
+
+    db_pool_size: int = Field(default=20, validation_alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=10, validation_alias="DB_MAX_OVERFLOW")
+
+    httpx_max_connections: int = Field(default=200, validation_alias="HTTPX_MAX_CONNECTIONS")
+    httpx_max_keepalive: int = Field(default=100, validation_alias="HTTPX_MAX_KEEPALIVE")
 
     redis_url: Optional[str] = Field(default=None, validation_alias="REDIS_URL")
 

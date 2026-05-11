@@ -39,14 +39,14 @@ def vectorize_search_query(
         return_tensors="pt",
     )
 
-    with torch.no_grad():
+    with torch.inference_mode():
         outputs = emb_model(**tokenized_inputs.to(emb_model.device))
-    embeddings = frida_pool(
-        outputs.last_hidden_state.to(torch.float32),
-        tokenized_inputs["attention_mask"],
-        pooling_method="cls",
-    )
-    embeddings = F.normalize(embeddings, p=2, dim=1)
+        embeddings = frida_pool(
+            outputs.last_hidden_state.to(torch.float32),
+            tokenized_inputs["attention_mask"].to(emb_model.device),
+            pooling_method="cls",
+        )
+        embeddings = F.normalize(embeddings, p=2, dim=1)
     return embeddings.cpu().numpy()
 
 
@@ -55,7 +55,7 @@ def find_relevant_chunks(
     retriever: Any,
     max_num_chunks: int,
     stemmer: Optional[SnowballStemmer] = None,
-    embedder: Optional[tuple[PreTrainedTokenizer | PreTrainedTokenizerFast, T5EncoderModel]] = None,
+    embedder: Optional[tuple[PreTrainedTokenizer | PreTrainedTokenizerFast, T5EncoderModel, str]] = None,
 ) -> list[tuple[int, float]]:
     relevant_chunks: list[tuple[int, float]] = []
     if isinstance(retriever, BM25):

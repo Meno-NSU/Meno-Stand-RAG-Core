@@ -71,6 +71,75 @@ To print the temporary direct download URL without downloading the archive:
 python3 scripts/download_knowledge.py --resolve-only
 ```
 
+## Production setup (50–200 concurrent users)
+
+The backend runs inside the existing Jupyter-Lab host — no Docker layer. For
+production-lite load we use PostgreSQL for persistence and Redis for the
+arena vote lock, plus FRIDA on GPU.
+
+### PostgreSQL
+
+Inside the Jupyter-Lab container (or on a separate host the container can
+reach), install PostgreSQL and create the database:
+
+```
+apt-get install -y postgresql-16
+service postgresql start
+sudo -u postgres createuser -P meno_rag    # set a password
+sudo -u postgres createdb -O meno_rag meno_rag
+```
+
+Set:
+```
+DATABASE_URL=postgresql+asyncpg://meno_rag:<password>@127.0.0.1:5432/meno_rag
+```
+
+`scripts/run_backend.sh start` runs `alembic upgrade head` automatically.
+
+### Redis
+
+```
+apt-get install -y redis-server
+redis-server --daemonize yes
+```
+
+Set:
+```
+REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+If `REDIS_URL` is empty, the backend falls back to an in-process lock for arena
+votes (correct for a single backend process, not for multi-worker setups).
+
+### GPU for the FRIDA embedder
+
+If CUDA is exposed to the Jupyter-Lab container, `FRIDA_DEVICE=auto` is enough:
+the backend logs the resolved device at startup. To pin a specific GPU set
+`FRIDA_DEVICE=cuda:0`. Without CUDA, the embedder runs on CPU — functional but
+much slower under load.
+
+### Tuning concurrency
+
+The defaults in `example.env` target ~50–200 concurrent users on a single backend
+process. Raise/lower based on your vLLM throughput and FRIDA VRAM budget:
+
+- `REWRITE_CONCURRENCY` — cheap; raise freely.
+- `RERANK_CONCURRENCY` — bounded by vLLM batch capacity; 64 works for most.
+- `GENERATION_CONCURRENCY` — bounded by vLLM context concurrency.
+- `EMBED_CONCURRENCY` — bounded by GPU VRAM. Lower if you see OOM.
+
+### Operating the backend
+
+The existing `scripts/run_backend.sh` is the entrypoint:
+
+```
+./scripts/run_backend.sh start     # alembic upgrade + uvicorn under nohup
+./scripts/run_backend.sh status
+./scripts/run_backend.sh logs
+./scripts/run_backend.sh stop
+./scripts/run_backend.sh restart
+```
+
 ## API
 
 - `GET /healthz`

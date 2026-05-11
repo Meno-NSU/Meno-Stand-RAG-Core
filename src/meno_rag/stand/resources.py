@@ -8,6 +8,7 @@ from typing import Any
 import bm25s
 import faiss
 import structlog
+import torch
 from nltk.stem.snowball import SnowballStemmer
 from transformers import AutoTokenizer, T5EncoderModel
 
@@ -24,9 +25,15 @@ class StandResources:
     faiss_retriever: Any
     bm25_retriever: Any
     stemmer: SnowballStemmer
-    embedder: tuple[Any, Any]
+    embedder: tuple[Any, Any, str]  # (tokenizer, model, device_str)
     abbreviations: dict[str, dict[str, str | list[str]]]
     missing_quality_count: int
+
+
+def _resolve_device(requested: str) -> str:
+    if requested == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return requested
 
 
 def load_stand_resources(settings: Settings) -> StandResources:
@@ -40,9 +47,9 @@ def load_stand_resources(settings: Settings) -> StandResources:
 
     bm25_retriever = bm25s.BM25.load(str(settings.bm25_index_dir), load_corpus=False)
     stemmer = SnowballStemmer("russian")
+    device = _resolve_device(settings.frida_device)
     tokenizer = AutoTokenizer.from_pretrained(settings.frida_embedder_name)
-    model = T5EncoderModel.from_pretrained(settings.frida_embedder_name).cpu()
-    model.eval()
+    model = T5EncoderModel.from_pretrained(settings.frida_embedder_name).to(device).eval()
     abbreviations = load_abbreviations(settings.abbreviations_path)
 
     logger.info(
@@ -52,6 +59,7 @@ def load_stand_resources(settings: Settings) -> StandResources:
         faiss_vectors=int(faiss_retriever.ntotal),
         faiss_nprobe=int(getattr(faiss_retriever, "nprobe", 0)),
         missing_quality_count=missing_quality_count,
+        embedder_device=device,
     )
     return StandResources(
         documents=documents,
@@ -59,7 +67,7 @@ def load_stand_resources(settings: Settings) -> StandResources:
         faiss_retriever=faiss_retriever,
         bm25_retriever=bm25_retriever,
         stemmer=stemmer,
-        embedder=(tokenizer, model),
+        embedder=(tokenizer, model, device),
         abbreviations=abbreviations,
         missing_quality_count=missing_quality_count,
     )
