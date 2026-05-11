@@ -24,6 +24,12 @@ from meno_rag.api.events import (
     sse_data,
     sse_event,
 )
+from meno_rag.api.runtime_resolver import (
+    CoreModelUnavailableError,
+    ModelRateLimitedError,
+    ModelUnreachableError,
+    resolve_pipeline_runtime,
+)
 from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings
 from meno_rag.db import repositories
@@ -35,7 +41,7 @@ from meno_rag.llm.router import LLMRouter
 from meno_rag.llm.status import InMemoryModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest, ClearHistoryRequest, ClearHistoryResponse
-from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StandRagPipeline
+from meno_rag.stand.pipeline import PipelineRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
 from meno_rag.stand.search import vectorize_search_query
 
@@ -329,6 +335,12 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         runtime = await _resolve_runtime(request.app, payload.model)
     except ValueError as exc:
         return _error_response(400, str(exc), "model_not_found", param="model")
+    except ModelRateLimitedError as exc:
+        return _model_rate_limited_response(exc)
+    except ModelUnreachableError as exc:
+        return _model_unreachable_response(exc)
+    except CoreModelUnavailableError:
+        return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created_ts = int(time.time())
@@ -374,15 +386,16 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
 
 async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> PipelineRuntime:
     settings: Settings = app.state.settings
-    registry: VLLMRegistry = app.state.vllm_registry
-    model_id, base_url = await registry.resolve_model(requested_model, settings.default_model)
-    if base_url is None:
-        endpoints = settings.vllm_endpoint_list
-        if not endpoints:
-            raise ValueError("No VLLM_ENDPOINTS configured.")
-        base_url = f"{endpoints[0]}/v1"
-    rt = ModelRuntime(provider="vllm", model_id=model_id, base_url=base_url)
-    return PipelineRuntime.uniform(rt)
+    return await resolve_pipeline_runtime(
+        requested_model=requested_model,
+        vllm_registry=app.state.vllm_registry,
+        openrouter_registry=app.state.openrouter_registry,
+        status_store=app.state.model_status_store,
+        rag_rewrite_rerank_model=settings.rag_rewrite_rerank_model,
+        openrouter_base_url=settings.openrouter_base_url,
+        configured_default=settings.default_model,
+        vllm_endpoint_list=settings.vllm_endpoint_list,
+    )
 
 
 async def _non_stream_response(
@@ -669,6 +682,35 @@ def _error_response(status_code: int, message: str, code: str, param: str | None
                 "type": "invalid_request_error" if status_code < 500 else "server_error",
                 "code": code,
                 "param": param,
+            }
+        },
+    )
+
+
+def _model_rate_limited_response(exc: ModelRateLimitedError) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": {
+                "message": f"Model '{exc.model_id}' is rate-limited.",
+                "type": "model_rate_limited",
+                "code": "model_rate_limited",
+                "retry_after_sec": exc.retry_after_sec,
+                "until": exc.until.isoformat(),
+            }
+        },
+    )
+
+
+def _model_unreachable_response(exc: ModelUnreachableError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": {
+                "message": f"Model '{exc.model_id}' is unreachable.",
+                "type": "model_unreachable",
+                "code": "model_unreachable",
+                "until": exc.until.isoformat(),
             }
         },
     )
