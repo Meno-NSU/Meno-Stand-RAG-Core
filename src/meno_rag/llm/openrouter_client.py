@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -122,6 +123,9 @@ class OpenRouterClient:
         self, *, model: str, payload: dict[str, Any], stream: bool, timeout: float | None = None
     ) -> dict[str, Any]:
         effective_timeout = timeout if timeout is not None else self._timeout
+        log = logger.bind(model_provider="openrouter", model_id=model)
+        log.info("or_request_started")
+        started = time.perf_counter()
         async with self._semaphore:
             url = f"{self._base_url}/chat/completions"
             try:
@@ -139,6 +143,8 @@ class OpenRouterClient:
             except httpx.HTTPStatusError as exc:
                 await self._status_store.mark_unreachable(model, error=f"http_{response.status_code}")
                 raise OpenRouterUnreachableError(model_id=model, cause=f"http_{response.status_code}") from exc
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            log.info("or_request_completed", or_status_code=response.status_code, or_duration_ms=duration_ms)
             await self._status_store.mark_ok(model)
             return response.json()
 
@@ -148,11 +154,23 @@ class OpenRouterClient:
         reset_at, retry_after = parse_rate_limit_headers(dict(response.headers))
         if reset_at is None:
             reset_at = datetime.now(timezone.utc) + timedelta(seconds=60)
+        log = logger.bind(model_provider="openrouter", model_id=model)
+        log.warning(
+            "or_request_rate_limited",
+            rate_limit_reset=reset_at.isoformat() if reset_at else None,
+            retry_after_sec=retry_after,
+        )
         message = self._extract_error_message(response)
         await self._status_store.mark_rate_limited(model, until=reset_at, error="rate_limit_exceeded")
         raise OpenRouterRateLimitError(model_id=model, reset_at=reset_at, retry_after_sec=retry_after, message=message)
 
     async def _handle_5xx(self, model: str, response: httpx.Response) -> None:
+        log = logger.bind(model_provider="openrouter", model_id=model)
+        log.warning(
+            "or_request_unreachable",
+            or_status_code=response.status_code,
+            error_class=f"http_{response.status_code}",
+        )
         message = self._extract_error_message(response)
         await self._status_store.mark_unreachable(model, error=f"http_{response.status_code}")
         raise OpenRouterUnreachableError(model_id=model, cause=f"http_{response.status_code}: {message}")
