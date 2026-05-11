@@ -29,6 +29,7 @@ from meno_rag.stand.rewriting import (
     parse_rewritten_queries,
     prepare_prompt_for_rewriting,
 )
+from meno_rag.stand.sampling import RewriteSampling
 from meno_rag.stand.search import combine_relevant_chunks, find_relevant_chunks
 
 logger = structlog.get_logger(__name__)
@@ -236,13 +237,15 @@ class StandRagPipeline:
         )
         if not input_messages:
             return []
+        sampling = RewriteSampling()
         async with self.rewrite_semaphore:
             rewritten = await self.llm_client.chat_completion_text(
                 base_url=runtime.base_url,
                 model=runtime.model_id,
                 messages=input_messages,
-                max_tokens=512,
-                temperature=0.0,
+                max_tokens=sampling.max_tokens,
+                temperature=sampling.temperature,
+                seed=sampling.seed,
                 timeout=self.settings.rewrite_timeout_seconds,
             )
         return parse_rewritten_queries(rewritten)
