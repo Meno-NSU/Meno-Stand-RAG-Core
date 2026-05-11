@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("torch")
 pytest.importorskip("faiss")
 pytest.importorskip("bm25s")
 pytest.importorskip("transformers")
@@ -30,6 +29,7 @@ async def test_pipeline_snapshot_matches_golden(snapshot_pipeline, snapshot_ques
         "context": outcome.context,
         "qa_user_prompt": outcome.qa_messages[-1]["content"],
         "stage_keys": sorted(outcome.stage_durations_ms.keys()),
+        "stage_details": outcome.stage_details,
     }
     expected = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
     assert actual == expected, "Snapshot drift. If intentional, regenerate snapshot."
