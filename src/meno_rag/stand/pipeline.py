@@ -41,6 +41,7 @@ StageSink = Callable[[StageEvent], Awaitable[None]]
 class ModelRuntime:
     model_id: str
     base_url: str
+    provider: str = "vllm"  # "vllm" | "openrouter"
 
 
 class StandRagPipeline:
