@@ -3,7 +3,14 @@
 - In-process asyncio.Lock per key — fallback when REDIS_URL is empty.
 
 The in-process fallback is correct for a single-process backend but loses
-cross-process serialization. Used in dev / smoke."""
+cross-process serialization. Used in dev / smoke.
+
+TTL caveat: the default ``ttl_seconds=30`` assumes the vote write (DB commit)
+completes well under that. If a vote stalls past TTL, a second worker may
+acquire the lock — the Lua-CAS release prevents stale-holder clobbering of
+the new owner's key, but two concurrent DB writes for the same model pair
+become possible. Raise ``ttl_seconds`` on the call site if you expect slow
+commits."""
 
 from __future__ import annotations
 
@@ -14,10 +21,14 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import structlog
+
 try:
     import redis.asyncio as aioredis  # type: ignore
 except ImportError:  # pragma: no cover
     aioredis = None  # type: ignore
+
+logger = structlog.get_logger(__name__)
 
 
 class ArenaLock:
@@ -28,7 +39,12 @@ class ArenaLock:
 
     @contextlib.asynccontextmanager
     async def acquire(
-        self, key: str, *, ttl_seconds: int = 30, retry_interval: float = 0.05
+        self,
+        key: str,
+        *,
+        ttl_seconds: int = 30,
+        wait_timeout: float = 15.0,
+        retry_interval: float = 0.05,
     ) -> AsyncIterator[None]:
         if self._redis is None:
             async with self._dict_lock:
@@ -39,7 +55,7 @@ class ArenaLock:
 
         redis_key = f"arena:vote:lock:{key}"
         token = uuid.uuid4().hex
-        deadline = time.monotonic() + ttl_seconds * 2
+        deadline = time.monotonic() + wait_timeout
         while True:
             acquired = await self._redis.set(redis_key, token, nx=True, ex=ttl_seconds)
             if acquired:
@@ -57,8 +73,8 @@ class ArenaLock:
             )
             try:
                 await self._redis.eval(release_script, 1, redis_key, token)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("arena_lock_release_failed", key=key, error=str(exc))
 
 
 def make_redis(url: str | None) -> Any | None:
@@ -66,4 +82,9 @@ def make_redis(url: str | None) -> Any | None:
         return None
     if aioredis is None:
         raise RuntimeError("redis package not installed but REDIS_URL is set")
-    return aioredis.Redis.from_url(url, decode_responses=True)
+    return aioredis.Redis.from_url(
+        url,
+        decode_responses=True,
+        socket_timeout=2.0,
+        socket_connect_timeout=2.0,
+    )
