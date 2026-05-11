@@ -48,11 +48,16 @@ async def lifespan(app: FastAPI):
     await database.init_models()
 
     http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0)
+        limits=httpx.Limits(
+            max_connections=settings.httpx_max_connections,
+            max_keepalive_connections=settings.httpx_max_keepalive,
+        ),
+        timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
     )
 
     registry = VLLMRegistry(
         settings.vllm_endpoint_list,
+        http_client=http_client,
         timeout=settings.model_discovery_timeout_seconds,
         cache_ttl=settings.model_cache_ttl_seconds,
     )

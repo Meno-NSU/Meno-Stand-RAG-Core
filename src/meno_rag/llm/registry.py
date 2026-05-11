@@ -12,8 +12,16 @@ ModelRecord = dict[str, Any]
 
 
 class VLLMRegistry:
-    def __init__(self, endpoints: list[str], *, timeout: float = 5.0, cache_ttl: float = 300.0) -> None:
+    def __init__(
+        self,
+        endpoints: list[str],
+        *,
+        http_client: httpx.AsyncClient,
+        timeout: float = 5.0,
+        cache_ttl: float = 300.0,
+    ) -> None:
         self._endpoints = [endpoint.rstrip("/") for endpoint in endpoints]
+        self._http = http_client
         self._timeout = timeout
         self._cache_ttl = cache_ttl
         self._cache: list[ModelRecord] = []
@@ -21,26 +29,25 @@ class VLLMRegistry:
 
     async def discover(self) -> list[ModelRecord]:
         models: list[ModelRecord] = []
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            for base_url in self._endpoints:
-                url = f"{base_url}/v1/models"
-                try:
-                    response = await client.get(url)
-                    response.raise_for_status()
-                    body = response.json()
-                    for model in body.get("data", []):
-                        models.append(
-                            {
-                                "id": model.get("id", "unknown"),
-                                "object": "model",
-                                "created": model.get("created", int(time.time())),
-                                "owned_by": model.get("owned_by", "vllm"),
-                                "endpoint": base_url,
-                            }
-                        )
-                    logger.info("vllm_models_discovered", endpoint=base_url, count=len(body.get("data", [])))
-                except Exception as exc:
-                    logger.warning("vllm_model_discovery_failed", endpoint=base_url, error=str(exc))
+        for base_url in self._endpoints:
+            url = f"{base_url}/v1/models"
+            try:
+                response = await self._http.get(url, timeout=self._timeout)
+                response.raise_for_status()
+                body = response.json()
+                for model in body.get("data", []):
+                    models.append(
+                        {
+                            "id": model.get("id", "unknown"),
+                            "object": "model",
+                            "created": model.get("created", int(time.time())),
+                            "owned_by": model.get("owned_by", "vllm"),
+                            "endpoint": base_url,
+                        }
+                    )
+                logger.info("vllm_models_discovered", endpoint=base_url, count=len(body.get("data", [])))
+            except Exception as exc:
+                logger.warning("vllm_model_discovery_failed", endpoint=base_url, error=str(exc))
         self._cache = models
         self._cache_ts = time.monotonic()
         return models
