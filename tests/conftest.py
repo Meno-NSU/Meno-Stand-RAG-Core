@@ -1,11 +1,3 @@
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
 import asyncio
 
 import pytest
@@ -22,7 +14,6 @@ async def snapshot_pipeline():
     if not settings.faiss_index_path.exists():
         pytest.skip("stand resources not present; skipping snapshot test")
     from meno_rag.stand.resources import load_stand_resources
-
     from tests._fake_llm import FakeLLMClient
 
     resources = load_stand_resources(settings)

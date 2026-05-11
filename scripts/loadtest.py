@@ -51,15 +51,20 @@ async def main() -> None:
     failures = [r for r in results if not isinstance(r, dict)]
 
     totals = [r["total_ms"] for r in successes]
-    print(json.dumps({
-        "concurrency": args.concurrency,
-        "successes": len(successes),
-        "failures": len(failures),
-        "total_ms_min": min(totals) if totals else None,
-        "total_ms_p50": statistics.median(totals) if totals else None,
-        "total_ms_p95": statistics.quantiles(totals, n=20)[18] if len(totals) >= 20 else None,
-        "total_ms_max": max(totals) if totals else None,
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "concurrency": args.concurrency,
+                "successes": len(successes),
+                "failures": len(failures),
+                "total_ms_min": min(totals) if totals else None,
+                "total_ms_p50": statistics.median(totals) if totals else None,
+                "total_ms_p95": statistics.quantiles(totals, n=20)[18] if len(totals) >= 20 else None,
+                "total_ms_max": max(totals) if totals else None,
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

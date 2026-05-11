@@ -68,8 +68,7 @@ class ArenaLock:
         finally:
             # Release only if we still own it (Lua script for atomicity).
             release_script = (
-                "if redis.call('get', KEYS[1]) == ARGV[1] then "
-                "return redis.call('del', KEYS[1]) else return 0 end"
+                "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
             )
             try:
                 await self._redis.eval(release_script, 1, redis_key, token)

@@ -297,9 +297,7 @@ class StandRagPipeline:
             scores = await asyncio.gather(*scoring)
             context_scores: list[float] = []
             for idx, (_, retrieval_score) in enumerate(candidates):
-                context_scores.append(
-                    rerank_merge_score(retrieval_score, scores[idx], self.settings.rerank_weight)
-                )
+                context_scores.append(rerank_merge_score(retrieval_score, scores[idx], self.settings.rerank_weight))
             ordered = list(
                 filter(
                     lambda it: it[1] > 0.0,
