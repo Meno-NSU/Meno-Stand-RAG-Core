@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from meno_rag.config import get_settings
-from meno_rag.stand.pipeline import ModelRuntime, StandRagPipeline
+from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StandRagPipeline
 
 
 def _make_pipeline(monkeypatch, captured: list[dict[str, Any]]) -> StandRagPipeline:
@@ -35,7 +35,7 @@ def _make_pipeline(monkeypatch, captured: list[dict[str, Any]]) -> StandRagPipel
     pipeline = StandRagPipeline(
         settings=settings,
         resources=resources_stub,
-        llm_client=_FakeClient(),
+        llm_router=_FakeClient(),
         rewrite_semaphore=asyncio.Semaphore(1),
         rerank_semaphore=asyncio.Semaphore(1),
         generation_semaphore=asyncio.Semaphore(1),
@@ -82,7 +82,7 @@ async def test_qa_generate_uses_seed(monkeypatch):
         stage_durations_ms={},
         stage_details={},
     )
-    runtime = ModelRuntime(model_id="x", base_url="http://x/v1")
+    runtime = PipelineRuntime.uniform(ModelRuntime(provider="vllm", model_id="x", base_url="http://x/v1"))
     await pipeline.generate_text(outcome=outcome, runtime=runtime)
 
     assert len(captured) == 1
@@ -104,7 +104,7 @@ async def test_qa_stream_passes_seed(monkeypatch):
     pipeline = StandRagPipeline(
         settings=settings,
         resources=None,
-        llm_client=_FakeClient(),
+        llm_router=_FakeClient(),
         rewrite_semaphore=asyncio.Semaphore(1),
         rerank_semaphore=asyncio.Semaphore(1),
         generation_semaphore=asyncio.Semaphore(1),
@@ -123,7 +123,7 @@ async def test_qa_stream_passes_seed(monkeypatch):
         stage_durations_ms={},
         stage_details={},
     )
-    runtime = ModelRuntime(model_id="x", base_url="http://x/v1")
+    runtime = PipelineRuntime.uniform(ModelRuntime(provider="vllm", model_id="x", base_url="http://x/v1"))
     async for _ in pipeline.stream_text(outcome=outcome, runtime=runtime):
         pass
 

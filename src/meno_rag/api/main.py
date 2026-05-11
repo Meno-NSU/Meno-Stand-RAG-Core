@@ -35,7 +35,7 @@ from meno_rag.llm.router import LLMRouter
 from meno_rag.llm.status import InMemoryModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest, ClearHistoryRequest, ClearHistoryResponse
-from meno_rag.stand.pipeline import ModelRuntime, StandRagPipeline
+from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
 from meno_rag.stand.search import vectorize_search_query
 
@@ -151,7 +151,7 @@ async def lifespan(app: FastAPI):
         pipeline = StandRagPipeline(
             settings=settings,
             resources=resources,
-            llm_client=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
+            llm_router=llm_router,
             rewrite_semaphore=asyncio.Semaphore(settings.rewrite_concurrency),
             rerank_semaphore=asyncio.Semaphore(settings.rerank_concurrency),
             generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
@@ -372,7 +372,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     )
 
 
-async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> ModelRuntime:
+async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> PipelineRuntime:
     settings: Settings = app.state.settings
     registry: VLLMRegistry = app.state.vllm_registry
     model_id, base_url = await registry.resolve_model(requested_model, settings.default_model)
@@ -381,14 +381,15 @@ async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> ModelRu
         if not endpoints:
             raise ValueError("No VLLM_ENDPOINTS configured.")
         base_url = f"{endpoints[0]}/v1"
-    return ModelRuntime(model_id=model_id, base_url=base_url)
+    rt = ModelRuntime(provider="vllm", model_id=model_id, base_url=base_url)
+    return PipelineRuntime.uniform(rt)
 
 
 async def _non_stream_response(
     *,
     request: Request,
     payload: ChatCompletionRequest,
-    runtime: ModelRuntime,
+    runtime: PipelineRuntime,
     completion_id: str,
     created_ts: int,
     session_id: str,
@@ -414,8 +415,8 @@ async def _non_stream_response(
             database=database,
             run_id=completion_id,
             session_id=session_id,
-            model=runtime.model_id,
-            endpoint=runtime.base_url,
+            model=runtime.generation.model_id,
+            endpoint=runtime.generation.base_url,
             question=outcome.question,
             answer=answer,
             outcome=outcome,
@@ -433,7 +434,7 @@ async def _non_stream_response(
         "id": completion_id,
         "object": "chat.completion",
         "created": created_ts,
-        "model": runtime.model_id,
+        "model": runtime.generation.model_id,
         "choices": [
             {
                 "index": 0,
@@ -457,7 +458,7 @@ async def _stream_response(
     *,
     request: Request,
     payload: ChatCompletionRequest,
-    runtime: ModelRuntime,
+    runtime: PipelineRuntime,
     completion_id: str,
     created_ts: int,
     session_id: str,
@@ -492,7 +493,10 @@ async def _stream_response(
 
         yield sse_data(
             openai_chunk(
-                completion_id=completion_id, created=created_ts, model=runtime.model_id, delta={"role": "assistant"}
+                completion_id=completion_id,
+                created=created_ts,
+                model=runtime.generation.model_id,
+                delta={"role": "assistant"},
             )
         )
 
@@ -504,7 +508,10 @@ async def _stream_response(
             answer_parts.append(token)
             yield sse_data(
                 openai_chunk(
-                    completion_id=completion_id, created=created_ts, model=runtime.model_id, delta={"content": token}
+                    completion_id=completion_id,
+                    created=created_ts,
+                    model=runtime.generation.model_id,
+                    delta={"content": token},
                 )
             )
         generation_ms = round((time.perf_counter() - gen_started) * 1000, 2)
@@ -512,7 +519,11 @@ async def _stream_response(
         yield StageEvent(stage=StageName.GENERATION, status=StageStatus.COMPLETED, duration_ms=generation_ms).to_sse()
 
         done_chunk = openai_chunk(
-            completion_id=completion_id, created=created_ts, model=runtime.model_id, delta={}, finish_reason="stop"
+            completion_id=completion_id,
+            created=created_ts,
+            model=runtime.generation.model_id,
+            delta={},
+            finish_reason="stop",
         )
         yield sse_data(done_chunk)
         total_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -524,8 +535,8 @@ async def _stream_response(
             database=database,
             run_id=completion_id,
             session_id=session_id,
-            model=runtime.model_id,
-            endpoint=runtime.base_url,
+            model=runtime.generation.model_id,
+            endpoint=runtime.generation.base_url,
             question=outcome.question,
             answer=answer,
             outcome=outcome,
@@ -537,7 +548,11 @@ async def _stream_response(
         error = str(exc)
         logger.exception("chat_stream_failed", request_id=completion_id, error=error)
         err_chunk = openai_chunk(
-            completion_id=completion_id, created=created_ts, model=runtime.model_id, delta={}, finish_reason="error"
+            completion_id=completion_id,
+            created=created_ts,
+            model=runtime.generation.model_id,
+            delta={},
+            finish_reason="error",
         )
         err_chunk["error"] = {"message": error, "type": "server_error"}
         yield sse_data(err_chunk)
@@ -616,7 +631,7 @@ async def _persist_failure(
     database: Database,
     run_id: str,
     session_id: str,
-    runtime: ModelRuntime,
+    runtime: PipelineRuntime,
     payload: ChatCompletionRequest,
     error: str,
     *,
@@ -632,8 +647,8 @@ async def _persist_failure(
             session,
             run_id=run_id,
             session_id=session_id,
-            model=runtime.model_id,
-            endpoint=runtime.base_url,
+            model=runtime.generation.model_id,
+            endpoint=runtime.generation.base_url,
             knowledge_base_id=KB_ID,
             user_question=question,
             search_queries=None,

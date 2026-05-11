@@ -11,7 +11,6 @@ import structlog
 
 from meno_rag.api.events import StageEvent, StageName, StageStatus
 from meno_rag.config import Settings
-from meno_rag.llm.client import VLLMClient
 from meno_rag.schemas import ChatMessage, PipelineOutcome
 from meno_rag.stand.context import prepare_context, references_to_sources
 from meno_rag.stand.dialogue_history import prepare_dialogue_history
@@ -64,7 +63,7 @@ class StandRagPipeline:
         *,
         settings: Settings,
         resources: StandResources,
-        llm_client: VLLMClient,
+        llm_router,  # LLMRouter, duck-typed to avoid circular import
         rewrite_semaphore: asyncio.Semaphore,
         rerank_semaphore: asyncio.Semaphore,
         generation_semaphore: asyncio.Semaphore,
@@ -72,7 +71,7 @@ class StandRagPipeline:
     ) -> None:
         self.settings = settings
         self.resources = resources
-        self.llm_client = llm_client
+        self.llm_router = llm_router
         self.rewrite_semaphore = rewrite_semaphore
         self.rerank_semaphore = rerank_semaphore
         self.generation_semaphore = generation_semaphore
@@ -82,7 +81,7 @@ class StandRagPipeline:
         self,
         *,
         messages: list[ChatMessage],
-        runtime: ModelRuntime,
+        runtime: PipelineRuntime,
         stage_sink: StageSink | None = None,
     ) -> PipelineOutcome:
         question, history = extract_question_and_history(messages)
@@ -111,7 +110,7 @@ class StandRagPipeline:
         search_queries = await self._timed_stage(
             StageName.QUERY_REWRITE,
             emit,
-            lambda: self._rewrite_question(question, prepared_dialogue_history, runtime),
+            lambda: self._rewrite_question(question, prepared_dialogue_history, runtime.core),
             stage_durations,
             stage_details,
         )
@@ -135,7 +134,7 @@ class StandRagPipeline:
         reranked_global_chunks = await self._timed_stage(
             StageName.RERANK,
             emit,
-            lambda: self._rerank(fused_batches, runtime),
+            lambda: self._rerank(fused_batches, runtime.core),
             stage_durations,
             stage_details,
         )
@@ -179,15 +178,14 @@ class StandRagPipeline:
         self,
         *,
         outcome: PipelineOutcome,
-        runtime: ModelRuntime,
+        runtime: PipelineRuntime,
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> str:
         sampling = QaSampling()
         async with self.generation_semaphore:
-            return await self.llm_client.chat_completion_text(
-                base_url=runtime.base_url,
-                model=runtime.model_id,
+            return await self.llm_router.chat_completion_text(
+                runtime=runtime.generation,
                 messages=outcome.qa_messages,
                 max_tokens=max_tokens or self.settings.max_output_tokens,
                 temperature=sampling.temperature if temperature is None else temperature,
@@ -199,15 +197,14 @@ class StandRagPipeline:
         self,
         *,
         outcome: PipelineOutcome,
-        runtime: ModelRuntime,
+        runtime: PipelineRuntime,
         max_tokens: int | None = None,
         temperature: float | None = None,
     ):
         sampling = QaSampling()
         async with self.generation_semaphore:
-            async for token in self.llm_client.stream_chat_completion(
-                base_url=runtime.base_url,
-                model=runtime.model_id,
+            async for token in self.llm_router.stream_chat_completion(
+                runtime=runtime.generation,
                 messages=outcome.qa_messages,
                 max_tokens=max_tokens or self.settings.max_output_tokens,
                 temperature=sampling.temperature if temperature is None else temperature,
@@ -260,9 +257,8 @@ class StandRagPipeline:
             return []
         sampling = RewriteSampling()
         async with self.rewrite_semaphore:
-            rewritten = await self.llm_client.chat_completion_text(
-                base_url=runtime.base_url,
-                model=runtime.model_id,
+            rewritten = await self.llm_router.chat_completion_text(
+                runtime=runtime,
                 messages=input_messages,
                 max_tokens=sampling.max_tokens,
                 temperature=sampling.temperature,
@@ -339,9 +335,8 @@ class StandRagPipeline:
         sampling = RerankSampling()
         async with self.rerank_semaphore:
             try:
-                response = await self.llm_client.chat_completion(
-                    base_url=runtime.base_url,
-                    model=runtime.model_id,
+                response = await self.llm_router.chat_completion(
+                    runtime=runtime,
                     messages=prompt,
                     max_tokens=sampling.max_tokens,
                     temperature=sampling.temperature,
@@ -355,9 +350,8 @@ class StandRagPipeline:
                 logger.warning("rerank_guided_choice_failed", chunk_id=chunk_id, error=str(exc))
                 # JSON fallback needs a multi-token budget for the {"label": "X"} envelope.
                 # Matches meno_stand rerank_utils.py:106-129.
-                response = await self.llm_client.chat_completion(
-                    base_url=runtime.base_url,
-                    model=runtime.model_id,
+                response = await self.llm_router.chat_completion(
+                    runtime=runtime,
                     messages=build_prompt(query, cur_doc, is_json=True),
                     max_tokens=20,
                     temperature=0.0,

@@ -56,7 +56,7 @@ async def test_rerank_runs_chunks_in_parallel(monkeypatch):
     pipeline = StandRagPipeline(
         settings=settings,
         resources=_StubResources(),
-        llm_client=fake,
+        llm_router=fake,
         rewrite_semaphore=asyncio.Semaphore(1),
         rerank_semaphore=asyncio.Semaphore(64),
         generation_semaphore=asyncio.Semaphore(1),
