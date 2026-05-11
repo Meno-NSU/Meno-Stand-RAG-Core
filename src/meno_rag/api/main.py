@@ -183,7 +183,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     created_ts = int(time.time())
     session_id = payload.user or f"session-{completion_id}"
     max_tokens = payload.max_tokens or settings.max_output_tokens
-    temperature = settings.generation_temperature if payload.temperature is None else payload.temperature
+    temperature = payload.temperature  # pipeline applies QaSampling.temperature when None
 
     if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
         return _error_response(

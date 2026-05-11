@@ -86,6 +86,7 @@ async def test_qa_generate_uses_seed(monkeypatch):
 
     assert len(captured) == 1
     assert captured[0]["seed"] == 42
+    assert captured[0]["temperature"] == 0.1
 
 
 @pytest.mark.asyncio
@@ -126,3 +127,4 @@ async def test_qa_stream_passes_seed(monkeypatch):
 
     assert len(captured) == 1
     assert captured[0]["seed"] == 42
+    assert captured[0]["temperature"] == 0.1
