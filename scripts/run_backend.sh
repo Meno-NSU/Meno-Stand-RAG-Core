@@ -60,6 +60,14 @@ start() {
         rm -f "$PID_FILE"
     fi
 
+    echo "Running alembic upgrade head..."
+    if [[ -x "$ROOT_DIR/.venv/bin/alembic" ]]; then
+        (cd "$ROOT_DIR" && "$ROOT_DIR/.venv/bin/alembic" upgrade head)
+    else
+        echo "Alembic not found at $ROOT_DIR/.venv/bin/alembic; skipping migrations."
+        echo "Run: uv sync --all-groups --frozen"
+    fi
+
     echo "Starting Meno RAG API in the background..."
     echo "Direct backend: http://${APP_HOST}:${APP_PORT}"
     echo "Meno-Web proxy endpoint: http://<meno-web-host>:${MENO_WEB_PORT}/v1"
