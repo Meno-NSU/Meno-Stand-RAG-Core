@@ -1,5 +1,8 @@
 """Settings fields and defaults — the public contract for env-based tuning."""
 
+from importlib import reload
+
+import meno_rag.config as config_module
 from meno_rag.config import Settings
 
 
@@ -26,12 +29,6 @@ def test_httpx_pool_defaults():
     s = Settings()
     assert s.httpx_max_connections == 200
     assert s.httpx_max_keepalive == 100
-
-
-import os
-from importlib import reload
-
-import meno_rag.config as config_module
 
 
 def test_openrouter_defaults_when_env_unset(monkeypatch):
@@ -67,3 +64,24 @@ def test_openrouter_featured_models_parsed_as_list(monkeypatch):
     reload(config_module)
     s = config_module.get_settings.__wrapped__()
     assert s.openrouter_featured_models_list == ["a/b:free", "c/d:free", "e/f:free"]
+
+
+def test_openrouter_enabled_false_when_key_empty(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    reload(config_module)
+    s = config_module.get_settings.__wrapped__()
+    assert s.openrouter_enabled is False
+
+
+def test_openrouter_enabled_false_for_whitespace_key(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "   ")
+    reload(config_module)
+    s = config_module.get_settings.__wrapped__()
+    assert s.openrouter_enabled is False
+
+
+def test_openrouter_enabled_true_when_key_set(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    reload(config_module)
+    s = config_module.get_settings.__wrapped__()
+    assert s.openrouter_enabled is True
