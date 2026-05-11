@@ -44,7 +44,11 @@ RAG_ENGINE_ID = "stand_rag"
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
-    database = Database(settings.database_url)
+    database = Database(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     await database.init_models()
 
     http_client = httpx.AsyncClient(
