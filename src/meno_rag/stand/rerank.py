@@ -56,11 +56,12 @@ def score_from_logprobs(choice: dict[str, Any]) -> float:
 
 
 def score_from_json_response(content: str) -> float:
+    """Mirrors meno_stand rerank_utils.py:138 — return the raw numeric label
+    (0.0, 1.0, or 2.0). Combined with rerank_merge_score (α=0.8), label=1
+    chunks survive the >0 filter and label=2 chunks dominate ordering."""
+
     parsed = json.loads(content.strip())
-    label = str(parsed["label"]).strip()
-    if label == "2":
-        return 1.0
-    return 0.0
+    return float(parsed["label"])
 
 
 def rerank_merge_score(retrieval_score: float, rerank_score: float, alpha: float) -> float:
