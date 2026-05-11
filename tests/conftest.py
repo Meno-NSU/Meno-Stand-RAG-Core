@@ -33,6 +33,7 @@ async def snapshot_pipeline():
         rewrite_semaphore=asyncio.Semaphore(1),
         rerank_semaphore=asyncio.Semaphore(1),
         generation_semaphore=asyncio.Semaphore(1),
+        embed_semaphore=asyncio.Semaphore(1),
     )
     runtime = ModelRuntime(model_id="fake-model", base_url="http://fake/v1")
     return pipeline, runtime

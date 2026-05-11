@@ -31,6 +31,7 @@ from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest, ClearHistoryRequest, ClearHistoryResponse
 from meno_rag.stand.pipeline import ModelRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
+from meno_rag.stand.search import vectorize_search_query
 
 logger = structlog.get_logger(__name__)
 
@@ -64,6 +65,12 @@ async def lifespan(app: FastAPI):
     pipeline = None
     try:
         resources = await asyncio.to_thread(load_stand_resources, settings)
+        await asyncio.to_thread(
+            vectorize_search_query,
+            "прогрев",
+            resources.embedder[0],
+            resources.embedder[1],
+        )
         pipeline = StandRagPipeline(
             settings=settings,
             resources=resources,
@@ -71,6 +78,7 @@ async def lifespan(app: FastAPI):
             rewrite_semaphore=asyncio.Semaphore(settings.rewrite_concurrency),
             rerank_semaphore=asyncio.Semaphore(settings.rerank_concurrency),
             generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
+            embed_semaphore=asyncio.Semaphore(settings.embed_concurrency),
         )
     except Exception as exc:
         logger.exception("stand_resources_load_failed", error=str(exc))

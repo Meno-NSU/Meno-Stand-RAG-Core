@@ -39,6 +39,7 @@ def _make_pipeline(monkeypatch, captured: list[dict[str, Any]]) -> StandRagPipel
         rewrite_semaphore=asyncio.Semaphore(1),
         rerank_semaphore=asyncio.Semaphore(1),
         generation_semaphore=asyncio.Semaphore(1),
+        embed_semaphore=asyncio.Semaphore(1),
     )
     return pipeline
 
@@ -107,6 +108,7 @@ async def test_qa_stream_passes_seed(monkeypatch):
         rewrite_semaphore=asyncio.Semaphore(1),
         rerank_semaphore=asyncio.Semaphore(1),
         generation_semaphore=asyncio.Semaphore(1),
+        embed_semaphore=asyncio.Semaphore(1),
     )
 
     from meno_rag.schemas import PipelineOutcome

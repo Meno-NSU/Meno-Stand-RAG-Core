@@ -53,6 +53,7 @@ class StandRagPipeline:
         rewrite_semaphore: asyncio.Semaphore,
         rerank_semaphore: asyncio.Semaphore,
         generation_semaphore: asyncio.Semaphore,
+        embed_semaphore: asyncio.Semaphore,
     ) -> None:
         self.settings = settings
         self.resources = resources
@@ -60,6 +61,7 @@ class StandRagPipeline:
         self.rewrite_semaphore = rewrite_semaphore
         self.rerank_semaphore = rerank_semaphore
         self.generation_semaphore = generation_semaphore
+        self.embed_semaphore = embed_semaphore
 
     async def prepare(
         self,
@@ -257,14 +259,15 @@ class StandRagPipeline:
     async def _retrieve(self, search_queries: list[str]) -> list[dict[str, Any]]:
         batches: list[dict[str, Any]] = []
         for query in search_queries:
-            dense = await asyncio.to_thread(
-                find_relevant_chunks,
-                query,
-                self.resources.faiss_retriever,
-                self.settings.top_k,
-                None,
-                self.resources.embedder,
-            )
+            async with self.embed_semaphore:
+                dense = await asyncio.to_thread(
+                    find_relevant_chunks,
+                    query,
+                    self.resources.faiss_retriever,
+                    self.settings.top_k,
+                    None,
+                    self.resources.embedder,
+                )
             lexical = await asyncio.to_thread(
                 find_relevant_chunks,
                 query,
