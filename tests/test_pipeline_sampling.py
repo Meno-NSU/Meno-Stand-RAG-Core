@@ -62,3 +62,67 @@ async def test_rewrite_uses_meno_stand_sampling(monkeypatch):
     assert call["max_tokens"] == 1024
     assert call["temperature"] == 0.1
     assert call["seed"] == 42
+
+
+@pytest.mark.asyncio
+async def test_qa_generate_uses_seed(monkeypatch):
+    captured: list[dict[str, Any]] = []
+    pipeline = _make_pipeline(monkeypatch, captured)
+
+    from meno_rag.schemas import PipelineOutcome
+
+    outcome = PipelineOutcome(
+        question="q",
+        prepared_dialogue_history="",
+        search_queries=[],
+        context="",
+        sources=[],
+        qa_messages=[{"role": "user", "content": "answer me"}],
+        stage_durations_ms={},
+        stage_details={},
+    )
+    runtime = ModelRuntime(model_id="x", base_url="http://x/v1")
+    await pipeline.generate_text(outcome=outcome, runtime=runtime)
+
+    assert len(captured) == 1
+    assert captured[0]["seed"] == 42
+
+
+@pytest.mark.asyncio
+async def test_qa_stream_passes_seed(monkeypatch):
+    captured: list[dict[str, Any]] = []
+
+    class _FakeClient:
+        async def stream_chat_completion(self, **kwargs):
+            captured.append(kwargs)
+            if False:  # pragma: no cover
+                yield ""
+
+    settings = get_settings()
+    pipeline = StandRagPipeline(
+        settings=settings,
+        resources=None,
+        llm_client=_FakeClient(),
+        rewrite_semaphore=asyncio.Semaphore(1),
+        rerank_semaphore=asyncio.Semaphore(1),
+        generation_semaphore=asyncio.Semaphore(1),
+    )
+
+    from meno_rag.schemas import PipelineOutcome
+
+    outcome = PipelineOutcome(
+        question="q",
+        prepared_dialogue_history="",
+        search_queries=[],
+        context="",
+        sources=[],
+        qa_messages=[{"role": "user", "content": "answer me"}],
+        stage_durations_ms={},
+        stage_details={},
+    )
+    runtime = ModelRuntime(model_id="x", base_url="http://x/v1")
+    async for _ in pipeline.stream_text(outcome=outcome, runtime=runtime):
+        pass
+
+    assert len(captured) == 1
+    assert captured[0]["seed"] == 42

@@ -29,7 +29,7 @@ from meno_rag.stand.rewriting import (
     parse_rewritten_queries,
     prepare_prompt_for_rewriting,
 )
-from meno_rag.stand.sampling import RewriteSampling
+from meno_rag.stand.sampling import QaSampling, RewriteSampling
 from meno_rag.stand.search import combine_relevant_chunks, find_relevant_chunks
 
 logger = structlog.get_logger(__name__)
@@ -166,13 +166,15 @@ class StandRagPipeline:
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> str:
+        sampling = QaSampling()
         async with self.generation_semaphore:
             return await self.llm_client.chat_completion_text(
                 base_url=runtime.base_url,
                 model=runtime.model_id,
                 messages=outcome.qa_messages,
                 max_tokens=max_tokens or self.settings.max_output_tokens,
-                temperature=self.settings.generation_temperature if temperature is None else temperature,
+                temperature=sampling.temperature if temperature is None else temperature,
+                seed=sampling.seed,
                 timeout=self.settings.generation_timeout_seconds,
             )
 
@@ -184,13 +186,15 @@ class StandRagPipeline:
         max_tokens: int | None = None,
         temperature: float | None = None,
     ):
+        sampling = QaSampling()
         async with self.generation_semaphore:
             async for token in self.llm_client.stream_chat_completion(
                 base_url=runtime.base_url,
                 model=runtime.model_id,
                 messages=outcome.qa_messages,
                 max_tokens=max_tokens or self.settings.max_output_tokens,
-                temperature=self.settings.generation_temperature if temperature is None else temperature,
+                temperature=sampling.temperature if temperature is None else temperature,
+                seed=sampling.seed,
                 timeout=self.settings.generation_timeout_seconds,
             ):
                 yield token
