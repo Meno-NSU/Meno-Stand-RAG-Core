@@ -264,8 +264,11 @@ Replace magic numbers in `pipeline.py` with named meno_stand-canonical parameter
 # tests/test_sampling_constants.py
 """Sampling parameters are pipeline canon. Drift here means we no longer match
 meno_stand. Tests assert the exact values from
-/Users/sckwoky/Projects/meno_stand/code/chat.py:184-189 and
-/Users/sckwoky/Projects/meno_stand/code/rerank_utils/rerank_utils.py:172-176."""
+/Users/sckwoky/Projects/meno_stand/code/chat.py:184-189 and the OpenAI HTTP
+API rerank path at
+/Users/sckwoky/Projects/meno_stand/code/rerank_utils/rerank_utils.py:90-98
+(RAG-Core does not use the vLLM-direct path at lines 172-176, which encodes
+logprobs=20)."""
 
 
 def test_rewrite_sampling_matches_meno_stand():
@@ -321,8 +324,10 @@ Expected: ModuleNotFoundError (module does not exist).
 SOURCE OF TRUTH:
 - Rewrite + QA: /Users/sckwoky/Projects/meno_stand/code/chat.py:184-189
   (a single SamplingParams reused for both stages).
-- Rerank: /Users/sckwoky/Projects/meno_stand/code/rerank_utils/rerank_utils.py:172-176
-  (separate SamplingParams; no seed because temperature=0 → greedy).
+- Rerank (OpenAI HTTP API path used by RAG-Core):
+  /Users/sckwoky/Projects/meno_stand/code/rerank_utils/rerank_utils.py:90-98.
+  The vLLM-direct path at lines 172-176 uses logprobs=20 and is intentionally
+  not mirrored — RAG-Core only ever speaks the OpenAI API.
 """
 
 from __future__ import annotations
