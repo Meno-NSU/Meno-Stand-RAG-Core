@@ -119,3 +119,65 @@ async def test_success_marks_ok_in_store():
         await client.chat_completion(model="m", messages=[{"role": "user", "content": "hi"}])
         s = await status_store.get("m")
         assert s.state.value == "available"
+
+
+def _stream_transport(chunks: list[str]):
+    """Returns an httpx MockTransport that streams the provided text chunks."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = "".join(chunks).encode("utf-8")
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_stream_yields_tokens_and_marks_ok():
+    chunks = [
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":" there"}}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    async with httpx.AsyncClient(transport=_stream_transport(chunks)) as http:
+        status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
+        client = OpenRouterClient(
+            http_client=http,
+            api_key="k",
+            base_url="http://x",
+            http_referer="",
+            x_title="t",
+            status_store=status_store,
+            concurrency=8,
+            timeout_seconds=30.0,
+        )
+        out: list[str] = []
+        async for token in client.stream_chat_completion(model="m", messages=[{"role": "user", "content": "hi"}]):
+            out.append(token)
+        assert out == ["hi", " there"]
+        s = await status_store.get("m")
+        assert s.state.value == "available"
+
+
+@pytest.mark.asyncio
+async def test_stream_429_raises_and_marks_rate_limited():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": {"message": "rl"}}, headers={"X-RateLimit-Reset": "1900000000"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
+        client = OpenRouterClient(
+            http_client=http,
+            api_key="k",
+            base_url="http://x",
+            http_referer="",
+            x_title="t",
+            status_store=status_store,
+            concurrency=8,
+            timeout_seconds=30.0,
+        )
+        with pytest.raises(OpenRouterRateLimitError):
+            async for _ in client.stream_chat_completion(model="m", messages=[{"role": "user", "content": "hi"}]):
+                pass
+        s = await status_store.get("m")
+        assert s.state.value == "rate_limited"

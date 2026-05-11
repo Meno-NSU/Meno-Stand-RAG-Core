@@ -110,8 +110,6 @@ class OpenRouterClient:
                         for content in self._parse_sse_content(buffer):
                             yield content
             except (httpx.HTTPError, httpx.NetworkError) as exc:
-                if isinstance(exc, (OpenRouterRateLimitError, OpenRouterUnreachableError)):
-                    raise
                 await self._status_store.mark_unreachable(model, error=type(exc).__name__)
                 raise OpenRouterUnreachableError(model_id=model, cause=type(exc).__name__) from exc
             await self._status_store.mark_ok(model)
@@ -129,7 +127,11 @@ class OpenRouterClient:
                 await self._handle_429(model, response)
             if 500 <= response.status_code < 600:
                 await self._handle_5xx(model, response)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                await self._status_store.mark_unreachable(model, error=f"http_{response.status_code}")
+                raise OpenRouterUnreachableError(model_id=model, cause=f"http_{response.status_code}") from exc
             await self._status_store.mark_ok(model)
             return response.json()
 
@@ -180,9 +182,15 @@ class OpenRouterClient:
         if payload == "[DONE]":
             return contents
         data = json.loads(payload)
-        if data.get("error", {}).get("message"):
-            raise RuntimeError(data["error"]["message"])
-        delta = data.get("choices", [{}])[0].get("delta", {})
+
+        error_field = data.get("error")
+        if isinstance(error_field, dict) and error_field.get("message"):
+            raise RuntimeError(error_field["message"])
+        elif error_field:
+            raise RuntimeError(str(error_field))
+
+        choices = data.get("choices") or []
+        delta = choices[0].get("delta", {}) if choices else {}
         content = delta.get("content")
         if isinstance(content, str) and content:
             contents.append(content)
