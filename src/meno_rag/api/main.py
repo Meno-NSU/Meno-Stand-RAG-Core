@@ -29,6 +29,10 @@ from meno_rag.config import Settings, get_settings
 from meno_rag.db import repositories
 from meno_rag.db.session import Database
 from meno_rag.llm import VLLMClient, VLLMRegistry
+from meno_rag.llm.openrouter_client import OpenRouterClient
+from meno_rag.llm.openrouter_registry import OpenRouterRegistry
+from meno_rag.llm.router import LLMRouter
+from meno_rag.llm.status import InMemoryModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest, ClearHistoryRequest, ClearHistoryResponse
 from meno_rag.stand.pipeline import ModelRuntime, StandRagPipeline
@@ -86,6 +90,51 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("vllm_startup_discovery_failed", error=str(exc))
 
+    if redis is not None:
+        status_store = RedisModelStatusStore(
+            redis=redis,
+            backoff_seconds=settings.openrouter_unreachable_backoff_seconds,
+            backoff_max_seconds=settings.openrouter_unreachable_backoff_max_seconds,
+        )
+    else:
+        status_store = InMemoryModelStatusStore(
+            backoff_seconds=settings.openrouter_unreachable_backoff_seconds,
+            backoff_max_seconds=settings.openrouter_unreachable_backoff_max_seconds,
+        )
+        logger.warning("model_status_inmemory_single_process_only")
+
+    openrouter_client = None
+    openrouter_registry = None
+    if settings.openrouter_enabled:
+        openrouter_client = OpenRouterClient(
+            http_client=http_client,
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            http_referer=settings.openrouter_http_referer,
+            x_title=settings.openrouter_x_title,
+            status_store=status_store,
+            concurrency=settings.openrouter_generation_concurrency,
+            timeout_seconds=settings.openrouter_generation_timeout_seconds,
+        )
+        openrouter_registry = OpenRouterRegistry(
+            http_client=http_client,
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            featured_ids=settings.openrouter_featured_models_list,
+            timeout_seconds=settings.openrouter_discovery_timeout_seconds,
+            cache_ttl_seconds=settings.model_cache_ttl_seconds,
+            discover_all_free=settings.openrouter_discover_all_free,
+        )
+        try:
+            await openrouter_registry.discover()
+        except Exception as exc:
+            logger.warning("openrouter_startup_discovery_failed", error=str(exc))
+
+    llm_router = LLMRouter(
+        vllm=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
+        openrouter=openrouter_client,
+    )
+
     resources = None
     pipeline = None
     try:
@@ -119,6 +168,10 @@ async def lifespan(app: FastAPI):
     app.state.pipeline = pipeline
     app.state.redis = redis
     app.state.arena_lock = arena_lock
+    app.state.openrouter_registry = openrouter_registry
+    app.state.openrouter_client = openrouter_client
+    app.state.model_status_store = status_store
+    app.state.llm_router = llm_router
 
     yield
 
@@ -181,6 +234,24 @@ async def healthz(request: Request):
     if state.resources is not None:
         embedder_device = state.resources.embedder[2]
 
+    settings: Settings = state.settings
+    if not settings.openrouter_enabled:
+        or_state: dict = {"state": "disabled"}
+    else:
+        registry = state.openrouter_registry
+        statuses = await state.model_status_store.list_all()
+        rate_limited = sum(1 for s in statuses.values() if s.state.value == "rate_limited")
+        unreachable = sum(1 for s in statuses.values() if s.state.value == "unreachable")
+        models_known = len(await registry.list_models()) if registry else 0
+        last_ok = registry.last_discovery_ok if registry else False
+        or_state = {
+            "state": "ok" if last_ok else "degraded",
+            "last_discovery_at": registry.last_discovery_at if registry else None,
+            "models_known": models_known,
+            "rate_limited": rate_limited,
+            "unreachable": unreachable,
+        }
+
     overall = "ok" if pipeline is not None and db_status == "ok" else "degraded"
     return {
         "status": overall,
@@ -189,6 +260,7 @@ async def healthz(request: Request):
         "redis": redis_status,
         "embedder_device": embedder_device,
         "knowledge_base_id": KB_ID,
+        "openrouter": or_state,
     }
 
 
