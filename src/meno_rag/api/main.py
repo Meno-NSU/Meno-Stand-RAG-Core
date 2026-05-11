@@ -578,7 +578,9 @@ async def _stream_response(
             )
         )
 
-        yield StageEvent(stage=StageName.GENERATION, status=StageStatus.STARTED).to_sse()
+        yield StageEvent(
+            stage=StageName.GENERATION, status=StageStatus.STARTED, model_id=runtime.generation.model_id
+        ).to_sse()
         gen_started = time.perf_counter()
         async for token in pipeline.stream_text(
             outcome=outcome, runtime=runtime, max_tokens=max_tokens, temperature=temperature
@@ -594,7 +596,12 @@ async def _stream_response(
             )
         generation_ms = round((time.perf_counter() - gen_started) * 1000, 2)
         stage_durations[StageName.GENERATION] = generation_ms
-        yield StageEvent(stage=StageName.GENERATION, status=StageStatus.COMPLETED, duration_ms=generation_ms).to_sse()
+        yield StageEvent(
+            stage=StageName.GENERATION,
+            status=StageStatus.COMPLETED,
+            duration_ms=generation_ms,
+            model_id=runtime.generation.model_id,
+        ).to_sse()
 
         done_chunk = openai_chunk(
             completion_id=completion_id,

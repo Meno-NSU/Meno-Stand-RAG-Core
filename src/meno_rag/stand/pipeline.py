@@ -94,10 +94,16 @@ class StandRagPipeline:
         stage_details: dict[str, dict[str, Any]] = {}
 
         async def emit(
-            stage: str, status: str, duration_ms: float | None = None, detail: dict[str, Any] | None = None
+            stage: str,
+            status: str,
+            duration_ms: float | None = None,
+            detail: dict[str, Any] | None = None,
+            model_id: str | None = None,
         ) -> None:
             if stage_sink is not None:
-                await stage_sink(StageEvent(stage=stage, status=status, duration_ms=duration_ms, detail=detail))
+                await stage_sink(
+                    StageEvent(stage=stage, status=status, duration_ms=duration_ms, detail=detail, model_id=model_id)
+                )
 
         selected_abbreviations = await self._timed_stage(
             StageName.ABBREVIATION_EXPANSION,
@@ -113,6 +119,7 @@ class StandRagPipeline:
             lambda: self._rewrite_question(question, prepared_dialogue_history, runtime.core),
             stage_durations,
             stage_details,
+            model_id=runtime.core.model_id,
         )
 
         retrieval_batches = await self._timed_stage(
@@ -137,6 +144,7 @@ class StandRagPipeline:
             lambda: self._rerank(fused_batches, runtime.core),
             stage_durations,
             stage_details,
+            model_id=runtime.core.model_id,
         )
 
         context, sources = await self._timed_stage(
@@ -220,8 +228,9 @@ class StandRagPipeline:
         fn: Callable[[], Awaitable[Any] | Any],
         durations: dict[str, float],
         details: dict[str, dict[str, Any]],
+        model_id: str | None = None,
     ) -> Any:
-        await emit(stage_name, StageStatus.STARTED, None, None)
+        await emit(stage_name, StageStatus.STARTED, None, None, model_id)
         started = time.perf_counter()
         try:
             result = fn()
@@ -231,12 +240,12 @@ class StandRagPipeline:
             detail = self._stage_detail(stage_name, result)
             durations[stage_name] = duration_ms
             details[stage_name] = detail
-            await emit(stage_name, StageStatus.COMPLETED, duration_ms, detail)
+            await emit(stage_name, StageStatus.COMPLETED, duration_ms, detail, model_id)
             return result
         except Exception:
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             durations[stage_name] = duration_ms
-            await emit(stage_name, StageStatus.FAILED, duration_ms, None)
+            await emit(stage_name, StageStatus.FAILED, duration_ms, None, model_id)
             raise
 
     def _abbreviation_detail(self, question: str, dialogue_history: str) -> str:

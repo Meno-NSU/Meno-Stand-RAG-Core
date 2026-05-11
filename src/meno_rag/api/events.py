@@ -30,6 +30,7 @@ class StageEvent:
     ts: float = field(default_factory=time.time)
     duration_ms: float | None = None
     detail: dict[str, Any] | None = None
+    model_id: str | None = None
 
     def to_sse(self) -> str:
         payload = {key: value for key, value in asdict(self).items() if value is not None}
