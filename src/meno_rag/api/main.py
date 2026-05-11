@@ -24,14 +24,24 @@ from meno_rag.api.events import (
     sse_data,
     sse_event,
 )
+from meno_rag.api.runtime_resolver import (
+    CoreModelUnavailableError,
+    ModelRateLimitedError,
+    ModelUnreachableError,
+    resolve_pipeline_runtime,
+)
 from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings
 from meno_rag.db import repositories
 from meno_rag.db.session import Database
 from meno_rag.llm import VLLMClient, VLLMRegistry
+from meno_rag.llm.openrouter_client import OpenRouterClient
+from meno_rag.llm.openrouter_registry import OpenRouterRegistry
+from meno_rag.llm.router import LLMRouter
+from meno_rag.llm.status import InMemoryModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest, ClearHistoryRequest, ClearHistoryResponse
-from meno_rag.stand.pipeline import ModelRuntime, StandRagPipeline
+from meno_rag.stand.pipeline import PipelineRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
 from meno_rag.stand.search import vectorize_search_query
 
@@ -86,6 +96,51 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("vllm_startup_discovery_failed", error=str(exc))
 
+    if redis is not None:
+        status_store = RedisModelStatusStore(
+            redis=redis,
+            backoff_seconds=settings.openrouter_unreachable_backoff_seconds,
+            backoff_max_seconds=settings.openrouter_unreachable_backoff_max_seconds,
+        )
+    else:
+        status_store = InMemoryModelStatusStore(
+            backoff_seconds=settings.openrouter_unreachable_backoff_seconds,
+            backoff_max_seconds=settings.openrouter_unreachable_backoff_max_seconds,
+        )
+        logger.warning("model_status_inmemory_single_process_only")
+
+    openrouter_client = None
+    openrouter_registry = None
+    if settings.openrouter_enabled:
+        openrouter_client = OpenRouterClient(
+            http_client=http_client,
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            http_referer=settings.openrouter_http_referer,
+            x_title=settings.openrouter_x_title,
+            status_store=status_store,
+            concurrency=settings.openrouter_generation_concurrency,
+            timeout_seconds=settings.openrouter_generation_timeout_seconds,
+        )
+        openrouter_registry = OpenRouterRegistry(
+            http_client=http_client,
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            featured_ids=settings.openrouter_featured_models_list,
+            timeout_seconds=settings.openrouter_discovery_timeout_seconds,
+            cache_ttl_seconds=settings.model_cache_ttl_seconds,
+            discover_all_free=settings.openrouter_discover_all_free,
+        )
+        try:
+            await openrouter_registry.discover()
+        except Exception as exc:
+            logger.warning("openrouter_startup_discovery_failed", error=str(exc))
+
+    llm_router = LLMRouter(
+        vllm=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
+        openrouter=openrouter_client,
+    )
+
     resources = None
     pipeline = None
     try:
@@ -102,7 +157,7 @@ async def lifespan(app: FastAPI):
         pipeline = StandRagPipeline(
             settings=settings,
             resources=resources,
-            llm_client=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
+            llm_router=llm_router,
             rewrite_semaphore=asyncio.Semaphore(settings.rewrite_concurrency),
             rerank_semaphore=asyncio.Semaphore(settings.rerank_concurrency),
             generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
@@ -119,6 +174,10 @@ async def lifespan(app: FastAPI):
     app.state.pipeline = pipeline
     app.state.redis = redis
     app.state.arena_lock = arena_lock
+    app.state.openrouter_registry = openrouter_registry
+    app.state.openrouter_client = openrouter_client
+    app.state.model_status_store = status_store
+    app.state.llm_router = llm_router
 
     yield
 
@@ -181,6 +240,24 @@ async def healthz(request: Request):
     if state.resources is not None:
         embedder_device = state.resources.embedder[2]
 
+    settings: Settings = state.settings
+    if not settings.openrouter_enabled:
+        or_state: dict = {"state": "disabled"}
+    else:
+        registry = state.openrouter_registry
+        statuses = await state.model_status_store.list_all()
+        rate_limited = sum(1 for s in statuses.values() if s.state.value == "rate_limited")
+        unreachable = sum(1 for s in statuses.values() if s.state.value == "unreachable")
+        models_known = len(await registry.list_models()) if registry else 0
+        last_ok = registry.last_discovery_ok if registry else False
+        or_state = {
+            "state": "ok" if last_ok else "degraded",
+            "last_discovery_at": registry.last_discovery_at if registry else None,
+            "models_known": models_known,
+            "rate_limited": rate_limited,
+            "unreachable": unreachable,
+        }
+
     overall = "ok" if pipeline is not None and db_status == "ok" else "degraded"
     return {
         "status": overall,
@@ -189,34 +266,98 @@ async def healthz(request: Request):
         "redis": redis_status,
         "embedder_device": embedder_device,
         "knowledge_base_id": KB_ID,
+        "openrouter": or_state,
     }
 
 
 @app.get("/v1/models")
 async def list_models(request: Request):
+    from meno_rag.api.runtime_resolver import resolve_core_model_id_sync
+
     settings: Settings = request.app.state.settings
-    registry: VLLMRegistry = request.app.state.vllm_registry
-    models = await registry.list_models()
-    if models:
-        return {"object": "list", "data": models}
-    return {
-        "object": "list",
-        "data": [
+    vllm_registry: VLLMRegistry = request.app.state.vllm_registry
+    or_registry = request.app.state.openrouter_registry
+    status_store = request.app.state.model_status_store
+
+    vllm_models = await vllm_registry.list_models()
+    or_models = await or_registry.list_models() if or_registry is not None else []
+
+    merged: list[dict] = []
+    for m in vllm_models:
+        merged.append(
+            {
+                "id": m["id"],
+                "object": "model",
+                "created": m.get("created", int(time.time())),
+                "owned_by": m.get("owned_by", "vllm"),
+                "provider": "vllm",
+                "featured": False,
+                "stages": ["rewrite", "rerank", "generation"],
+                "status": {"state": "available", "until": None, "last_error": None},
+                "display_name": m["id"],
+                "context_length": m.get("context_length"),
+                "endpoint": m.get("endpoint"),
+            }
+        )
+    statuses = await status_store.list_all()
+    for m in or_models:
+        status = statuses.get(m["id"])
+        merged.append(
+            {
+                "id": m["id"],
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "openrouter",
+                "provider": "openrouter",
+                "featured": m.get("featured", False),
+                "stages": ["generation"],
+                "status": (
+                    status.to_dict()
+                    if status
+                    else {
+                        "state": "available",
+                        "until": None,
+                        "last_error": None,
+                        "consecutive_failures": 0,
+                        "updated_at": None,
+                    }
+                ),
+                "display_name": m.get("display_name") or m["id"],
+                "context_length": m.get("context_length"),
+            }
+        )
+
+    if not merged:
+        merged = [
             {
                 "id": settings.default_model or "menon-1",
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "menon",
+                "provider": "vllm",
+                "featured": False,
+                "stages": ["rewrite", "rerank", "generation"],
+                "status": {"state": "available", "until": None, "last_error": None},
+                "display_name": settings.default_model or "menon-1",
+                "context_length": None,
             }
-        ],
-    }
+        ]
+
+    core_model_id = resolve_core_model_id_sync(
+        vllm_models, settings.rag_rewrite_rerank_model, settings.vllm_endpoint_list
+    )
+
+    return {"object": "list", "data": merged, "core_model_id": core_model_id}
 
 
 @app.post("/v1/models/refresh")
 async def refresh_models(request: Request):
-    registry: VLLMRegistry = request.app.state.vllm_registry
-    models = await registry.refresh()
-    return {"object": "list", "data": models}
+    vllm_registry: VLLMRegistry = request.app.state.vllm_registry
+    or_registry = request.app.state.openrouter_registry
+    await vllm_registry.refresh()
+    if or_registry is not None:
+        await or_registry.discover()
+    return await list_models(request)
 
 
 @app.get("/v1/knowledge-bases")
@@ -257,6 +398,12 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         runtime = await _resolve_runtime(request.app, payload.model)
     except ValueError as exc:
         return _error_response(400, str(exc), "model_not_found", param="model")
+    except ModelRateLimitedError as exc:
+        return _model_rate_limited_response(exc)
+    except ModelUnreachableError as exc:
+        return _model_unreachable_response(exc)
+    except CoreModelUnavailableError:
+        return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created_ts = int(time.time())
@@ -300,23 +447,25 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     )
 
 
-async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> ModelRuntime:
+async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> PipelineRuntime:
     settings: Settings = app.state.settings
-    registry: VLLMRegistry = app.state.vllm_registry
-    model_id, base_url = await registry.resolve_model(requested_model, settings.default_model)
-    if base_url is None:
-        endpoints = settings.vllm_endpoint_list
-        if not endpoints:
-            raise ValueError("No VLLM_ENDPOINTS configured.")
-        base_url = f"{endpoints[0]}/v1"
-    return ModelRuntime(model_id=model_id, base_url=base_url)
+    return await resolve_pipeline_runtime(
+        requested_model=requested_model,
+        vllm_registry=app.state.vllm_registry,
+        openrouter_registry=app.state.openrouter_registry,
+        status_store=app.state.model_status_store,
+        rag_rewrite_rerank_model=settings.rag_rewrite_rerank_model,
+        openrouter_base_url=settings.openrouter_base_url,
+        configured_default=settings.default_model,
+        vllm_endpoint_list=settings.vllm_endpoint_list,
+    )
 
 
 async def _non_stream_response(
     *,
     request: Request,
     payload: ChatCompletionRequest,
-    runtime: ModelRuntime,
+    runtime: PipelineRuntime,
     completion_id: str,
     created_ts: int,
     session_id: str,
@@ -342,8 +491,10 @@ async def _non_stream_response(
             database=database,
             run_id=completion_id,
             session_id=session_id,
-            model=runtime.model_id,
-            endpoint=runtime.base_url,
+            model=runtime.generation.model_id,
+            generation_model=runtime.generation.model_id,
+            core_model=runtime.core.model_id,
+            endpoint=runtime.generation.base_url,
             question=outcome.question,
             answer=answer,
             outcome=outcome,
@@ -361,7 +512,7 @@ async def _non_stream_response(
         "id": completion_id,
         "object": "chat.completion",
         "created": created_ts,
-        "model": runtime.model_id,
+        "model": runtime.generation.model_id,
         "choices": [
             {
                 "index": 0,
@@ -385,7 +536,7 @@ async def _stream_response(
     *,
     request: Request,
     payload: ChatCompletionRequest,
-    runtime: ModelRuntime,
+    runtime: PipelineRuntime,
     completion_id: str,
     created_ts: int,
     session_id: str,
@@ -420,11 +571,16 @@ async def _stream_response(
 
         yield sse_data(
             openai_chunk(
-                completion_id=completion_id, created=created_ts, model=runtime.model_id, delta={"role": "assistant"}
+                completion_id=completion_id,
+                created=created_ts,
+                model=runtime.generation.model_id,
+                delta={"role": "assistant"},
             )
         )
 
-        yield StageEvent(stage=StageName.GENERATION, status=StageStatus.STARTED).to_sse()
+        yield StageEvent(
+            stage=StageName.GENERATION, status=StageStatus.STARTED, model_id=runtime.generation.model_id
+        ).to_sse()
         gen_started = time.perf_counter()
         async for token in pipeline.stream_text(
             outcome=outcome, runtime=runtime, max_tokens=max_tokens, temperature=temperature
@@ -432,15 +588,27 @@ async def _stream_response(
             answer_parts.append(token)
             yield sse_data(
                 openai_chunk(
-                    completion_id=completion_id, created=created_ts, model=runtime.model_id, delta={"content": token}
+                    completion_id=completion_id,
+                    created=created_ts,
+                    model=runtime.generation.model_id,
+                    delta={"content": token},
                 )
             )
         generation_ms = round((time.perf_counter() - gen_started) * 1000, 2)
         stage_durations[StageName.GENERATION] = generation_ms
-        yield StageEvent(stage=StageName.GENERATION, status=StageStatus.COMPLETED, duration_ms=generation_ms).to_sse()
+        yield StageEvent(
+            stage=StageName.GENERATION,
+            status=StageStatus.COMPLETED,
+            duration_ms=generation_ms,
+            model_id=runtime.generation.model_id,
+        ).to_sse()
 
         done_chunk = openai_chunk(
-            completion_id=completion_id, created=created_ts, model=runtime.model_id, delta={}, finish_reason="stop"
+            completion_id=completion_id,
+            created=created_ts,
+            model=runtime.generation.model_id,
+            delta={},
+            finish_reason="stop",
         )
         yield sse_data(done_chunk)
         total_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -452,8 +620,10 @@ async def _stream_response(
             database=database,
             run_id=completion_id,
             session_id=session_id,
-            model=runtime.model_id,
-            endpoint=runtime.base_url,
+            model=runtime.generation.model_id,
+            generation_model=runtime.generation.model_id,
+            core_model=runtime.core.model_id,
+            endpoint=runtime.generation.base_url,
             question=outcome.question,
             answer=answer,
             outcome=outcome,
@@ -465,7 +635,11 @@ async def _stream_response(
         error = str(exc)
         logger.exception("chat_stream_failed", request_id=completion_id, error=error)
         err_chunk = openai_chunk(
-            completion_id=completion_id, created=created_ts, model=runtime.model_id, delta={}, finish_reason="error"
+            completion_id=completion_id,
+            created=created_ts,
+            model=runtime.generation.model_id,
+            delta={},
+            finish_reason="error",
         )
         err_chunk["error"] = {"message": error, "type": "server_error"}
         yield sse_data(err_chunk)
@@ -479,6 +653,8 @@ async def _persist_success(
     run_id: str,
     session_id: str,
     model: str,
+    generation_model: str,
+    core_model: str,
     endpoint: str,
     question: str,
     answer: str,
@@ -511,6 +687,8 @@ async def _persist_success(
             run_id=run_id,
             session_id=session_id,
             model=model,
+            generation_model=generation_model,
+            core_model=core_model,
             endpoint=endpoint,
             knowledge_base_id=KB_ID,
             user_question=question,
@@ -544,7 +722,7 @@ async def _persist_failure(
     database: Database,
     run_id: str,
     session_id: str,
-    runtime: ModelRuntime,
+    runtime: PipelineRuntime,
     payload: ChatCompletionRequest,
     error: str,
     *,
@@ -560,8 +738,10 @@ async def _persist_failure(
             session,
             run_id=run_id,
             session_id=session_id,
-            model=runtime.model_id,
-            endpoint=runtime.base_url,
+            model=runtime.generation.model_id,
+            generation_model=runtime.generation.model_id,
+            core_model=runtime.core.model_id,
+            endpoint=runtime.generation.base_url,
             knowledge_base_id=KB_ID,
             user_question=question,
             search_queries=None,
@@ -582,6 +762,35 @@ def _error_response(status_code: int, message: str, code: str, param: str | None
                 "type": "invalid_request_error" if status_code < 500 else "server_error",
                 "code": code,
                 "param": param,
+            }
+        },
+    )
+
+
+def _model_rate_limited_response(exc: ModelRateLimitedError) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": {
+                "message": f"Model '{exc.model_id}' is rate-limited.",
+                "type": "model_rate_limited",
+                "code": "model_rate_limited",
+                "retry_after_sec": exc.retry_after_sec,
+                "until": exc.until.isoformat(),
+            }
+        },
+    )
+
+
+def _model_unreachable_response(exc: ModelUnreachableError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": {
+                "message": f"Model '{exc.model_id}' is unreachable.",
+                "type": "model_unreachable",
+                "code": "model_unreachable",
+                "until": exc.until.isoformat(),
             }
         },
     )

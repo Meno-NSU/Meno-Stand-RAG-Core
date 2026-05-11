@@ -29,7 +29,7 @@ class FakeLLMClient:
         path = FIXTURES / "responses.json"
         self._responses: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
-    async def chat_completion(self, *, messages: list[dict[str, str]], **kwargs: Any) -> dict[str, Any]:
+    async def chat_completion(self, *, messages: list[dict[str, str]], runtime=None, **kwargs: Any) -> dict[str, Any]:
         # pipeline.prepare() only invokes chat_completion via the reranker
         # (primary logprobs path + JSON fallback path). Both stages are tagged
         # "rerank" here so the FakeLLM lookup works for either path.
@@ -37,7 +37,7 @@ class FakeLLMClient:
         assert key in self._responses, f"FakeLLMClient: no canned response for key={key}"
         return self._responses[key]
 
-    async def chat_completion_text(self, *, messages: list[dict[str, str]], **kwargs: Any) -> str:
+    async def chat_completion_text(self, *, messages: list[dict[str, str]], runtime=None, **kwargs: Any) -> str:
         stage = "rewrite"
         key = _key(stage, messages)
         assert key in self._responses, f"FakeLLMClient: no canned response for key={key}"

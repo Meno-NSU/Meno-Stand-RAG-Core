@@ -140,6 +140,34 @@ The existing `scripts/run_backend.sh` is the entrypoint:
 ./scripts/run_backend.sh restart
 ```
 
+## OpenRouter free models (optional)
+
+The backend can expose free models from [OpenRouter](https://openrouter.ai) as
+**generation-only** alternatives to the local vLLM models. When an OR model is
+selected, the RAG pipeline keeps using a vLLM model for rewrite/rerank (where
+`guided_choice` and logprobs are required), and only the final generation goes
+to OR. This makes the arena a fair comparison: identical retrieval, different
+generators.
+
+**Enable it:**
+
+1. Get an API key at https://openrouter.ai (free-tier works; no credit card
+   needed for `*:free` models, but rate limits are tight).
+2. Set environment variables:
+   ```
+   OPENROUTER_API_KEY=sk-or-...
+   OPENROUTER_FEATURED_MODELS=deepseek/deepseek-chat:free,meta-llama/llama-3.3-70b-instruct:free
+   OPENROUTER_HTTP_REFERER=https://your-meno-web.example
+   ```
+3. Restart the backend. OR models will appear in `/v1/models` under
+   `provider="openrouter"` and in the Meno-Web dropdown under "OpenRouter —
+   generation only".
+
+**What happens if an OR model fails:** the backend records its `rate_limited`
+or `unreachable` status (with auto-expiry from `X-RateLimit-Reset` or
+exponential backoff). The model is greyed-out in the UI dropdown and excluded
+from random arena rounds until it recovers.
+
 ## API
 
 - `GET /healthz`

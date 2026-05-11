@@ -55,6 +55,30 @@ class Settings(BaseSettings):
 
     redis_url: Optional[str] = Field(default=None, validation_alias="REDIS_URL")
 
+    openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        validation_alias="OPENROUTER_BASE_URL",
+    )
+    openrouter_http_referer: str = Field(default="", validation_alias="OPENROUTER_HTTP_REFERER")
+    openrouter_x_title: str = Field(default="Meno-Web", validation_alias="OPENROUTER_X_TITLE")
+    openrouter_featured_models: str = Field(default="", validation_alias="OPENROUTER_FEATURED_MODELS")
+    openrouter_discover_all_free: bool = Field(default=True, validation_alias="OPENROUTER_DISCOVER_ALL_FREE")
+    openrouter_discovery_timeout_seconds: float = Field(
+        default=10.0, validation_alias="OPENROUTER_DISCOVERY_TIMEOUT_SECONDS"
+    )
+    openrouter_generation_timeout_seconds: float = Field(
+        default=120.0, validation_alias="OPENROUTER_GENERATION_TIMEOUT_SECONDS"
+    )
+    openrouter_generation_concurrency: int = Field(default=8, validation_alias="OPENROUTER_GENERATION_CONCURRENCY")
+    openrouter_unreachable_backoff_seconds: int = Field(
+        default=60, validation_alias="OPENROUTER_UNREACHABLE_BACKOFF_SECONDS"
+    )
+    openrouter_unreachable_backoff_max_seconds: int = Field(
+        default=3600, validation_alias="OPENROUTER_UNREACHABLE_BACKOFF_MAX_SECONDS"
+    )
+    rag_rewrite_rerank_model: Optional[str] = Field(default=None, validation_alias="RAG_REWRITE_RERANK_MODEL")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
@@ -85,6 +109,14 @@ class Settings(BaseSettings):
     @property
     def vllm_endpoint_list(self) -> list[str]:
         return [endpoint.strip().rstrip("/") for endpoint in self.vllm_endpoints.split(",") if endpoint.strip()]
+
+    @property
+    def openrouter_featured_models_list(self) -> list[str]:
+        return [m.strip() for m in self.openrouter_featured_models.split(",") if m.strip()]
+
+    @property
+    def openrouter_enabled(self) -> bool:
+        return bool(self.openrouter_api_key.strip())
 
 
 @lru_cache(maxsize=1)

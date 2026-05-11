@@ -53,6 +53,8 @@ class PipelineRun(Base):
     id: Mapped[str] = mapped_column(String(96), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     model: Mapped[str] = mapped_column(String(256), nullable=False)
+    generation_model: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    core_model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     endpoint: Mapped[str | None] = mapped_column(String(512), nullable=True)
     knowledge_base_id: Mapped[str] = mapped_column(String(128), nullable=False)
     user_question: Mapped[str] = mapped_column(Text, nullable=False)
