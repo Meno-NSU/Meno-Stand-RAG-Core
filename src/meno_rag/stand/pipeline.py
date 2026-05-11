@@ -340,6 +340,8 @@ class StandRagPipeline:
                 return score_from_logprobs(response["choices"][0])
             except Exception as exc:
                 logger.warning("rerank_guided_choice_failed", chunk_id=chunk_id, error=str(exc))
+                # JSON fallback needs a multi-token budget for the {"label": "X"} envelope.
+                # Matches meno_stand rerank_utils.py:106-129.
                 response = await self.llm_client.chat_completion(
                     base_url=runtime.base_url,
                     model=runtime.model_id,

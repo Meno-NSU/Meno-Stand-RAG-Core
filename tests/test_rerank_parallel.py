@@ -78,6 +78,6 @@ async def test_rerank_runs_chunks_in_parallel(monkeypatch):
     elapsed = time.perf_counter() - started
 
     assert fake.calls == 8
-    # 8 calls × 0.1s sequentially → ~0.8s. Parallel → <0.3s.
+    # 8 calls × 0.1s sequentially → ~0.8s. Parallel → ~0.1s; threshold is 0.4s for CI headroom.
     assert elapsed < 0.4, f"Reranking took {elapsed:.2f}s — looks sequential"
     assert len(result) > 0
