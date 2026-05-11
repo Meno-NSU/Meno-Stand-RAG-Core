@@ -29,7 +29,7 @@ from meno_rag.stand.rewriting import (
     parse_rewritten_queries,
     prepare_prompt_for_rewriting,
 )
-from meno_rag.stand.sampling import QaSampling, RewriteSampling
+from meno_rag.stand.sampling import QaSampling, RerankSampling, RewriteSampling
 from meno_rag.stand.search import combine_relevant_chunks, find_relevant_chunks
 
 logger = structlog.get_logger(__name__)
@@ -293,18 +293,20 @@ class StandRagPipeline:
             candidates: list[tuple[int, float]] = batch["candidates"]
             if not candidates:
                 continue
-            scores = []
-            async with self.rerank_semaphore:
-                for chunk_id, _score in candidates:
-                    score = await self._score_chunk_with_llm(query, chunk_id, runtime)
-                    scores.append(score)
+            scoring = [self._score_chunk_with_llm(query, chunk_id, runtime) for chunk_id, _ in candidates]
+            scores = await asyncio.gather(*scoring)
             context_scores: list[float] = []
             for idx, (_, retrieval_score) in enumerate(candidates):
-                context_scores.append(rerank_merge_score(retrieval_score, scores[idx], self.settings.rerank_weight))
+                context_scores.append(
+                    rerank_merge_score(retrieval_score, scores[idx], self.settings.rerank_weight)
+                )
             ordered = list(
                 filter(
                     lambda it: it[1] > 0.0,
-                    sorted(zip([item[0] for item in candidates], context_scores), key=lambda it: (-it[1], it[0])),
+                    sorted(
+                        zip([item[0] for item in candidates], context_scores),
+                        key=lambda it: (-it[1], it[0]),
+                    ),
                 )
             )
             if len(ordered) > self.settings.rerank_top_k:
@@ -321,31 +323,33 @@ class StandRagPipeline:
             min_document_quality=0.0,
         )[0][0]
         prompt = build_prompt(query, cur_doc)
-        try:
-            response = await self.llm_client.chat_completion(
-                base_url=runtime.base_url,
-                model=runtime.model_id,
-                messages=prompt,
-                max_tokens=1,
-                temperature=0.0,
-                logprobs=True,
-                top_logprobs=5,
-                extra_body={"guided_choice": ["0", "1", "2"]},
-                timeout=self.settings.rerank_timeout_seconds,
-            )
-            return score_from_logprobs(response["choices"][0])
-        except Exception as exc:
-            logger.warning("rerank_guided_choice_failed", chunk_id=chunk_id, error=str(exc))
-            response = await self.llm_client.chat_completion(
-                base_url=runtime.base_url,
-                model=runtime.model_id,
-                messages=build_prompt(query, cur_doc, is_json=True),
-                max_tokens=20,
-                temperature=0.0,
-                response_format=response_format_schema(),
-                timeout=self.settings.rerank_timeout_seconds,
-            )
-            return score_from_json_response(str(response["choices"][0]["message"]["content"]))
+        sampling = RerankSampling()
+        async with self.rerank_semaphore:
+            try:
+                response = await self.llm_client.chat_completion(
+                    base_url=runtime.base_url,
+                    model=runtime.model_id,
+                    messages=prompt,
+                    max_tokens=sampling.max_tokens,
+                    temperature=sampling.temperature,
+                    logprobs=sampling.logprobs,
+                    top_logprobs=sampling.top_logprobs,
+                    extra_body={"guided_choice": ["0", "1", "2"]},
+                    timeout=self.settings.rerank_timeout_seconds,
+                )
+                return score_from_logprobs(response["choices"][0])
+            except Exception as exc:
+                logger.warning("rerank_guided_choice_failed", chunk_id=chunk_id, error=str(exc))
+                response = await self.llm_client.chat_completion(
+                    base_url=runtime.base_url,
+                    model=runtime.model_id,
+                    messages=build_prompt(query, cur_doc, is_json=True),
+                    max_tokens=20,
+                    temperature=0.0,
+                    response_format=response_format_schema(),
+                    timeout=self.settings.rerank_timeout_seconds,
+                )
+                return score_from_json_response(str(response["choices"][0]["message"]["content"]))
 
     def _assemble_context(self, chunks: list[tuple[int, float]]) -> tuple[str, list[dict[str, str]]]:
         if not chunks:
