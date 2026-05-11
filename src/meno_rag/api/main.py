@@ -23,6 +23,7 @@ from meno_rag.api.events import (
     sse_data,
     sse_event,
 )
+from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings
 from meno_rag.db import repositories
 from meno_rag.db.session import Database
@@ -58,6 +59,18 @@ async def lifespan(app: FastAPI):
         ),
         timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
     )
+
+    redis = None
+    try:
+        redis = make_redis(settings.redis_url)
+        if redis is not None:
+            await redis.ping()
+            logger.info("redis_connected", url=settings.redis_url)
+    except Exception as exc:
+        logger.warning("redis_connect_failed_using_inprocess_lock", error=str(exc))
+        redis = None
+
+    arena_lock = ArenaLock(redis=redis)
 
     registry = VLLMRegistry(
         settings.vllm_endpoint_list,
@@ -101,9 +114,13 @@ async def lifespan(app: FastAPI):
     app.state.vllm_registry = registry
     app.state.resources = resources
     app.state.pipeline = pipeline
+    app.state.redis = redis
+    app.state.arena_lock = arena_lock
 
     yield
 
+    if redis is not None:
+        await redis.close()
     await http_client.aclose()
     await database.close()
 
