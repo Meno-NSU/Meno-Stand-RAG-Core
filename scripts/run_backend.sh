@@ -11,8 +11,44 @@ MENO_WEB_PORT="${MENO_WEB_PORT:-9012}"
 PID_FILE="${PID_FILE:-$ROOT_DIR/var/meno-rag-api.pid}"
 LOG_FILE="${LOG_FILE:-$ROOT_DIR/logs/meno-rag-api.log}"
 API_BIN="${API_BIN:-$ROOT_DIR/.venv/bin/meno-rag-api}"
+MIGRATE_BIN="${MIGRATE_BIN:-$ROOT_DIR/.venv/bin/meno-rag-migrate}"
+RESET_BIN="${RESET_BIN:-$ROOT_DIR/.venv/bin/meno-rag-reset}"
+
+# --fresh: wipe the application schema before bootstrap. Parsed once here so
+# every subcommand can see it without per-command argparse plumbing.
+FRESH=0
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --fresh) FRESH=1 ;;
+        *)       POSITIONAL+=("$arg") ;;
+    esac
+done
+set -- "${POSITIONAL[@]:-start}"
 
 mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
+
+ensure_venv() {
+    # Self-heal: if the tooling is missing (fresh clone, after a pull that
+    # adds new entry points, partial sync), run uv sync once. This keeps
+    # `./scripts/run_backend.sh start` working as the single entry point.
+    if [[ -x "$MIGRATE_BIN" && -x "$RESET_BIN" && -x "$API_BIN" ]]; then
+        return 0
+    fi
+    echo "Backend tooling is missing in .venv; running uv sync --all-groups --frozen..."
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "uv is not installed. Install it first: https://docs.astral.sh/uv/getting-started/installation/"
+        return 1
+    fi
+    (cd "$ROOT_DIR" && uv sync --all-groups --frozen)
+    if [[ ! -x "$MIGRATE_BIN" || ! -x "$RESET_BIN" || ! -x "$API_BIN" ]]; then
+        echo "uv sync finished but one of the expected binaries is still missing:"
+        [[ -x "$MIGRATE_BIN" ]] || echo "  - $MIGRATE_BIN"
+        [[ -x "$RESET_BIN"   ]] || echo "  - $RESET_BIN"
+        [[ -x "$API_BIN"     ]] || echo "  - $API_BIN"
+        return 1
+    fi
+}
 
 pid_from_file() {
     [[ -f "$PID_FILE" ]] || return 1
@@ -60,25 +96,29 @@ start() {
         rm -f "$PID_FILE"
     fi
 
+    ensure_venv
+
+    if [[ "$FRESH" -eq 1 ]]; then
+        echo "--fresh: wiping the application schema before migrations..."
+        (cd "$ROOT_DIR" && "$RESET_BIN" --yes)
+    fi
+
     echo "Running database bootstrap + migrations..."
-    if [[ -x "$ROOT_DIR/.venv/bin/meno-rag-migrate" ]]; then
-        (cd "$ROOT_DIR" && "$ROOT_DIR/.venv/bin/meno-rag-migrate")
+    # Wrap in if/else so set -e doesn't abort before we print the --fresh hint.
+    if (cd "$ROOT_DIR" && "$MIGRATE_BIN"); then
+        :
     else
-        echo "meno-rag-migrate not found at $ROOT_DIR/.venv/bin/meno-rag-migrate."
-        echo "Run: uv sync --all-groups --frozen"
-        return 1
+        rc=$?
+        if [[ "$rc" -eq 2 && "$FRESH" -eq 0 ]]; then
+            printf '\nHint: to wipe the database and start clean, run:\n  ./scripts/run_backend.sh start --fresh\n'
+        fi
+        return "$rc"
     fi
 
     echo "Starting Meno RAG API in the background..."
     echo "Direct backend: http://${APP_HOST}:${APP_PORT}"
     echo "Meno-Web proxy endpoint: http://<meno-web-host>:${MENO_WEB_PORT}/v1"
     echo "Logs: $LOG_FILE"
-
-    if [[ ! -x "$API_BIN" ]]; then
-        echo "Backend executable is missing: $API_BIN"
-        echo "Run first: uv sync --all-groups --frozen"
-        return 1
-    fi
 
     printf "\n--- %s starting Meno RAG API ---\n" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$LOG_FILE"
 
@@ -170,15 +210,14 @@ case "${1:-start}" in
         logs
         ;;
     foreground)
-        if [[ ! -x "$API_BIN" ]]; then
-            echo "Backend executable is missing: $API_BIN"
-            echo "Run first: uv sync --all-groups --frozen"
-            exit 1
-        fi
+        ensure_venv
         APP_HOST="$APP_HOST" APP_PORT="$APP_PORT" PYTHONUNBUFFERED=1 "$API_BIN"
         ;;
     *)
-        echo "Usage: $0 [start|stop|restart|status|logs|foreground]"
+        echo "Usage: $0 [--fresh] [start|stop|restart|status|logs|foreground]"
+        echo ""
+        echo "  --fresh     Drop all application tables before starting (destructive,"
+        echo "              only valid with start/restart)."
         exit 2
         ;;
 esac

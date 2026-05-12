@@ -8,9 +8,12 @@ The backend never imports or starts `vllm.LLM`. It talks to external vLLM server
 
 ```bash
 cp example.env .env
-uv sync
-./scripts/run_backend.sh
+./scripts/run_backend.sh start
 ```
+
+`run_backend.sh` self-heals: if the Python venv is not yet built (fresh clone, after a pull that
+added new entry points), it runs `uv sync --all-groups --frozen` for you before doing anything
+else. You don't need a separate `uv sync` step.
 
 Meno-Web can use:
 
@@ -33,6 +36,50 @@ Useful commands:
 
 By default the backend binds to `127.0.0.1:9006`. Meno-Web listens on `0.0.0.0:9012` and proxies `/v1/*` to that
 backend, so the externally visible API endpoint is on the same host and port as Meno-Web: `http://<meno-web-host>:9012/v1`.
+
+## Database state and recovery
+
+`./scripts/run_backend.sh start` calls `meno-rag-migrate` (which in turn runs `alembic upgrade head`) before
+launching the API. The bootstrap classifies the database into one of three states:
+
+- **empty** — no application tables. The bootstrap creates everything from scratch.
+- **tracked** — alembic has a recorded current revision. The bootstrap brings the schema up to head.
+- **untracked** — application tables exist, but alembic has no recorded revision (e.g., a previous migration
+  crashed mid-flight, or the tables were created outside alembic). The bootstrap exits 2 with an actionable
+  diagnostic and does *not* launch the API.
+
+If you hit the untracked state, pick ONE of the two recovery paths:
+
+**1. Wipe the database and start clean** — useful in dev / staging / disposable data:
+
+```bash
+./scripts/run_backend.sh start --fresh
+```
+
+That single command drops all ORM-known tables plus `alembic_version`, then runs a clean
+bootstrap. No separate `uv sync`, no separate reset call.
+
+**2. Keep the existing data** — for production where data is real:
+
+```bash
+.venv/bin/alembic stamp 0001_initial    # or whichever revision matches
+./scripts/run_backend.sh start
+```
+
+This tells alembic that the existing schema matches the named revision, then the next bootstrap
+sees the DB as tracked and only applies any newer migrations on top.
+
+Under the hood, `--fresh` calls `.venv/bin/meno-rag-reset --yes`. You can run the underlying
+binary directly to preview without changing anything:
+
+```bash
+.venv/bin/meno-rag-reset           # dry-run: prints the tables it would drop, exit code 1
+.venv/bin/meno-rag-reset --yes     # actually drops them
+```
+
+`meno-rag-reset` never touches tables outside `meno_rag.db.orm`, so unrelated tables in the same
+database are left alone. Both commands work identically for SQLite (dev/CI) and PostgreSQL
+(production); dialect-specific details are handled internally.
 
 ## Runtime Resources
 
@@ -94,7 +141,8 @@ Set:
 DATABASE_URL=postgresql+asyncpg://meno_rag:<password>@127.0.0.1:5432/meno_rag
 ```
 
-`scripts/run_backend.sh start` runs `alembic upgrade head` automatically.
+`scripts/run_backend.sh start` invokes `meno-rag-migrate` (which runs `alembic upgrade head`) automatically.
+See "Database state and recovery" above for how to handle the untracked-state failure mode.
 
 ### Redis
 
@@ -133,7 +181,7 @@ process. Raise/lower based on your vLLM throughput and FRIDA VRAM budget:
 The existing `scripts/run_backend.sh` is the entrypoint:
 
 ```
-./scripts/run_backend.sh start     # alembic upgrade + uvicorn under nohup
+./scripts/run_backend.sh start     # meno-rag-migrate (bootstrap + alembic) then uvicorn under nohup
 ./scripts/run_backend.sh status
 ./scripts/run_backend.sh logs
 ./scripts/run_backend.sh stop

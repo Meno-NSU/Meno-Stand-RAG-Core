@@ -32,6 +32,7 @@ dependencies = [
 [project.scripts]
 meno-rag-api = "meno_rag.api.main:run"
 meno-rag-migrate = "meno_rag.db.migrate:main"
+meno-rag-reset = "meno_rag.db.reset:main"
 
 [dependency-groups]
 dev = [
