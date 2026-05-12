@@ -1,3 +1,19 @@
+"""Pre-migration bootstrap for the application database.
+
+Exposes :func:`run_bootstrap` (and the ``meno-rag-migrate`` console script
+wrapper :func:`main`). The script is the single migration entry point used
+by ``scripts/run_backend.sh``.
+
+Exit codes (contract for ops scripts):
+  - ``0`` — database was empty or already tracked; ``alembic upgrade head``
+    succeeded.
+  - ``2`` — database has application tables but no ``alembic_version`` row.
+    A diagnostic is printed to stderr listing the found tables, the known
+    alembic revisions, and the two recovery paths (stamp or wipe). The
+    database is left untouched.
+  - any other non-zero — unexpected failure from alembic; traceback on stderr.
+"""
+
 from __future__ import annotations
 
 import sys

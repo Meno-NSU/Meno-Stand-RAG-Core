@@ -80,12 +80,7 @@ def test_run_bootstrap_untracked_db_fails_with_diagnostic(tmp_path, capsys):
     engine = create_engine(url)
     try:
         with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "CREATE TABLE conversations ("
-                    "id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)"
-                )
-            )
+            conn.execute(text("CREATE TABLE conversations (id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)"))
     finally:
         engine.dispose()
 

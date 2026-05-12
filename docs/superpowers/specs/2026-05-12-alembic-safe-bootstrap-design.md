@@ -156,12 +156,27 @@ to confirm the CLI entry plumbing works end-to-end.
 
 ## File touch list
 
-- New: `src/meno_rag/db/migrate.py`
-- Edit: `pyproject.toml` (one new line under `[project.scripts]`)
-- Edit: `scripts/run_backend.sh` (replace the alembic block)
-- New: `tests/test_migrate.py`
+- New: `src/meno_rag/db/migrate.py` (also imports `meno_rag.db.orm` for side
+  effects so `Base.metadata.tables` is populated — same pattern as
+  `meno_rag.db.session.Database.init_models`).
+- Edit: `pyproject.toml` (one new line under `[project.scripts]`).
+- Edit: `scripts/run_backend.sh` (replace the alembic block).
+- New: `tests/test_migrate.py`.
 
-No changes to `alembic/env.py`, the existing migrations, or the ORM.
+### Accepted scope expansion: `alembic/env.py`
+
+The original `env.py` unconditionally read the URL from `get_settings()`,
+ignoring `alembic.Config.set_main_option("sqlalchemy.url", ...)`. This blocks
+the test pattern in which `run_bootstrap` is invoked against a `tmp_path`
+SQLite without env-var monkeypatching of `DATABASE_URL`.
+
+A tiny helper was added that prefers the URL set on the `Config` and falls
+back to settings otherwise. The fallback path is exactly the prior behavior,
+so the alembic CLI (`alembic upgrade head` without programmatic config) is
+unchanged. This is a permanent improvement — alembic's `Config` API treats
+`sqlalchemy.url` as a valid override channel, and `env.py` now honors it.
+
+No changes to the existing migrations or the ORM.
 
 ## Out-of-scope follow-ups
 
