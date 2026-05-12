@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import sys
+import sys  # noqa: F401  (used by main() in Task 4)
 from pathlib import Path
 
 import structlog
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
-from meno_rag.config import get_settings
+from alembic import command
+from meno_rag.config import get_settings  # noqa: F401  (used by main() in Task 4)
 from meno_rag.db.session import Base
 
 logger = structlog.get_logger(__name__)

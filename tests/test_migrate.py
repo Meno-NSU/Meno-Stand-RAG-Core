@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-from alembic import command as alembic_command
+import pytest  # noqa: F401  (used by Task 4 CLI test)
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import (
+    create_engine,
+    inspect,
+    text,  # noqa: F401  (used by Task 2/3 tests)
+)
 
+from alembic import command as alembic_command  # noqa: F401  (used by Task 2 tracked-DB test)
 from meno_rag.db.migrate import run_bootstrap
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
