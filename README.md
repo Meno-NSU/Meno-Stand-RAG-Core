@@ -34,6 +34,42 @@ Useful commands:
 By default the backend binds to `127.0.0.1:9006`. Meno-Web listens on `0.0.0.0:9012` and proxies `/v1/*` to that
 backend, so the externally visible API endpoint is on the same host and port as Meno-Web: `http://<meno-web-host>:9012/v1`.
 
+## Database state and recovery
+
+`./scripts/run_backend.sh start` calls `meno-rag-migrate` (which in turn runs `alembic upgrade head`) before
+launching the API. The bootstrap classifies the database into one of three states:
+
+- **empty** — no application tables. The bootstrap creates everything from scratch.
+- **tracked** — alembic has a recorded current revision. The bootstrap brings the schema up to head.
+- **untracked** — application tables exist, but alembic has no recorded revision (e.g., a previous migration
+  crashed mid-flight, or the tables were created outside alembic). The bootstrap exits 2 with an actionable
+  diagnostic and does *not* launch the API.
+
+If you hit the untracked state, pick ONE of the two recovery paths:
+
+**1. Keep the existing data** — tell alembic which revision your schema matches:
+
+```bash
+.venv/bin/alembic stamp 0001_initial    # or whichever revision matches
+./scripts/run_backend.sh start
+```
+
+This is the right choice in production when the data is real and you only need to reconnect it to alembic.
+
+**2. Wipe the database and start clean** — useful in dev or for disposable data:
+
+```bash
+.venv/bin/meno-rag-reset --yes
+./scripts/run_backend.sh start
+```
+
+`meno-rag-reset` drops all ORM-known tables plus `alembic_version`. Without `--yes` it is a dry-run: it prints
+the tables it would drop and exits 1 — useful for previewing before committing. The command never touches
+tables that are not part of `meno_rag.db.orm`, so any unrelated tables in the same database are left alone.
+
+Both commands work identically for SQLite (dev/CI) and PostgreSQL (production); the dialect-specific details
+are handled internally.
+
 ## Runtime Resources
 
 The implementation expects stand artifacts in `resources/stand_nsu/`:
@@ -94,7 +130,8 @@ Set:
 DATABASE_URL=postgresql+asyncpg://meno_rag:<password>@127.0.0.1:5432/meno_rag
 ```
 
-`scripts/run_backend.sh start` runs `alembic upgrade head` automatically.
+`scripts/run_backend.sh start` invokes `meno-rag-migrate` (which runs `alembic upgrade head`) automatically.
+See "Database state and recovery" above for how to handle the untracked-state failure mode.
 
 ### Redis
 
@@ -133,7 +170,7 @@ process. Raise/lower based on your vLLM throughput and FRIDA VRAM budget:
 The existing `scripts/run_backend.sh` is the entrypoint:
 
 ```
-./scripts/run_backend.sh start     # alembic upgrade + uvicorn under nohup
+./scripts/run_backend.sh start     # meno-rag-migrate (bootstrap + alembic) then uvicorn under nohup
 ./scripts/run_backend.sh status
 ./scripts/run_backend.sh logs
 ./scripts/run_backend.sh stop
