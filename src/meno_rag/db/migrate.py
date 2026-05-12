@@ -9,7 +9,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect
 
 from alembic import command
-from meno_rag.config import get_settings  # noqa: F401  (used by main() in Task 4)
+from meno_rag.config import get_settings
 from meno_rag.db import orm  # noqa: F401  (populates Base.metadata with table definitions)
 from meno_rag.db.session import Base
 
@@ -102,3 +102,9 @@ def run_bootstrap(sync_url: str) -> int:
     )
     command.upgrade(cfg, "head")
     return 0
+
+
+def main() -> None:
+    settings = get_settings()
+    sync_url = settings.database_url.replace("+asyncpg", "").replace("+aiosqlite", "")
+    sys.exit(run_bootstrap(sync_url))

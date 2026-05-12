@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest  # noqa: F401  (used by Task 4 CLI test)
+import pytest
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import (
     create_engine,
@@ -106,3 +106,27 @@ def test_run_bootstrap_untracked_db_fails_with_diagnostic(tmp_path, capsys):
         engine.dispose()
     assert "alembic_version" not in tables
     assert "pipeline_runs" not in tables
+
+
+def test_main_reads_database_url_env_and_runs_bootstrap(tmp_path, monkeypatch):
+    db = tmp_path / "cli.sqlite3"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db}")
+
+    from meno_rag.config import get_settings
+    from meno_rag.db import migrate
+
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(SystemExit) as exc:
+            migrate.main()
+        assert exc.value.code == 0
+    finally:
+        get_settings.cache_clear()
+
+    engine = create_engine(f"sqlite:///{db}")
+    try:
+        tables = set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+    assert "alembic_version" in tables
+    assert "conversations" in tables
