@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import sys  # noqa: F401  (used by main() in Task 4)
+import sys
 from pathlib import Path
 
 import structlog
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect
 
 from alembic import command
 from meno_rag.config import get_settings  # noqa: F401  (used by main() in Task 4)
+from meno_rag.db import orm  # noqa: F401  (populates Base.metadata with table definitions)
 from meno_rag.db.session import Base
 
 logger = structlog.get_logger(__name__)
@@ -35,6 +37,28 @@ def _ensure_sqlite_parent(sync_url: str) -> None:
     Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
 
 
+def _known_revisions(cfg: Config) -> list[str]:
+    script = ScriptDirectory.from_config(cfg)
+    # walk_revisions yields newest-first; reverse so the list reads oldest-first.
+    return [s.revision for s in reversed(list(script.walk_revisions()))]
+
+
+_UNTRACKED_DIAGNOSTIC = (
+    "Database has untracked application tables (no alembic_version row).\n"
+    "  Found tables:        {tables}\n"
+    "  Known revisions:     {revisions}\n"
+    "\n"
+    "To recover:\n"
+    "  - If the existing schema matches a known revision, stamp it:\n"
+    "      alembic stamp <revision>\n"
+    "      ./scripts/run_backend.sh\n"
+    "  - If you do not need the existing data, wipe the database:\n"
+    "      SQLite:   rm <path-to-sqlite-file>\n"
+    "      Postgres: drop and recreate the database, or TRUNCATE the app tables.\n"
+    "    Then re-run ./scripts/run_backend.sh\n"
+)
+
+
 def run_bootstrap(sync_url: str) -> int:
     _ensure_sqlite_parent(sync_url)
     cfg = _alembic_config(sync_url)
@@ -54,9 +78,22 @@ def run_bootstrap(sync_url: str) -> int:
     elif not app_tables:
         state = "empty"
     else:
-        # Reached only in later tasks; placeholder branch raises so we notice
-        # if the test for it ever runs before its task lands.
-        raise AssertionError("untracked branch not implemented yet")
+        revisions = _known_revisions(cfg)
+        sorted_tables = sorted(app_tables)
+        logger.error(
+            "db.bootstrap.untracked",
+            dialect=dialect,
+            app_tables=sorted_tables,
+            known_revisions=revisions,
+        )
+        print(
+            _UNTRACKED_DIAGNOSTIC.format(
+                tables=", ".join(sorted_tables),
+                revisions=", ".join(revisions),
+            ),
+            file=sys.stderr,
+        )
+        return 2
 
     logger.info(
         f"db.bootstrap.{state}",

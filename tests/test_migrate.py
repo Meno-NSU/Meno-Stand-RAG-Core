@@ -71,3 +71,38 @@ def test_run_bootstrap_tracked_db_advances_to_head(tmp_path):
     assert "generation_model" in cols_after
     assert "core_model" in cols_after
     assert rev == "0002_or_dual_model_columns"
+
+
+def test_run_bootstrap_untracked_db_fails_with_diagnostic(tmp_path, capsys):
+    db = tmp_path / "x.sqlite3"
+    url = _sync_sqlite_url(db)
+
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE conversations ("
+                    "id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    rc = run_bootstrap(url)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "untracked" in captured.err
+    assert "alembic stamp" in captured.err
+    assert "conversations" in captured.err
+    assert "0001_initial" in captured.err  # known revisions listed
+
+    # And the DB is NOT auto-stamped or migrated past this point:
+    engine = create_engine(url)
+    try:
+        tables = set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+    assert "alembic_version" not in tables
+    assert "pipeline_runs" not in tables
