@@ -65,14 +65,15 @@ _UNTRACKED_DIAGNOSTIC = (
     "  Found tables:        {tables}\n"
     "  Known revisions:     {revisions}\n"
     "\n"
-    "To recover:\n"
-    "  - If the existing schema matches a known revision, stamp it:\n"
-    "      alembic stamp <revision>\n"
-    "      ./scripts/run_backend.sh\n"
-    "  - If you do not need the existing data, wipe the database:\n"
-    "      SQLite:   rm <path-to-sqlite-file>\n"
-    "      Postgres: drop and recreate the database, or TRUNCATE the app tables.\n"
-    "    Then re-run ./scripts/run_backend.sh\n"
+    "To recover, pick ONE of the two:\n"
+    "\n"
+    "  1) Keep the existing data — tell alembic which revision it matches:\n"
+    "       .venv/bin/alembic stamp <revision>\n"
+    "       ./scripts/run_backend.sh\n"
+    "\n"
+    "  2) Wipe the database and start clean (existing data will be lost):\n"
+    "       .venv/bin/meno-rag-reset --yes\n"
+    "       ./scripts/run_backend.sh\n"
 )
 
 
