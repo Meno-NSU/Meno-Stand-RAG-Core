@@ -8,9 +8,12 @@ The backend never imports or starts `vllm.LLM`. It talks to external vLLM server
 
 ```bash
 cp example.env .env
-uv sync
-./scripts/run_backend.sh
+./scripts/run_backend.sh start
 ```
+
+`run_backend.sh` self-heals: if the Python venv is not yet built (fresh clone, after a pull that
+added new entry points), it runs `uv sync --all-groups --frozen` for you before doing anything
+else. You don't need a separate `uv sync` step.
 
 Meno-Web can use:
 
@@ -47,28 +50,36 @@ launching the API. The bootstrap classifies the database into one of three state
 
 If you hit the untracked state, pick ONE of the two recovery paths:
 
-**1. Keep the existing data** — tell alembic which revision your schema matches:
+**1. Wipe the database and start clean** — useful in dev / staging / disposable data:
+
+```bash
+./scripts/run_backend.sh start --fresh
+```
+
+That single command drops all ORM-known tables plus `alembic_version`, then runs a clean
+bootstrap. No separate `uv sync`, no separate reset call.
+
+**2. Keep the existing data** — for production where data is real:
 
 ```bash
 .venv/bin/alembic stamp 0001_initial    # or whichever revision matches
 ./scripts/run_backend.sh start
 ```
 
-This is the right choice in production when the data is real and you only need to reconnect it to alembic.
+This tells alembic that the existing schema matches the named revision, then the next bootstrap
+sees the DB as tracked and only applies any newer migrations on top.
 
-**2. Wipe the database and start clean** — useful in dev or for disposable data:
+Under the hood, `--fresh` calls `.venv/bin/meno-rag-reset --yes`. You can run the underlying
+binary directly to preview without changing anything:
 
 ```bash
-.venv/bin/meno-rag-reset --yes
-./scripts/run_backend.sh start
+.venv/bin/meno-rag-reset           # dry-run: prints the tables it would drop, exit code 1
+.venv/bin/meno-rag-reset --yes     # actually drops them
 ```
 
-`meno-rag-reset` drops all ORM-known tables plus `alembic_version`. Without `--yes` it is a dry-run: it prints
-the tables it would drop and exits 1 — useful for previewing before committing. The command never touches
-tables that are not part of `meno_rag.db.orm`, so any unrelated tables in the same database are left alone.
-
-Both commands work identically for SQLite (dev/CI) and PostgreSQL (production); the dialect-specific details
-are handled internally.
+`meno-rag-reset` never touches tables outside `meno_rag.db.orm`, so unrelated tables in the same
+database are left alone. Both commands work identically for SQLite (dev/CI) and PostgreSQL
+(production); dialect-specific details are handled internally.
 
 ## Runtime Resources
 
