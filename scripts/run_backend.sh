@@ -60,12 +60,13 @@ start() {
         rm -f "$PID_FILE"
     fi
 
-    echo "Running alembic upgrade head..."
-    if [[ -x "$ROOT_DIR/.venv/bin/alembic" ]]; then
-        (cd "$ROOT_DIR" && "$ROOT_DIR/.venv/bin/alembic" upgrade head)
+    echo "Running database bootstrap + migrations..."
+    if [[ -x "$ROOT_DIR/.venv/bin/meno-rag-migrate" ]]; then
+        (cd "$ROOT_DIR" && "$ROOT_DIR/.venv/bin/meno-rag-migrate")
     else
-        echo "Alembic not found at $ROOT_DIR/.venv/bin/alembic; skipping migrations."
+        echo "meno-rag-migrate not found at $ROOT_DIR/.venv/bin/meno-rag-migrate."
         echo "Run: uv sync --all-groups --frozen"
+        return 1
     fi
 
     echo "Starting Meno RAG API in the background..."
