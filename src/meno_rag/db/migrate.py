@@ -21,6 +21,7 @@ from pathlib import Path
 
 import structlog
 from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect
 
@@ -75,6 +76,21 @@ _UNTRACKED_DIAGNOSTIC = (
 )
 
 
+def _current_heads(engine, alembic_version_present: bool) -> tuple[str, ...]:
+    """Return alembic's recorded current revisions, or ``()`` if none.
+
+    We must check the *row*, not the *table*. An ``alembic_version`` table can
+    exist but be empty — most often when a previous ``alembic upgrade`` crashed
+    after alembic's own ``_ensure_version_table`` ran but before the first
+    migration's version was recorded. That state must be classified as
+    untracked, the same as when the table is missing entirely.
+    """
+    if not alembic_version_present:
+        return ()
+    with engine.connect() as conn:
+        return tuple(MigrationContext.configure(conn).get_current_heads())
+
+
 def run_bootstrap(sync_url: str) -> int:
     _ensure_sqlite_parent(sync_url)
     cfg = _alembic_config(sync_url)
@@ -83,13 +99,13 @@ def run_bootstrap(sync_url: str) -> int:
     try:
         inspector = inspect(engine)
         existing = set(inspector.get_table_names())
+        current_heads = _current_heads(engine, "alembic_version" in existing)
     finally:
         engine.dispose()
 
     app_tables = set(Base.metadata.tables) & existing
-    has_alembic_version = "alembic_version" in existing
 
-    if has_alembic_version:
+    if current_heads:
         state = "tracked"
     elif not app_tables:
         state = "empty"
@@ -101,6 +117,7 @@ def run_bootstrap(sync_url: str) -> int:
             dialect=dialect,
             app_tables=sorted_tables,
             known_revisions=revisions,
+            alembic_version_table_present="alembic_version" in existing,
         )
         print(
             _UNTRACKED_DIAGNOSTIC.format(
@@ -115,6 +132,7 @@ def run_bootstrap(sync_url: str) -> int:
         f"db.bootstrap.{state}",
         dialect=dialect,
         app_tables=len(app_tables),
+        current_heads=list(current_heads),
     )
     command.upgrade(cfg, "head")
     return 0
