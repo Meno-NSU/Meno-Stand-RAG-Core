@@ -103,6 +103,54 @@ def test_run_bootstrap_untracked_db_fails_with_diagnostic(tmp_path, capsys):
     assert "pipeline_runs" not in tables
 
 
+def test_run_bootstrap_alembic_version_table_present_but_empty_fails(tmp_path, capsys):
+    """Reproduce the 'crashed mid-migration' state: alembic creates the
+    alembic_version table early in its bootstrap, then a migration fails before
+    the version row is written. The table exists; the row does not. Application
+    tables are present from the partial migration. The next run must treat this
+    as untracked, NOT as 'tracked' (which would re-run migrations from base and
+    crash with 'table conversations already exists' — exactly the user-reported
+    regression).
+    """
+    db = tmp_path / "x.sqlite3"
+    url = _sync_sqlite_url(db)
+
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE conversations (id TEXT PRIMARY KEY, created_at TEXT, updated_at TEXT)"))
+            # Mirror exactly what alembic creates internally during its own bootstrap:
+            conn.execute(
+                text(
+                    "CREATE TABLE alembic_version ("
+                    "version_num VARCHAR(32) NOT NULL, "
+                    "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    rc = run_bootstrap(url)
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "untracked" in captured.err
+    assert "conversations" in captured.err
+
+    # The DB must be left exactly as we staged it — no destructive recovery.
+    engine = create_engine(url)
+    try:
+        insp = inspect(engine)
+        tables = set(insp.get_table_names())
+        with engine.connect() as conn:
+            version_rows = conn.execute(text("SELECT version_num FROM alembic_version")).all()
+    finally:
+        engine.dispose()
+    assert "alembic_version" in tables  # we did NOT drop it
+    assert "pipeline_runs" not in tables  # we did NOT run any migration
+    assert version_rows == []  # row still missing
+
+
 def test_main_reads_database_url_env_and_runs_bootstrap(tmp_path, monkeypatch):
     db = tmp_path / "cli.sqlite3"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db}")
