@@ -236,6 +236,75 @@ async def test_stream_429_drains_body_before_extracting_message():
 
 
 @pytest.mark.asyncio
+async def test_stream_upstream_error_chunk_raises_typed_error():
+    """OR returns 200 OK then emits an SSE chunk with `{"error": {...}}`
+    when the routed upstream provider rejects the request mid-stream (e.g.
+    "JAX does not support per-request seed"). Used to leak out as a bare
+    RuntimeError → internal_error; verify it's now typed."""
+    from meno_rag.llm.openrouter_errors import OpenRouterUpstreamError
+
+    chunks = [
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+        'data: {"model":"openai/gpt-oss-120b:free","error":{"message":'
+        '"Upstream error from OpenInference: JAX does not support per-request seed."}}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    transport = _stream_transport(chunks)
+    async with httpx.AsyncClient(transport=transport) as http:
+        status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
+        client = OpenRouterClient(
+            http_client=http,
+            api_key="k",
+            base_url="http://x",
+            http_referer="",
+            x_title="t",
+            status_store=status_store,
+            concurrency=8,
+            timeout_seconds=30.0,
+        )
+        with pytest.raises(OpenRouterUpstreamError) as exc_info:
+            async for _ in client.stream_chat_completion(
+                model="openai/gpt-oss-120b:free", messages=[{"role": "user", "content": "hi"}]
+            ):
+                pass
+        assert "JAX does not support per-request seed" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_non_stream_200_with_error_field_raises_typed_error():
+    """Non-stream path: OR returned 200 OK with `{"error": {...}}` and no
+    `choices`. Previously fell into a downstream KeyError."""
+    from meno_rag.llm.openrouter_errors import OpenRouterUpstreamError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-x",
+                "model": "openai/gpt-oss-120b:free",
+                "error": {"message": "Upstream error from OpenInference"},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
+        client = OpenRouterClient(
+            http_client=http,
+            api_key="k",
+            base_url="http://x",
+            http_referer="",
+            x_title="t",
+            status_store=status_store,
+            concurrency=8,
+            timeout_seconds=30.0,
+        )
+        with pytest.raises(OpenRouterUpstreamError) as exc_info:
+            await client.chat_completion(model="openai/gpt-oss-120b:free", messages=[{"role": "user", "content": "hi"}])
+        assert "Upstream error from OpenInference" in exc_info.value.message
+
+
+@pytest.mark.asyncio
 async def test_stream_4xx_drains_body_before_extracting_message():
     """Same regression class as 429, but for 4xx — context_length_exceeded
     detection depends on having the body text."""

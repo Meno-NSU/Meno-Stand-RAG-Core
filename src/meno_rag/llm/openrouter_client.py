@@ -17,6 +17,7 @@ from meno_rag.llm.openrouter_errors import (
     OpenRouterBadRequestError,
     OpenRouterRateLimitError,
     OpenRouterUnreachableError,
+    OpenRouterUpstreamError,
     parse_rate_limit_headers,
 )
 from meno_rag.llm.status import ModelStatusStore
@@ -186,6 +187,14 @@ class OpenRouterClient:
                 raise OpenRouterUnreachableError(model_id=model, cause=f"http_{response.status_code}") from exc
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
             data = response.json()
+            # OR sometimes returns 200 OK with `{"error": {...}}` and no
+            # `choices` when the routed upstream provider rejects the
+            # request. Treat it the same way as the streaming case.
+            err = data.get("error")
+            if err and not data.get("choices"):
+                upstream_msg = err.get("message") if isinstance(err, dict) else str(err)
+                log.warning("or_upstream_error_200", body_preview=str(upstream_msg)[:500])
+                raise OpenRouterUpstreamError(model_id=data.get("model") or model, message=str(upstream_msg))
             _log_or_completion(log, data=data, duration_ms=duration_ms, status_code=response.status_code)
             await self._status_store.mark_ok(model)
             return data
@@ -250,11 +259,17 @@ class OpenRouterClient:
             return contents
         data = json.loads(payload)
 
+        # OR delivers upstream-provider failures (e.g. "JAX does not support
+        # per-request seed") as an `error` field inside a 200-OK SSE chunk.
+        # Surface this as a typed `OpenRouterUpstreamError` so classify_error
+        # maps it to invalid_upstream_request — without the typed class the
+        # raw RuntimeError fell through to internal_error and the arena UI
+        # couldn't tell whether to substitute or surface to the user.
         error_field = data.get("error")
         if isinstance(error_field, dict) and error_field.get("message"):
-            raise RuntimeError(error_field["message"])
+            raise OpenRouterUpstreamError(model_id=data.get("model"), message=error_field["message"])
         elif error_field:
-            raise RuntimeError(str(error_field))
+            raise OpenRouterUpstreamError(model_id=data.get("model"), message=str(error_field))
 
         choices = data.get("choices") or []
         delta = choices[0].get("delta", {}) if choices else {}

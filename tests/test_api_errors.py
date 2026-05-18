@@ -17,6 +17,7 @@ from meno_rag.llm.openrouter_errors import (
     OpenRouterBadRequestError,
     OpenRouterRateLimitError,
     OpenRouterUnreachableError,
+    OpenRouterUpstreamError,
 )
 
 
@@ -56,6 +57,18 @@ def _httpx_status_error(status: int, body: str = "") -> httpx.HTTPStatusError:
                 message="This model's maximum context length is 8192 tokens.",
             ),
             "context_length_exceeded",
+            False,
+            400,
+        ),
+        (
+            # The real-stand symptom: OR returned 200 OK then sent an SSE
+            # error chunk because the routed upstream backend (OpenInference
+            # on JAX/TPU) rejected our `seed` parameter.
+            lambda: OpenRouterUpstreamError(
+                model_id="openai/gpt-oss-120b:free",
+                message="Upstream error from OpenInference: JAX does not support per-request seed.",
+            ),
+            "invalid_upstream_request",
             False,
             400,
         ),
@@ -157,6 +170,7 @@ def test_every_classified_error_has_russian_user_message():
         OpenRouterRateLimitError(model_id="m", reset_at=datetime.now(timezone.utc), retry_after_sec=1, message=""),
         OpenRouterUnreachableError(model_id="m", cause="x"),
         OpenRouterBadRequestError(model_id="m", status_code=400, message="bad"),
+        OpenRouterUpstreamError(model_id="m", message="upstream"),
         ModelRateLimitedError("m", datetime.now(timezone.utc), retry_after_sec=1),
         ModelUnreachableError("m", datetime.now(timezone.utc)),
         CoreModelUnavailableError(),

@@ -31,6 +31,24 @@ class OpenRouterBadRequestError(Exception):
         self.message = message
 
 
+class OpenRouterUpstreamError(Exception):
+    """200 OK from OpenRouter with an `error` field in the response payload.
+    Happens when the OR proxy itself succeeded but the upstream provider it
+    routed to (e.g. an OpenInference/JAX backend) rejected the request,
+    typically because it doesn't support a parameter we sent (`seed`,
+    `response_format`, etc.).
+
+    Same payload will fail again on the same model, so non-retryable here.
+    Arena callers can pick a different model and try again — but we must
+    not mark the model as unreachable: it's the param combination that's
+    bad, not the model's availability."""
+
+    def __init__(self, *, model_id: str | None, message: str) -> None:
+        super().__init__(message)
+        self.model_id = model_id
+        self.message = message
+
+
 def parse_rate_limit_headers(headers: dict[str, str]) -> tuple[datetime | None, int | None]:
     """Parse OR rate-limit headers. Returns (reset_at, retry_after_sec).
 
