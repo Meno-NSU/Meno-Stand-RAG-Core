@@ -14,14 +14,15 @@ from meno_rag.api.runtime_resolver import (
     ModelUnreachableError,
 )
 from meno_rag.llm.openrouter_errors import (
+    OpenRouterBadRequestError,
     OpenRouterRateLimitError,
     OpenRouterUnreachableError,
 )
 
 
-def _httpx_status_error(status: int) -> httpx.HTTPStatusError:
+def _httpx_status_error(status: int, body: str = "") -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "http://x")
-    response = httpx.Response(status, request=request)
+    response = httpx.Response(status, request=request, text=body)
     return httpx.HTTPStatusError("boom", request=request, response=response)
 
 
@@ -41,6 +42,22 @@ def _httpx_status_error(status: int) -> httpx.HTTPStatusError:
             "model_unreachable",
             True,
             503,
+        ),
+        (
+            lambda: OpenRouterBadRequestError(model_id="m", status_code=400, message="bad params"),
+            "invalid_upstream_request",
+            False,
+            400,
+        ),
+        (
+            lambda: OpenRouterBadRequestError(
+                model_id="m",
+                status_code=400,
+                message="This model's maximum context length is 8192 tokens.",
+            ),
+            "context_length_exceeded",
+            False,
+            400,
         ),
         (
             lambda: ModelRateLimitedError("m", datetime.now(timezone.utc), retry_after_sec=12),
@@ -76,7 +93,13 @@ def _httpx_status_error(status: int) -> httpx.HTTPStatusError:
             lambda: _httpx_status_error(400),
             "invalid_upstream_request",
             False,
-            502,
+            400,
+        ),
+        (
+            lambda: _httpx_status_error(400, body='{"error":"prompt is too long"}'),
+            "context_length_exceeded",
+            False,
+            400,
         ),
         (
             lambda: httpx.ConnectError("refused"),
@@ -115,3 +138,39 @@ def test_pipeline_rate_limit_passes_retry_after():
     exc = ModelRateLimitedError("m", datetime.now(timezone.utc), retry_after_sec=99)
     result = classify_error(exc)
     assert result.retry_after_sec == 99
+
+
+def test_every_classified_error_has_russian_user_message():
+    """Sanity: every code path must populate user_message — that's the field
+    the frontend renders verbatim, so an empty string would be a regression."""
+    samples = [
+        OpenRouterRateLimitError(model_id="m", reset_at=datetime.now(timezone.utc), retry_after_sec=1, message=""),
+        OpenRouterUnreachableError(model_id="m", cause="x"),
+        OpenRouterBadRequestError(model_id="m", status_code=400, message="bad"),
+        ModelRateLimitedError("m", datetime.now(timezone.utc), retry_after_sec=1),
+        ModelUnreachableError("m", datetime.now(timezone.utc)),
+        CoreModelUnavailableError(),
+        httpx.TimeoutException("t"),
+        _httpx_status_error(503),
+        _httpx_status_error(400),
+        httpx.ConnectError("c"),
+        ValueError("v"),
+        RuntimeError("r"),
+    ]
+    for exc in samples:
+        result = classify_error(exc)
+        assert result.user_message, f"empty user_message for {type(exc).__name__}"
+        # Russian sanity: at least one Cyrillic letter.
+        assert any("а" <= ch.lower() <= "я" or ch == "ё" for ch in result.user_message), (
+            f"user_message not in Russian for {type(exc).__name__}: {result.user_message!r}"
+        )
+
+
+def test_context_length_detection_is_case_insensitive():
+    exc = OpenRouterBadRequestError(
+        model_id="m",
+        status_code=400,
+        message="Context Length Exceeded for free tier",
+    )
+    result = classify_error(exc)
+    assert result.code == "context_length_exceeded"

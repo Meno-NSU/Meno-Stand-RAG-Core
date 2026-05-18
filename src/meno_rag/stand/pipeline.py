@@ -291,14 +291,22 @@ class StandRagPipeline:
                 timeout=self.settings.rewrite_timeout_seconds,
             )
         parsed = parse_rewritten_queries(rewritten)
+        # Defence: the rewrite system prompt asks the model to "decompose
+        # multi-aspect questions into several search queries". Without a
+        # cap, a sufficiently broad question can yield 30+ queries — each
+        # then triggers FAISS + BM25 retrieval and a rerank LLM call per
+        # candidate chunk. Dedupe (case-insensitive) and clip.
+        capped = _dedupe_and_cap_queries(parsed, self.settings.max_rewrite_queries)
         logger.info(
             "rewrite_parsed",
             model_id=runtime.model_id,
             raw_preview=rewritten[:300],
             raw_chars=len(rewritten),
             parsed_count=len(parsed),
+            unique_count=len(capped),
+            was_capped=len(parsed) > len(capped),
         )
-        return parsed
+        return capped
 
     async def _retrieve(self, search_queries: list[str]) -> list[dict[str, Any]]:
         batches: list[dict[str, Any]] = []
@@ -354,6 +362,11 @@ class StandRagPipeline:
             if len(ordered) > self.settings.rerank_top_k:
                 ordered = ordered[: self.settings.rerank_top_k]
             global_chunks = combine_relevant_chunks(global_chunks, ordered)
+        # `rerank_top_k` is a per-query cap; without a global cap on the
+        # cumulative merge across queries, a multi-aspect rewrite (e.g. 8
+        # queries × 12) would push 96 chunks into the QA context.
+        if len(global_chunks) > self.settings.max_context_chunks:
+            global_chunks = global_chunks[: self.settings.max_context_chunks]
         return global_chunks
 
     async def _score_chunk_with_llm(self, query: str, chunk_id: int, runtime: ModelRuntime) -> float:
@@ -404,10 +417,31 @@ class StandRagPipeline:
             chunk_mapping=self.resources.chunk_mapping,
             min_document_quality=self.settings.min_document_quality,
         )
-        context = "\n\n".join(
-            [f"==========\nDOCUMENT {idx + 1}\n==========\n\n{val.strip()}" for idx, val in enumerate(prepared_context)]
-        )
-        sources = references_to_sources(prepared_references)
+        # Greedy char-budget truncation: documents are already sorted by
+        # relevance, so we keep them in order until the budget is reached.
+        # `sources` and `context` must stay in sync — drop the tail of both.
+        budget = self.settings.max_qa_prompt_chars
+        kept_context: list[str] = []
+        kept_references: list[str] = []
+        total = 0
+        sep_chars = len("\n\n")
+        for idx, (doc_text, ref) in enumerate(zip(prepared_context, prepared_references)):
+            piece = f"==========\nDOCUMENT {idx + 1}\n==========\n\n{doc_text.strip()}"
+            extra = len(piece) + (sep_chars if kept_context else 0)
+            if kept_context and total + extra > budget:
+                logger.warning(
+                    "qa_context_truncated",
+                    budget_chars=budget,
+                    chars_before_truncate=total + extra,
+                    docs_kept=len(kept_context),
+                    docs_dropped=len(prepared_context) - len(kept_context),
+                )
+                break
+            kept_context.append(piece)
+            kept_references.append(ref)
+            total += extra
+        context = "\n\n".join(kept_context)
+        sources = references_to_sources(kept_references)
         return context, sources
 
     @staticmethod
@@ -431,6 +465,25 @@ class StandRagPipeline:
 
 
 _LARGE_QA_PROMPT_CHARS_WARN = 30000
+
+
+def _dedupe_and_cap_queries(queries: list[str], max_queries: int) -> list[str]:
+    """Case-insensitive dedupe preserving order, then clip to max_queries.
+
+    Trivial helper but kept named/testable because the cap is a load-bearing
+    defence against runaway retrievals and reranks downstream.
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for q in queries:
+        norm = " ".join(q.lower().split())
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        unique.append(q)
+    if max_queries > 0 and len(unique) > max_queries:
+        return unique[:max_queries]
+    return unique
 
 
 def _log_qa_prompt_size(messages: list[dict[str, str]], model_id: str, *, stream: bool) -> None:

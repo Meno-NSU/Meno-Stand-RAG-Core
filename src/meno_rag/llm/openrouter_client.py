@@ -14,6 +14,7 @@ import httpx
 import structlog
 
 from meno_rag.llm.openrouter_errors import (
+    OpenRouterBadRequestError,
     OpenRouterRateLimitError,
     OpenRouterUnreachableError,
     parse_rate_limit_headers,
@@ -94,6 +95,7 @@ class OpenRouterClient:
             payload["seed"] = seed
 
         effective_timeout = timeout if timeout is not None else self._timeout
+        log = logger.bind(model_provider="openrouter", model_id=model)
         async with self._semaphore:
             url = f"{self._base_url}/chat/completions"
             try:
@@ -104,6 +106,21 @@ class OpenRouterClient:
                         await self._handle_429(model, response)
                     if 500 <= response.status_code < 600:
                         await self._handle_5xx(model, response)
+                    if 400 <= response.status_code < 500:
+                        # Drain the body for diagnostics, then surface as a
+                        # non-retryable bad-request error (see _send).
+                        await response.aread()
+                        body = self._extract_error_message(response)
+                        log.warning(
+                            "or_stream_4xx",
+                            or_status_code=response.status_code,
+                            body_preview=body[:500],
+                        )
+                        raise OpenRouterBadRequestError(
+                            model_id=model,
+                            status_code=response.status_code,
+                            message=body,
+                        )
                     response.raise_for_status()
                     buffer = ""
                     async for chunk in response.aiter_text():
@@ -140,15 +157,23 @@ class OpenRouterClient:
             if 500 <= response.status_code < 600:
                 await self._handle_5xx(model, response)
             if 400 <= response.status_code < 500:
-                # 4xx is not retried, but we need the body to diagnose
-                # (model not found, context length exceeded, invalid params, ...).
+                # 4xx means the request itself is bad — model not found,
+                # context_length_exceeded, invalid params. Retrying with the
+                # same payload won't help, so we don't mark the model as
+                # unreachable. The full body is logged for diagnosis and the
+                # raised exception carries the upstream message so the API
+                # can surface a human-readable reason to the user.
+                body = self._extract_error_message(response)
                 log.warning(
                     "or_request_4xx",
                     or_status_code=response.status_code,
-                    body_preview=self._extract_error_message(response)[:500],
+                    body_preview=body[:500],
                 )
-                await self._status_store.mark_unreachable(model, error=f"http_{response.status_code}")
-                raise OpenRouterUnreachableError(model_id=model, cause=f"http_{response.status_code}")
+                raise OpenRouterBadRequestError(
+                    model_id=model,
+                    status_code=response.status_code,
+                    message=body,
+                )
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:

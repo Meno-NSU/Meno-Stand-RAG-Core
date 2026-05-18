@@ -725,13 +725,23 @@ async def _stream_response(
             error_code=classified.code,
             error_stage=stage,
         )
-        # Emit a dedicated SSE error event first (frontend can switch on event type
-        # to render a retry button); then keep the legacy openai-chunk format so
-        # existing clients still close cleanly.
-        yield sse_event(
-            "error",
-            _classified_error_payload(classified, retry_id=completion_id, stage=stage)["error"],
-        )
+        # If the failure happened during token streaming, the frontend is
+        # still showing the GENERATION stage as "started" and will keep
+        # spinning unless we explicitly mark it FAILED. Emit a stage event
+        # before the error so any UI watching `event: stage` transitions
+        # closes the spinner.
+        yield StageEvent(
+            stage=StageName.GENERATION if stage == "generation" else stage,
+            status=StageStatus.FAILED,
+            model_id=runtime.generation.model_id,
+        ).to_sse()
+        # Emit a dedicated SSE error event with the structured payload so
+        # frontends can show a Retry button and a human-readable message
+        # without parsing free-form text.
+        payload_dict = _classified_error_payload(classified, retry_id=completion_id, stage=stage)
+        yield sse_event("error", payload_dict["error"])
+        # Keep the legacy openai-chunk format too so existing clients close
+        # cleanly. Same payload duplicated as the chunk's `error` field.
         err_chunk = openai_chunk(
             completion_id=completion_id,
             created=created_ts,
@@ -739,7 +749,7 @@ async def _stream_response(
             delta={},
             finish_reason="error",
         )
-        err_chunk["error"] = _classified_error_payload(classified, retry_id=completion_id, stage=stage)["error"]
+        err_chunk["error"] = payload_dict["error"]
         yield sse_data(err_chunk)
         yield sse_data("[DONE]")
         await _persist_failure(
@@ -884,13 +894,20 @@ def _classified_error_payload(classified: ClassifiedError, *, retry_id: str, sta
     error_type = "invalid_request_error" if classified.http_status < 500 else "server_error"
     return {
         "error": {
-            "message": classified.message,
+            # Human-readable, safe to show in UI verbatim.
+            "message": classified.user_message,
+            # Technical detail kept around for debug panels / logs.
+            "detail": classified.message,
             "type": error_type,
             "code": classified.code,
             "retryable": classified.retryable,
             "retry_after_sec": classified.retry_after_sec,
             "retry_id": retry_id,
             "stage": stage,
+            # Signal to the frontend: drop partial UI artefacts (streamed
+            # tokens, "thinking..." spinner, source list we sent before
+            # generation started) because we never reached a final answer.
+            "should_discard_partial": True,
         }
     }
 
