@@ -70,6 +70,9 @@ async def create_pipeline_run(
     response_len: int | None,
     stream: bool,
     error: str | None = None,
+    error_code: str | None = None,
+    error_retryable: bool | None = None,
+    error_stage: str | None = None,
 ) -> None:
     session.add(
         PipelineRun(
@@ -86,6 +89,9 @@ async def create_pipeline_run(
             response_len=response_len,
             stream=stream,
             error=error,
+            error_code=error_code,
+            error_retryable=error_retryable,
+            error_stage=error_stage,
         )
     )
 

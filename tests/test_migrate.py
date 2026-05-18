@@ -70,7 +70,7 @@ def test_run_bootstrap_tracked_db_advances_to_head(tmp_path):
         engine.dispose()
     assert "generation_model" in cols_after
     assert "core_model" in cols_after
-    assert rev == "0002_or_dual_model_columns"
+    assert rev == "0003_pipeline_run_error_metadata"
 
 
 def test_run_bootstrap_untracked_db_fails_with_diagnostic(tmp_path, capsys):

@@ -63,6 +63,9 @@ class PipelineRun(Base):
     response_len: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stream: Mapped[bool] = mapped_column(default=False, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_retryable: Mapped[bool | None] = mapped_column(nullable=True)
+    error_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     stages: Mapped[list[PipelineStageRun]] = relationship(back_populates="pipeline_run", cascade="all, delete-orphan")

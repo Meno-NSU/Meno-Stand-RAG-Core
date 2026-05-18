@@ -191,8 +191,9 @@ class StandRagPipeline:
         temperature: float | None = None,
     ) -> str:
         sampling = QaSampling()
+        _log_qa_prompt_size(outcome.qa_messages, runtime.generation.model_id, stream=False)
         async with self.generation_semaphore:
-            return await self.llm_router.chat_completion_text(
+            answer = await self.llm_router.chat_completion_text(
                 runtime=runtime.generation,
                 messages=outcome.qa_messages,
                 max_tokens=max_tokens or self.settings.max_output_tokens,
@@ -200,6 +201,13 @@ class StandRagPipeline:
                 seed=sampling.seed,
                 timeout=self.settings.generation_timeout_seconds,
             )
+        logger.info(
+            "generation_completed",
+            model_id=runtime.generation.model_id,
+            answer_chars=len(answer),
+            answer_preview=answer[:200],
+        )
+        return answer
 
     async def stream_text(
         self,
@@ -210,6 +218,8 @@ class StandRagPipeline:
         temperature: float | None = None,
     ):
         sampling = QaSampling()
+        _log_qa_prompt_size(outcome.qa_messages, runtime.generation.model_id, stream=True)
+        total_chars = 0
         async with self.generation_semaphore:
             async for token in self.llm_router.stream_chat_completion(
                 runtime=runtime.generation,
@@ -219,7 +229,13 @@ class StandRagPipeline:
                 seed=sampling.seed,
                 timeout=self.settings.generation_timeout_seconds,
             ):
+                total_chars += len(token)
                 yield token
+        logger.info(
+            "generation_stream_completed",
+            model_id=runtime.generation.model_id,
+            answer_chars=total_chars,
+        )
 
     async def _timed_stage(
         self,
@@ -274,7 +290,15 @@ class StandRagPipeline:
                 seed=sampling.seed,
                 timeout=self.settings.rewrite_timeout_seconds,
             )
-        return parse_rewritten_queries(rewritten)
+        parsed = parse_rewritten_queries(rewritten)
+        logger.info(
+            "rewrite_parsed",
+            model_id=runtime.model_id,
+            raw_preview=rewritten[:300],
+            raw_chars=len(rewritten),
+            parsed_count=len(parsed),
+        )
+        return parsed
 
     async def _retrieve(self, search_queries: list[str]) -> list[dict[str, Any]]:
         batches: list[dict[str, Any]] = []
@@ -354,6 +378,7 @@ class StandRagPipeline:
                     extra_body={"guided_choice": ["0", "1", "2"]},
                     timeout=self.settings.rerank_timeout_seconds,
                 )
+                _log_rerank_choice(response, chunk_id=chunk_id, model_id=runtime.model_id)
                 return score_from_logprobs(response["choices"][0])
             except Exception as exc:
                 logger.warning("rerank_guided_choice_failed", chunk_id=chunk_id, error=str(exc))
@@ -403,6 +428,50 @@ class StandRagPipeline:
             context, sources = result
             return {"sources": len(sources), "context_tokens": max(1, len(context.split())) if context else 0}
         return {}
+
+
+_LARGE_QA_PROMPT_CHARS_WARN = 30000
+
+
+def _log_qa_prompt_size(messages: list[dict[str, str]], model_id: str, *, stream: bool) -> None:
+    try:
+        total = sum(len(m.get("content", "")) for m in messages)
+        log = logger.bind(model_id=model_id, stream=stream, stage=StageName.GENERATION)
+        if total > _LARGE_QA_PROMPT_CHARS_WARN:
+            log.warning(
+                "qa_prompt_oversized",
+                qa_prompt_chars=total,
+                qa_prompt_messages=len(messages),
+                threshold_chars=_LARGE_QA_PROMPT_CHARS_WARN,
+            )
+        else:
+            log.info("qa_prompt_size", qa_prompt_chars=total, qa_prompt_messages=len(messages))
+    except Exception:  # pragma: no cover
+        logger.debug("qa_prompt_size_log_failed", exc_info=True)
+
+
+def _log_rerank_choice(response: dict[str, Any], *, chunk_id: int, model_id: str) -> None:
+    try:
+        choice = (response.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        finish_reason = choice.get("finish_reason")
+        logprobs = choice.get("logprobs") or {}
+        content_logprobs = logprobs.get("content") or []
+        first = content_logprobs[0] if content_logprobs else {}
+        top = first.get("top_logprobs") or []
+        logger.info(
+            "rerank_choice",
+            chunk_id=chunk_id,
+            model_id=model_id,
+            first_token=first.get("token"),
+            first_logprob=first.get("logprob"),
+            top_tokens=[(t.get("token"), t.get("logprob")) for t in top],
+            finish_reason=finish_reason,
+            content_preview=content[:50],
+        )
+    except Exception:  # pragma: no cover
+        logger.debug("rerank_choice_log_failed", chunk_id=chunk_id, exc_info=True)
 
 
 def extract_question_and_history(messages: list[ChatMessage]) -> tuple[str, list[dict[str, str]]]:

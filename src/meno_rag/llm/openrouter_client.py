@@ -19,6 +19,7 @@ from meno_rag.llm.openrouter_errors import (
     parse_rate_limit_headers,
 )
 from meno_rag.llm.status import ModelStatusStore
+from meno_rag.llm.think_detector import extract_thinking, has_thinking
 
 logger = structlog.get_logger(__name__)
 
@@ -138,15 +139,26 @@ class OpenRouterClient:
                 await self._handle_429(model, response)
             if 500 <= response.status_code < 600:
                 await self._handle_5xx(model, response)
+            if 400 <= response.status_code < 500:
+                # 4xx is not retried, but we need the body to diagnose
+                # (model not found, context length exceeded, invalid params, ...).
+                log.warning(
+                    "or_request_4xx",
+                    or_status_code=response.status_code,
+                    body_preview=self._extract_error_message(response)[:500],
+                )
+                await self._status_store.mark_unreachable(model, error=f"http_{response.status_code}")
+                raise OpenRouterUnreachableError(model_id=model, cause=f"http_{response.status_code}")
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 await self._status_store.mark_unreachable(model, error=f"http_{response.status_code}")
                 raise OpenRouterUnreachableError(model_id=model, cause=f"http_{response.status_code}") from exc
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            log.info("or_request_completed", or_status_code=response.status_code, or_duration_ms=duration_ms)
+            data = response.json()
+            _log_or_completion(log, data=data, duration_ms=duration_ms, status_code=response.status_code)
             await self._status_store.mark_ok(model)
-            return response.json()
+            return data
 
     async def _handle_429(self, model: str, response: httpx.Response) -> None:
         from datetime import datetime, timedelta, timezone
@@ -220,3 +232,40 @@ class OpenRouterClient:
         if isinstance(content, str) and content:
             contents.append(content)
         return contents
+
+
+def _log_or_completion(log: Any, *, data: dict[str, Any], duration_ms: float, status_code: int) -> None:
+    try:
+        choices = data.get("choices") or []
+        choice = choices[0] if choices else {}
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        finish_reason = choice.get("finish_reason")
+        usage = data.get("usage") or {}
+
+        thinking_text, visible = ("", content)
+        if has_thinking(content):
+            thinking_text, visible = extract_thinking(content)
+            log.info(
+                "llm_thinking_detected",
+                thinking_chars=len(thinking_text),
+                visible_chars=len(visible),
+            )
+        if not visible.strip():
+            log.warning(
+                "or_empty_completion",
+                content_chars=len(content),
+                finish_reason=finish_reason,
+            )
+        log.info(
+            "or_request_completed",
+            or_status_code=status_code,
+            or_duration_ms=duration_ms,
+            content_preview=visible[:200],
+            content_chars=len(visible),
+            finish_reason=finish_reason,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+        )
+    except Exception:  # pragma: no cover
+        log.debug("or_log_failed", exc_info=True)
