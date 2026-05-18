@@ -18,6 +18,19 @@ class OpenRouterUnreachableError(Exception):
         self.cause = cause
 
 
+class OpenRouterBadRequestError(Exception):
+    """4xx from OpenRouter — request itself is invalid (oversized prompt,
+    unsupported params, model not found). Retrying with the same payload
+    will fail the same way; the caller should surface a clear message and
+    not mark the model as unreachable."""
+
+    def __init__(self, *, model_id: str, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.model_id = model_id
+        self.status_code = status_code
+        self.message = message
+
+
 def parse_rate_limit_headers(headers: dict[str, str]) -> tuple[datetime | None, int | None]:
     """Parse OR rate-limit headers. Returns (reset_at, retry_after_sec).
 
