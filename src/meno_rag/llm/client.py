@@ -5,6 +5,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+import structlog
+
+from meno_rag.llm.think_detector import extract_thinking, has_thinking
+
+logger = structlog.get_logger(__name__)
 
 
 class VLLMClient:
@@ -54,7 +59,9 @@ class VLLMClient:
             timeout=timeout,
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        _log_vllm_completion(model=model, base_url=base_url, data=data)
+        return data
 
     async def chat_completion_text(self, **kwargs: Any) -> str:
         data = await self.chat_completion(stream=False, **kwargs)
@@ -79,6 +86,8 @@ class VLLMClient:
         if seed is not None:
             payload["seed"] = seed
 
+        accumulated: list[str] = []
+        finish_reason: str | None = None
         async with self._http.stream(
             "POST",
             self._url(base_url, "chat/completions"),
@@ -92,11 +101,22 @@ class VLLMClient:
                 buffer += chunk
                 while "\n\n" in buffer:
                     event_block, buffer = buffer.split("\n\n", 1)
-                    for content in self._parse_sse_content(event_block):
-                        yield content
+                    for content, fr in self._parse_sse_content_with_finish(event_block):
+                        if content:
+                            accumulated.append(content)
+                            yield content
+                        if fr is not None:
+                            finish_reason = fr
             if buffer.strip():
-                for content in self._parse_sse_content(buffer):
-                    yield content
+                for content, fr in self._parse_sse_content_with_finish(buffer):
+                    if content:
+                        accumulated.append(content)
+                        yield content
+                    if fr is not None:
+                        finish_reason = fr
+        _log_vllm_stream_completion(
+            model=model, base_url=base_url, content="".join(accumulated), finish_reason=finish_reason
+        )
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -107,21 +127,82 @@ class VLLMClient:
 
     @staticmethod
     def _parse_sse_content(block: str) -> list[str]:
-        contents: list[str] = []
+        return [content for content, _ in VLLMClient._parse_sse_content_with_finish(block)]
+
+    @staticmethod
+    def _parse_sse_content_with_finish(block: str) -> list[tuple[str, str | None]]:
+        results: list[tuple[str, str | None]] = []
         data_lines = []
         for line in block.splitlines():
             if line.startswith("data:"):
                 data_lines.append(line[5:].strip())
         if not data_lines:
-            return contents
+            return results
         payload = "\n".join(data_lines)
         if payload == "[DONE]":
-            return contents
+            return results
         data = json.loads(payload)
         if data.get("error", {}).get("message"):
             raise RuntimeError(data["error"]["message"])
-        delta = data.get("choices", [{}])[0].get("delta", {})
+        choice = data.get("choices", [{}])[0]
+        delta = choice.get("delta", {})
         content = delta.get("content")
-        if isinstance(content, str) and content:
-            contents.append(content)
-        return contents
+        finish_reason = choice.get("finish_reason")
+        if (isinstance(content, str) and content) or finish_reason is not None:
+            results.append((content if isinstance(content, str) else "", finish_reason))
+        return results
+
+
+def _log_vllm_completion(*, model: str, base_url: str, data: dict[str, Any]) -> None:
+    try:
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        finish_reason = choice.get("finish_reason")
+        usage = data.get("usage") or {}
+        log = logger.bind(model_provider="vllm", model_id=model, base_url=base_url)
+        thinking_text, visible = ("", content)
+        if has_thinking(content):
+            thinking_text, visible = extract_thinking(content)
+            log.info(
+                "llm_thinking_detected",
+                thinking_chars=len(thinking_text),
+                visible_chars=len(visible),
+            )
+        if not visible.strip():
+            log.warning("llm_empty_visible_response", content_chars=len(content))
+        log.info(
+            "vllm_response",
+            content_preview=visible[:200],
+            content_chars=len(visible),
+            finish_reason=finish_reason,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+        )
+    except Exception:  # pragma: no cover - logging must never raise
+        logger.debug("vllm_log_failed", model_id=model, exc_info=True)
+
+
+def _log_vllm_stream_completion(
+    *, model: str, base_url: str, content: str, finish_reason: str | None
+) -> None:
+    try:
+        log = logger.bind(model_provider="vllm", model_id=model, base_url=base_url)
+        thinking_text, visible = ("", content)
+        if has_thinking(content):
+            thinking_text, visible = extract_thinking(content)
+            log.info(
+                "llm_thinking_detected",
+                thinking_chars=len(thinking_text),
+                visible_chars=len(visible),
+            )
+        if not visible.strip():
+            log.warning("llm_empty_visible_response", content_chars=len(content))
+        log.info(
+            "vllm_stream_response",
+            content_preview=visible[:200],
+            content_chars=len(visible),
+            finish_reason=finish_reason,
+        )
+    except Exception:  # pragma: no cover
+        logger.debug("vllm_stream_log_failed", model_id=model, exc_info=True)

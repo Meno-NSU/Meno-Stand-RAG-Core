@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import text
 
 from meno_rag.api import arena
+from meno_rag.api.errors import ClassifiedError, classify_error
 from meno_rag.api.events import (
     StageEvent,
     StageName,
@@ -360,6 +361,73 @@ async def refresh_models(request: Request):
     return await list_models(request)
 
 
+@app.get("/v1/diagnostics/openrouter")
+async def diagnostics_openrouter(request: Request):
+    """Probe each discovered OpenRouter model with a tiny prompt. Reports per-model
+    status so operators can quickly see which models actually respond, are
+    rate-limited, return empty completions, or reject the request with 4xx.
+
+    Not for production traffic — invoke ad-hoc when investigating model issues.
+    """
+    settings: Settings = request.app.state.settings
+    or_registry = request.app.state.openrouter_registry
+    or_client: OpenRouterClient | None = request.app.state.openrouter_client
+
+    if not settings.openrouter_enabled or or_registry is None or or_client is None:
+        return _error_response(503, "OpenRouter is not configured.", "openrouter_disabled")
+
+    models = await or_registry.list_models()
+    if not models:
+        return {"object": "list", "data": [], "summary": {"total": 0, "ok": 0}}
+
+    sem = asyncio.Semaphore(min(settings.openrouter_generation_concurrency, max(1, len(models))))
+
+    async def probe(model: dict[str, Any]) -> dict[str, Any]:
+        model_id = model["id"]
+        record: dict[str, Any] = {
+            "model_id": model_id,
+            "display_name": model.get("display_name") or model_id,
+            "ok": False,
+            "latency_ms": None,
+            "error_code": None,
+            "error_message": None,
+            "finish_reason": None,
+            "content_preview": None,
+        }
+        async with sem:
+            started = time.perf_counter()
+            try:
+                response = await or_client.chat_completion(
+                    model=model_id,
+                    messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+                    max_tokens=10,
+                    temperature=0.0,
+                    timeout=20.0,
+                )
+                record["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
+                choice = (response.get("choices") or [{}])[0]
+                content = (choice.get("message") or {}).get("content") or ""
+                record["ok"] = bool(content.strip())
+                record["finish_reason"] = choice.get("finish_reason")
+                record["content_preview"] = content[:200]
+            except Exception as exc:
+                record["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
+                classified = classify_error(exc)
+                record["error_code"] = classified.code
+                record["error_message"] = classified.message[:300]
+        return record
+
+    results = await asyncio.gather(*[probe(m) for m in models])
+    summary = {
+        "total": len(results),
+        "ok": sum(1 for r in results if r["ok"]),
+        "with_empty_content": sum(1 for r in results if r["ok"] is False and r["error_code"] is None),
+        "rate_limited": sum(1 for r in results if r["error_code"] == "model_rate_limited"),
+        "unreachable": sum(1 for r in results if r["error_code"] == "model_unreachable"),
+    }
+    return {"object": "list", "data": results, "summary": summary}
+
+
 @app.get("/v1/knowledge-bases")
 async def list_knowledge_bases(request: Request):
     available = request.app.state.pipeline is not None
@@ -475,7 +543,6 @@ async def _non_stream_response(
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
     started = time.perf_counter()
-    error: str | None = None
     answer = ""
     outcome = None
     generation_ms = 0.0
@@ -503,10 +570,27 @@ async def _non_stream_response(
             stream=False,
         )
     except Exception as exc:
-        error = str(exc)
-        logger.exception("chat_non_stream_failed", request_id=completion_id, error=error)
-        await _persist_failure(database, completion_id, session_id, runtime, payload, error, stream=False)
-        return _error_response(500, error, "server_error")
+        stage = "generation" if outcome is not None else "prepare"
+        classified = classify_error(exc)
+        logger.exception(
+            "chat_non_stream_failed",
+            request_id=completion_id,
+            error=str(exc),
+            error_code=classified.code,
+            error_stage=stage,
+        )
+        await _persist_failure(
+            database,
+            completion_id,
+            session_id,
+            runtime,
+            payload,
+            str(exc),
+            stream=False,
+            classified=classified,
+            stage=stage,
+        )
+        return _classified_error_response(classified, retry_id=completion_id, stage=stage)
 
     return {
         "id": completion_id,
@@ -632,8 +716,22 @@ async def _stream_response(
             stream=True,
         )
     except Exception as exc:
-        error = str(exc)
-        logger.exception("chat_stream_failed", request_id=completion_id, error=error)
+        stage = "generation" if outcome is not None else "prepare"
+        classified = classify_error(exc)
+        logger.exception(
+            "chat_stream_failed",
+            request_id=completion_id,
+            error=str(exc),
+            error_code=classified.code,
+            error_stage=stage,
+        )
+        # Emit a dedicated SSE error event first (frontend can switch on event type
+        # to render a retry button); then keep the legacy openai-chunk format so
+        # existing clients still close cleanly.
+        yield sse_event(
+            "error",
+            _classified_error_payload(classified, retry_id=completion_id, stage=stage)["error"],
+        )
         err_chunk = openai_chunk(
             completion_id=completion_id,
             created=created_ts,
@@ -641,10 +739,22 @@ async def _stream_response(
             delta={},
             finish_reason="error",
         )
-        err_chunk["error"] = {"message": error, "type": "server_error"}
+        err_chunk["error"] = _classified_error_payload(classified, retry_id=completion_id, stage=stage)[
+            "error"
+        ]
         yield sse_data(err_chunk)
         yield sse_data("[DONE]")
-        await _persist_failure(database, completion_id, session_id, runtime, payload, error, stream=True)
+        await _persist_failure(
+            database,
+            completion_id,
+            session_id,
+            runtime,
+            payload,
+            str(exc),
+            stream=True,
+            classified=classified,
+            stage=stage,
+        )
 
 
 async def _persist_success(
@@ -727,6 +837,8 @@ async def _persist_failure(
     error: str,
     *,
     stream: bool,
+    classified: ClassifiedError | None = None,
+    stage: str | None = None,
 ) -> None:
     question = ""
     for message in reversed(payload.messages):
@@ -749,6 +861,9 @@ async def _persist_failure(
             response_len=None,
             stream=stream,
             error=error,
+            error_code=classified.code if classified else None,
+            error_retryable=classified.retryable if classified else None,
+            error_stage=stage,
         )
         await session.commit()
 
@@ -764,6 +879,30 @@ def _error_response(status_code: int, message: str, code: str, param: str | None
                 "param": param,
             }
         },
+    )
+
+
+def _classified_error_payload(
+    classified: ClassifiedError, *, retry_id: str, stage: str
+) -> dict[str, Any]:
+    error_type = "invalid_request_error" if classified.http_status < 500 else "server_error"
+    return {
+        "error": {
+            "message": classified.message,
+            "type": error_type,
+            "code": classified.code,
+            "retryable": classified.retryable,
+            "retry_after_sec": classified.retry_after_sec,
+            "retry_id": retry_id,
+            "stage": stage,
+        }
+    }
+
+
+def _classified_error_response(classified: ClassifiedError, *, retry_id: str, stage: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=classified.http_status,
+        content=_classified_error_payload(classified, retry_id=retry_id, stage=stage),
     )
 
 
