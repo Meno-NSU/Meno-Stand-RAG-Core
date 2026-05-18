@@ -31,6 +31,20 @@ class Settings(BaseSettings):
     max_output_tokens: int = Field(default=1024, validation_alias="MAX_OUTPUT_TOKENS")
     generation_temperature: float = Field(default=0.1, validation_alias="GENERATION_TEMPERATURE")
 
+    # Defence in depth against an LLM that decomposes a question into 30+
+    # search queries (each costing 2 retrievals + N rerank LLM calls + N
+    # chunks merged into context). The reference research code has no such
+    # caps, but a production service must stay bounded.
+    max_rewrite_queries: int = Field(default=8, validation_alias="MAX_REWRITE_QUERIES")
+    # Cap on the number of chunks that survive into the QA context after the
+    # cumulative rerank merge across queries. Previously the per-query cap
+    # `rerank_top_k` was the only limit, so a 30-query rewrite could push
+    # 30*12=360 chunks into the prompt.
+    max_context_chunks: int = Field(default=12, validation_alias="MAX_CONTEXT_CHUNKS")
+    # Last-resort character budget for the QA prompt. ~60k chars ≈ 15k tokens
+    # — fits the context window of most free-tier OpenRouter models.
+    max_qa_prompt_chars: int = Field(default=60000, validation_alias="MAX_QA_PROMPT_CHARS")
+
     stand_compat_context_order: bool = Field(default=True, validation_alias="STAND_COMPAT_CONTEXT_ORDER")
     qa_fewshots_enabled: bool = Field(default=False, validation_alias="QA_FEWSHOTS_ENABLED")
 
