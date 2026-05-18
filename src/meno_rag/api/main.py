@@ -739,9 +739,7 @@ async def _stream_response(
             delta={},
             finish_reason="error",
         )
-        err_chunk["error"] = _classified_error_payload(classified, retry_id=completion_id, stage=stage)[
-            "error"
-        ]
+        err_chunk["error"] = _classified_error_payload(classified, retry_id=completion_id, stage=stage)["error"]
         yield sse_data(err_chunk)
         yield sse_data("[DONE]")
         await _persist_failure(
@@ -882,9 +880,7 @@ def _error_response(status_code: int, message: str, code: str, param: str | None
     )
 
 
-def _classified_error_payload(
-    classified: ClassifiedError, *, retry_id: str, stage: str
-) -> dict[str, Any]:
+def _classified_error_payload(classified: ClassifiedError, *, retry_id: str, stage: str) -> dict[str, Any]:
     error_type = "invalid_request_error" if classified.http_status < 500 else "server_error"
     return {
         "error": {

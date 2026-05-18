@@ -176,9 +176,7 @@ async def main() -> None:
 
             async def _run_with_sem(q: dict[str, Any], m: str = model) -> dict[str, Any]:
                 async with sem:
-                    return await _one_run(
-                        client, base_url=args.base_url, model=m, question=q, timeout=args.timeout
-                    )
+                    return await _one_run(client, base_url=args.base_url, model=m, question=q, timeout=args.timeout)
 
             results = await asyncio.gather(*[_run_with_sem(q) for q in questions])
             for r in results:

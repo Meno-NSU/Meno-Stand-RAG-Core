@@ -31,7 +31,7 @@ def extract_thinking(content: str) -> tuple[str, str]:
     # Handle unclosed <think> tag (response was cut off mid-thinking).
     open_match = _THINK_OPEN_RE.search(visible)
     if open_match is not None:
-        thinking_parts.append(visible[open_match.start():])
+        thinking_parts.append(visible[open_match.start() :])
         visible = visible[: open_match.start()]
 
     return "".join(thinking_parts), visible.strip()

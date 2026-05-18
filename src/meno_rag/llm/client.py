@@ -183,9 +183,7 @@ def _log_vllm_completion(*, model: str, base_url: str, data: dict[str, Any]) -> 
         logger.debug("vllm_log_failed", model_id=model, exc_info=True)
 
 
-def _log_vllm_stream_completion(
-    *, model: str, base_url: str, content: str, finish_reason: str | None
-) -> None:
+def _log_vllm_stream_completion(*, model: str, base_url: str, content: str, finish_reason: str | None) -> None:
     try:
         log = logger.bind(model_provider="vllm", model_id=model, base_url=base_url)
         thinking_text, visible = ("", content)

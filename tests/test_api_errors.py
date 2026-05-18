@@ -106,9 +106,7 @@ def test_classify_error_table(exc_factory, expected_code, expected_retryable, ex
 
 
 def test_rate_limit_passes_retry_after_through():
-    exc = OpenRouterRateLimitError(
-        model_id="m", reset_at=datetime.now(timezone.utc), retry_after_sec=77, message="rl"
-    )
+    exc = OpenRouterRateLimitError(model_id="m", reset_at=datetime.now(timezone.utc), retry_after_sec=77, message="rl")
     result = classify_error(exc)
     assert result.retry_after_sec == 77
 
