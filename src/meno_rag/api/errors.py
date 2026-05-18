@@ -28,6 +28,7 @@ from meno_rag.llm.openrouter_errors import (
     OpenRouterBadRequestError,
     OpenRouterRateLimitError,
     OpenRouterUnreachableError,
+    OpenRouterUpstreamError,
 )
 
 
@@ -120,6 +121,17 @@ def classify_error(exc: BaseException) -> ClassifiedError:
         return ClassifiedError(
             code="invalid_upstream_request",
             message=f"OpenRouter {exc.status_code}: {exc.message}",
+            user_message=_USER_MSG_BAD_REQUEST,
+            retryable=False,
+            http_status=400,
+        )
+    if isinstance(exc, OpenRouterUpstreamError):
+        # 200 OK from OR + upstream provider error (e.g. JAX doesn't support
+        # `seed`). Same payload will fail again on this model — non-retryable
+        # here. Arena will pick another model.
+        return ClassifiedError(
+            code="invalid_upstream_request",
+            message=f"OpenRouter upstream rejected: {exc.message}",
             user_message=_USER_MSG_BAD_REQUEST,
             retryable=False,
             http_status=400,

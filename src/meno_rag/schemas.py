@@ -33,10 +33,13 @@ class ClearHistoryResponse(BaseModel):
 
 
 class VoteRequest(BaseModel):
-    model_a: str
-    kb_a: str
-    model_b: str
-    kb_b: str
+    # Empty model/kb strings are nonsensical for arena (they make leaderboard
+    # rows that can never be matched again) — reject at the schema layer so
+    # a frontend bug can't silently poison the Elo store.
+    model_a: str = Field(..., min_length=1)
+    kb_a: str = Field(..., min_length=1)
+    model_b: str = Field(..., min_length=1)
+    kb_b: str = Field(..., min_length=1)
     winner: Literal["a", "b", "tie", "both_bad"]
     response_a: Optional[str] = None
     response_b: Optional[str] = None
