@@ -102,14 +102,19 @@ class OpenRouterClient:
                 async with self._http.stream(
                     "POST", url, headers=self._headers(), json=payload, timeout=effective_timeout
                 ) as response:
+                    # Any non-2xx path needs the body for diagnostics, and
+                    # `_extract_error_message` calls .json()/.text which both
+                    # raise ResponseNotRead on a stream that hasn't been
+                    # consumed. Drain once up front for every error class so
+                    # 429/4xx/5xx all reach our typed exceptions instead of
+                    # falling through to a generic internal_error.
+                    if response.status_code >= 400:
+                        await response.aread()
                     if response.status_code == 429:
                         await self._handle_429(model, response)
                     if 500 <= response.status_code < 600:
                         await self._handle_5xx(model, response)
                     if 400 <= response.status_code < 500:
-                        # Drain the body for diagnostics, then surface as a
-                        # non-retryable bad-request error (see _send).
-                        await response.aread()
                         body = self._extract_error_message(response)
                         log.warning(
                             "or_stream_4xx",

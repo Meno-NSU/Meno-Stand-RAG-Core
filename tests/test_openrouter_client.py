@@ -183,6 +183,90 @@ async def test_stream_429_raises_and_marks_rate_limited():
         assert s.state.value == "rate_limited"
 
 
+class _LazyStream(httpx.AsyncByteStream):
+    """A streamed body that has NOT been consumed yet. response.text / .json()
+    on the resulting Response raises httpx.ResponseNotRead until aread() is
+    awaited — this is what httpx does over a real socket. MockTransport with
+    `content=...` pre-reads, so it never exercises the bug. Use this when
+    asserting we drain the body before extracting error messages."""
+
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    async def __aiter__(self):
+        yield self._content
+
+    async def aclose(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_stream_429_drains_body_before_extracting_message():
+    """Regression: in the wild we hit a 429 on a streamed OpenRouter response
+    and the bug surfaced as `internal_error: Attempted to access streaming
+    response content, without having called read()` — the user lost the
+    rate-limit signal. Verify _handle_429 sees a drained body."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            stream=_LazyStream(b'{"error":{"message":"rate limit hit"}}'),
+            headers={"X-RateLimit-Reset": "1900000000"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
+        client = OpenRouterClient(
+            http_client=http,
+            api_key="k",
+            base_url="http://x",
+            http_referer="",
+            x_title="t",
+            status_store=status_store,
+            concurrency=8,
+            timeout_seconds=30.0,
+        )
+        with pytest.raises(OpenRouterRateLimitError) as exc_info:
+            async for _ in client.stream_chat_completion(model="m", messages=[{"role": "user", "content": "hi"}]):
+                pass
+        assert "rate limit hit" in str(exc_info.value)
+        s = await status_store.get("m")
+        assert s.state.value == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_stream_4xx_drains_body_before_extracting_message():
+    """Same regression class as 429, but for 4xx — context_length_exceeded
+    detection depends on having the body text."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            stream=_LazyStream(b'{"error":{"message":"context length exceeded"}}'),
+        )
+
+    from meno_rag.llm.openrouter_errors import OpenRouterBadRequestError
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
+        client = OpenRouterClient(
+            http_client=http,
+            api_key="k",
+            base_url="http://x",
+            http_referer="",
+            x_title="t",
+            status_store=status_store,
+            concurrency=8,
+            timeout_seconds=30.0,
+        )
+        with pytest.raises(OpenRouterBadRequestError) as exc_info:
+            async for _ in client.stream_chat_completion(model="m", messages=[{"role": "user", "content": "hi"}]):
+                pass
+        assert "context length exceeded" in exc_info.value.message
+
+
 @pytest.mark.asyncio
 async def test_chat_completion_accepts_per_call_timeout():
     captured: dict = {}

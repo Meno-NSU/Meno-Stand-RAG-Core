@@ -108,6 +108,16 @@ def _httpx_status_error(status: int, body: str = "") -> httpx.HTTPStatusError:
             502,
         ),
         (
+            # httpx.ResponseNotRead inherits from RuntimeError, NOT httpx.HTTPError.
+            # Without an explicit StreamError branch in classify_error it would
+            # fall through to `internal_error` — we saw this in the wild when the
+            # stream code path tried `response.json()` on an undrained 429 body.
+            lambda: httpx.ResponseNotRead(),
+            "transient_network",
+            True,
+            502,
+        ),
+        (
             lambda: ValueError("bad model id"),
             "invalid_input",
             False,
@@ -154,6 +164,7 @@ def test_every_classified_error_has_russian_user_message():
         _httpx_status_error(503),
         _httpx_status_error(400),
         httpx.ConnectError("c"),
+        httpx.ResponseNotRead(),
         ValueError("v"),
         RuntimeError("r"),
     ]

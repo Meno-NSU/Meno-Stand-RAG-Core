@@ -200,6 +200,18 @@ def classify_error(exc: BaseException) -> ClassifiedError:
             retryable=True,
             http_status=502,
         )
+    # Safety net: httpx.StreamError (including ResponseNotRead) inherits from
+    # RuntimeError, not from httpx.HTTPError. Without an explicit branch it
+    # would fall through to `internal_error` and the frontend would see a
+    # bogus generic failure instead of a transient-retry hint.
+    if isinstance(exc, httpx.StreamError):
+        return ClassifiedError(
+            code="transient_network",
+            message=f"Stream error talking to LLM: {type(exc).__name__}: {exc}",
+            user_message=_USER_MSG_NETWORK,
+            retryable=True,
+            http_status=502,
+        )
 
     # Bad inputs from caller.
     if isinstance(exc, ValueError):
