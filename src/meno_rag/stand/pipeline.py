@@ -297,12 +297,24 @@ class StandRagPipeline:
         # of their reasoning, and `</think>` straight into the retrieval
         # queries.
         parsed = parse_rewritten_queries(rewritten)
+        # Always include the raw user question as the first search query.
+        # Rationale: rewrite sometimes decomposes a multi-entity question
+        # into sub-questions that lose one of the entities (e.g. "Who is A?
+        # What connects them with B?" → "Who is A" + "What connects A with B"
+        # — both queries embed/match poorly against docs that only mention B
+        # in isolation, and the reranker then drops B-only chunks as
+        # irrelevant for any of those queries). The raw question is the only
+        # string guaranteed to contain every entity the user wrote, so it
+        # boosts both retrieval (BM25 picks up every named token) and rerank
+        # (chunks about either entity score well against the literal user
+        # question). Dedupe collapses overlap with rewrites.
+        combined = [question, *parsed]
         # Defence: the rewrite system prompt asks the model to "decompose
         # multi-aspect questions into several search queries". Without a
         # cap, a sufficiently broad question can yield 30+ queries — each
         # then triggers FAISS + BM25 retrieval and a rerank LLM call per
         # candidate chunk. Dedupe (case-insensitive) and clip.
-        capped = _dedupe_and_cap_queries(parsed, self.settings.max_rewrite_queries)
+        capped = _dedupe_and_cap_queries(combined, self.settings.max_rewrite_queries)
         logger.info(
             "rewrite_parsed",
             model_id=runtime.model_id,
@@ -311,7 +323,8 @@ class StandRagPipeline:
             had_thinking=has_thinking(rewritten),
             parsed_count=len(parsed),
             unique_count=len(capped),
-            was_capped=len(parsed) > len(capped),
+            was_capped=len(combined) > len(capped),
+            includes_original=question in capped,
         )
         return capped
 
