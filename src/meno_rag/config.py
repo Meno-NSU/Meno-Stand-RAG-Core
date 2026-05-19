@@ -23,7 +23,11 @@ class Settings(BaseSettings):
     stand_resources_dir: Path = Field(default=Path("resources/stand_nsu"), validation_alias="STAND_RESOURCES_DIR")
     frida_embedder_name: str = Field(default="ai-forever/FRIDA", validation_alias="FRIDA_EMBEDDER_NAME")
 
-    top_k: int = Field(default=60, validation_alias="TOP_K")
+    # `top_k`: how many candidates each retriever (FAISS, BM25) returns per
+    # rewrite query before fusion. Set to 50 (down from the reference 60) —
+    # `rerank_top_k=12` cuts to 12 per query anyway, so 50 saves rerank LLM
+    # calls without measurable recall loss on the NSU corpus.
+    top_k: int = Field(default=50, validation_alias="TOP_K")
     rerank_top_k: int = Field(default=12, validation_alias="RERANK_TOP_K")
     rerank_weight: float = Field(default=0.8, validation_alias="RERANK_WEIGHT")
     min_document_quality: float = Field(default=0.0, validation_alias="MIN_DOCUMENT_QUALITY")
