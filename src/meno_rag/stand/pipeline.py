@@ -386,6 +386,23 @@ class StandRagPipeline:
         )[0][0]
         prompt = build_prompt(query, cur_doc)
         sampling = RerankSampling()
+        # `chat_template_kwargs.enable_thinking=False` is the Qwen3 convention
+        # for skipping the `<think>...</think>` preamble in the chat template.
+        # vLLM forwards `chat_template_kwargs` into the jinja renderer. Critical
+        # for rerank: with `max_tokens=1` a Qwen3 model otherwise spends its
+        # only token on `<think>` and never emits a classifier digit, leaving
+        # the response with no "0"/"1"/"2" in top_logprobs and `score_from_logprobs`
+        # returning 0.0 for every chunk — exactly the "Отобрано топ-0" symptom
+        # observed on the stand with `qwen3-30b-fp16`.
+        #
+        # Harmless for models without thinking — unknown chat_template_kwargs
+        # are ignored by their templates. For non-Qwen3 thinking models that
+        # don't recognise the flag (e.g. DeepSeek-R1), this won't help and the
+        # JSON fallback below catches the failure to keep rerank working.
+        rerank_extra_body: dict[str, Any] = {
+            "guided_choice": ["0", "1", "2"],
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
         async with self.rerank_semaphore:
             try:
                 response = await self.llm_router.chat_completion(
@@ -395,7 +412,7 @@ class StandRagPipeline:
                     temperature=sampling.temperature,
                     logprobs=sampling.logprobs,
                     top_logprobs=sampling.top_logprobs,
-                    extra_body={"guided_choice": ["0", "1", "2"]},
+                    extra_body=rerank_extra_body,
                     timeout=self.settings.rerank_timeout_seconds,
                 )
                 _log_rerank_choice(response, chunk_id=chunk_id, model_id=runtime.model_id)
@@ -410,6 +427,7 @@ class StandRagPipeline:
                     max_tokens=20,
                     temperature=0.0,
                     response_format=response_format_schema(),
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
                     timeout=self.settings.rerank_timeout_seconds,
                 )
                 return score_from_json_response(str(response["choices"][0]["message"]["content"]))
