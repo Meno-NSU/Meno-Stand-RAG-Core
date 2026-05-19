@@ -11,6 +11,7 @@ import structlog
 
 from meno_rag.api.events import StageEvent, StageName, StageStatus
 from meno_rag.config import Settings
+from meno_rag.llm.think_detector import has_thinking
 from meno_rag.schemas import ChatMessage, PipelineOutcome
 from meno_rag.stand.context import prepare_context, references_to_sources
 from meno_rag.stand.dialogue_history import prepare_dialogue_history
@@ -290,6 +291,11 @@ class StandRagPipeline:
                 seed=sampling.seed,
                 timeout=self.settings.rewrite_timeout_seconds,
             )
+        # `parse_rewritten_queries` strips <think>...</think> blocks and
+        # filters bare tags before splitting on newlines — necessary because
+        # thinking models (Qwen3 etc.) otherwise leak `<think>`, fragments
+        # of their reasoning, and `</think>` straight into the retrieval
+        # queries.
         parsed = parse_rewritten_queries(rewritten)
         # Defence: the rewrite system prompt asks the model to "decompose
         # multi-aspect questions into several search queries". Without a
@@ -302,6 +308,7 @@ class StandRagPipeline:
             model_id=runtime.model_id,
             raw_preview=rewritten[:300],
             raw_chars=len(rewritten),
+            had_thinking=has_thinking(rewritten),
             parsed_count=len(parsed),
             unique_count=len(capped),
             was_capped=len(parsed) > len(capped),

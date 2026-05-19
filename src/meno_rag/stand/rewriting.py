@@ -1,9 +1,11 @@
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
 from nltk.stem.snowball import SnowballStemmer
 
+from meno_rag.llm.think_detector import extract_thinking
 from meno_rag.stand.prompts import FEW_SHOTS, REWRITING_SYSTEM_PROMPT
 from meno_rag.stand.tokenization import tokenize_and_normalize_text
 
@@ -109,5 +111,49 @@ def prepare_prompt_for_rewriting(
     return messages
 
 
+# Bare structural tokens emitted by chat-template-aware models. Without
+# filtering, a model that finishes its rewrite with a sentinel like
+# `<|im_end|>` on its own line gives us a junk retrieval query.
+_BARE_TAG_RE = re.compile(r"^<[/!|]?[A-Za-z0-9_ \-:|]{0,40}>$")
+# Pure ordinal/bullet line ("1.", "2)", "- ") with no actual query text.
+_BARE_BULLET_RE = re.compile(r"^[\s\-•*]*[0-9]*[.)]?\s*$")
+
+
+def _looks_like_query(line: str) -> bool:
+    """True if `line` looks like a real search query — not a structural
+    artefact from the rewrite LLM.
+
+    Rejected:
+    - bare tags: `<think>`, `</think>`, `<|im_end|>`, `<assistant>`
+    - bullets/ordinals with no payload: `1.`, `- `, `*`
+    - very short lines (< 3 chars after strip) — no real query is that short
+    """
+    cleaned = line.strip()
+    if len(cleaned) < 3:
+        return False
+    if _BARE_TAG_RE.match(cleaned):
+        return False
+    if _BARE_BULLET_RE.match(cleaned):
+        return False
+    return True
+
+
 def parse_rewritten_queries(text: str) -> list[str]:
-    return [line.strip() for line in text.strip().split("\n") if line.strip()]
+    """Split a rewrite-stage LLM response into search queries.
+
+    Robust to two failure modes that the reference research code didn't
+    handle and that wreck retrieval quality with thinking models:
+
+    1. `<think>...</think>` reasoning blocks (Qwen3, DeepSeek-R1, etc.) are
+       stripped before splitting on newlines. Without this, lines like
+       `<think>`, `Let me think about...`, `</think>` go straight into
+       FAISS/BM25 as separate queries.
+    2. Bare structural tokens (`<|im_end|>`, lone bullets) are dropped via
+       `_looks_like_query`.
+
+    Truncated reasoning blocks (`<think>` opened but never closed because
+    we hit `max_tokens`) leave `visible_text == ""` — that returns [],
+    which is the right answer: the model produced no usable queries.
+    """
+    _, visible = extract_thinking(text)
+    return [line.strip() for line in visible.strip().split("\n") if _looks_like_query(line)]
