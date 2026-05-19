@@ -77,6 +77,10 @@ class StandRagPipeline:
         self.rerank_semaphore = rerank_semaphore
         self.generation_semaphore = generation_semaphore
         self.embed_semaphore = embed_semaphore
+        # Number of candidates that entered the most recent _rerank call —
+        # surfaced as the `from` field in the rerank stage detail so the UI
+        # can render "Отобрано топ-N из X" instead of "из ?".
+        self._rerank_input_count: int = 0
 
     async def prepare(
         self,
@@ -359,6 +363,12 @@ class StandRagPipeline:
         return fused
 
     async def _rerank(self, fused_batches: list[dict[str, Any]], runtime: ModelRuntime) -> list[tuple[int, float]]:
+        # Remember how many candidates we were asked to score so the UI can
+        # render "Отобрано топ-N из X" without a placeholder `?`. Read back
+        # from `_stage_detail` for RERANK; cleared after each pipeline run is
+        # not strictly necessary since every chat starts with a fresh
+        # `_rerank` call that overwrites it.
+        self._rerank_input_count = sum(len(batch["candidates"]) for batch in fused_batches)
         global_chunks: list[tuple[int, float]] = []
         for batch in fused_batches:
             query = batch["query"]
@@ -482,8 +492,7 @@ class StandRagPipeline:
         sources = references_to_sources(kept_references)
         return context, sources
 
-    @staticmethod
-    def _stage_detail(stage_name: str, result: Any) -> dict[str, Any]:
+    def _stage_detail(self, stage_name: str, result: Any) -> dict[str, Any]:
         if stage_name == StageName.ABBREVIATION_EXPANSION:
             return {"expanded": result, "original": ""}
         if stage_name == StageName.QUERY_REWRITE:
@@ -495,7 +504,10 @@ class StandRagPipeline:
         if stage_name == StageName.FUSION:
             return {"candidates": sum(len(batch["candidates"]) for batch in result)}
         if stage_name == StageName.RERANK:
-            return {"kept": len(result)}
+            # `from`: how many candidates the reranker scored (input). `kept`:
+            # how many survived the > 0 score filter and global cap (output).
+            # UI uses both to render "Отобрано топ-{kept} из {from}".
+            return {"kept": len(result), "from": self._rerank_input_count}
         if stage_name == StageName.CONTEXT_ASSEMBLY:
             context, sources = result
             return {"sources": len(sources), "context_tokens": max(1, len(context.split())) if context else 0}
