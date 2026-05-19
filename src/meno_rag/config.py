@@ -35,10 +35,10 @@ class Settings(BaseSettings):
     # Bumped from the 1024 used in the meno_stand reference: with a thinking
     # generation model (Qwen3, DeepSeek-R1, ...) ~500-900 tokens are consumed
     # by `<think>...</think>` before the visible answer starts, and 1024 total
-    # routinely truncated answers mid-sentence (finish_reason="length"). 4096
-    # comfortably fits the typical thinking + answer budget; raise further via
-    # MAX_OUTPUT_TOKENS env if you see `generation_truncated` warnings.
-    max_output_tokens: int = Field(default=4096, validation_alias="MAX_OUTPUT_TOKENS")
+    # routinely truncated answers mid-sentence (finish_reason="length"). 8192
+    # leaves comfortable headroom even for long reasoning + long answers; the
+    # `generation_truncated` WARNING surfaces any case that still overflows.
+    max_output_tokens: int = Field(default=8192, validation_alias="MAX_OUTPUT_TOKENS")
     generation_temperature: float = Field(default=0.1, validation_alias="GENERATION_TEMPERATURE")
 
     # Defence in depth against an LLM that decomposes a question into 30+
