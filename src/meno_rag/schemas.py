@@ -45,6 +45,9 @@ class VoteRequest(BaseModel):
     response_b: Optional[str] = None
     question: Optional[str] = None
     session_id: Optional[str] = None
+    turn_index: Optional[int] = Field(default=None, ge=0)
+    history_len_a: Optional[int] = Field(default=None, ge=0)
+    history_len_b: Optional[int] = Field(default=None, ge=0)
 
 
 class PipelineOutcome(BaseModel):
