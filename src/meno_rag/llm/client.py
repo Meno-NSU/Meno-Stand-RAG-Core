@@ -171,6 +171,17 @@ def _log_vllm_completion(*, model: str, base_url: str, data: dict[str, Any]) -> 
             )
         if not visible.strip():
             log.warning("llm_empty_visible_response", content_chars=len(content))
+        # `finish_reason="length"` means the model ran out of max_tokens budget
+        # before naturally stopping — answer was cut mid-sentence. Surface as
+        # a WARNING so operators see it (and so the user can correlate a UI
+        # report of "truncated answer" with logs).
+        if finish_reason == "length":
+            log.warning(
+                "generation_truncated",
+                content_chars=len(visible),
+                completion_tokens=usage.get("completion_tokens"),
+                hint="raise MAX_OUTPUT_TOKENS if this happens often",
+            )
         log.info(
             "vllm_response",
             content_preview=visible[:200],
@@ -196,6 +207,12 @@ def _log_vllm_stream_completion(*, model: str, base_url: str, content: str, fini
             )
         if not visible.strip():
             log.warning("llm_empty_visible_response", content_chars=len(content))
+        if finish_reason == "length":
+            log.warning(
+                "generation_truncated",
+                content_chars=len(visible),
+                hint="raise MAX_OUTPUT_TOKENS if this happens often",
+            )
         log.info(
             "vllm_stream_response",
             content_preview=visible[:200],

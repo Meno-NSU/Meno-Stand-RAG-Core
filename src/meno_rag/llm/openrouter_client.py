@@ -302,6 +302,13 @@ def _log_or_completion(log: Any, *, data: dict[str, Any], duration_ms: float, st
                 content_chars=len(content),
                 finish_reason=finish_reason,
             )
+        if finish_reason == "length":
+            log.warning(
+                "generation_truncated",
+                content_chars=len(visible),
+                completion_tokens=usage.get("completion_tokens"),
+                hint="raise MAX_OUTPUT_TOKENS if this happens often",
+            )
         log.info(
             "or_request_completed",
             or_status_code=status_code,
