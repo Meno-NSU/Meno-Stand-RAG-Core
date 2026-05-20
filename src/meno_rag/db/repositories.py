@@ -132,10 +132,33 @@ INITIAL_ELO = 1200.0
 K_FACTOR = 32.0
 
 
-async def submit_arena_vote(session: AsyncSession, payload: dict[str, Any]) -> None:
+async def submit_arena_vote(session: AsyncSession, payload: dict[str, Any]) -> bool:
+    """Record an arena vote, idempotent on (session_id, turn_index).
+
+    Returns True if the vote was newly recorded, False if it was a duplicate.
+
+    Multi-turn arena clients send (session_id, turn_index) — these together
+    uniquely identify a vote round. A buggy or malicious client could
+    re-POST the same vote multiple times (e.g. via stale closures, retries,
+    or deliberate replay) and inflate the Elo store. We refuse second-and-
+    later submissions for the same pair instead. Legacy single-turn payloads
+    that omit turn_index keep their old behaviour (every POST counted).
+    """
+    sid = payload.get("session_id")
+    tidx = payload.get("turn_index")
+    if sid and tidx is not None:
+        existing = await session.execute(
+            select(ArenaVote.id).where(
+                ArenaVote.session_id == sid,
+                ArenaVote.turn_index == tidx,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            return False
     vote = ArenaVote(**payload)
     session.add(vote)
     await _apply_vote_to_ratings(session, payload)
+    return True
 
 
 async def list_arena_leaderboard(session: AsyncSession) -> list[dict[str, Any]]:

@@ -15,9 +15,12 @@ async def submit_vote(vote: VoteRequest, request: Request):
     key = f"{vote.model_a}:{vote.kb_a}|{vote.model_b}:{vote.kb_b}"
     async with lock.acquire(key):
         async with database.sessionmaker() as session:
-            await repositories.submit_arena_vote(session, vote.model_dump())
+            recorded = await repositories.submit_arena_vote(session, vote.model_dump())
             await session.commit()
-    return {"status": "ok"}
+    # `recorded=False` means this (session_id, turn_index) was already counted —
+    # we silently no-op so a buggy/spamming client can't inflate the Elo store.
+    # Status stays "ok" so the client doesn't surface a misleading error.
+    return {"status": "ok", "duplicate": not recorded}
 
 
 @router.get("/leaderboard")
