@@ -44,3 +44,22 @@ def test_null_rejected(field):
 def test_invalid_winner_value_rejected():
     with pytest.raises(ValidationError):
         VoteRequest(**_valid_payload(winner="maybe"))
+
+
+def test_optional_metadata_defaults_to_none():
+    vote = VoteRequest(**_valid_payload())
+    assert vote.turn_index is None
+    assert vote.history_len_a is None
+    assert vote.history_len_b is None
+
+
+def test_optional_metadata_accepted_when_present():
+    vote = VoteRequest(**_valid_payload(turn_index=2, history_len_a=4, history_len_b=2))
+    assert vote.turn_index == 2
+    assert vote.history_len_a == 4
+    assert vote.history_len_b == 2
+
+
+def test_optional_metadata_rejects_non_int():
+    with pytest.raises(ValidationError):
+        VoteRequest(**_valid_payload(turn_index="two"))
