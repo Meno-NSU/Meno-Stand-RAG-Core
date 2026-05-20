@@ -54,9 +54,7 @@ def test_optional_metadata_defaults_to_none():
 
 
 def test_optional_metadata_accepted_when_present():
-    vote = VoteRequest(
-        **_valid_payload(turn_index=2, history_len_a=4, history_len_b=2)
-    )
+    vote = VoteRequest(**_valid_payload(turn_index=2, history_len_a=4, history_len_b=2))
     assert vote.turn_index == 2
     assert vote.history_len_a == 4
     assert vote.history_len_b == 2
