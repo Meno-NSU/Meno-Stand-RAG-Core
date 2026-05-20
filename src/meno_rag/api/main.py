@@ -476,7 +476,11 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created_ts = int(time.time())
     session_id = payload.user or f"session-{completion_id}"
-    max_tokens = payload.max_tokens or settings.max_output_tokens
+    # Apply an explicit floor so a stingy env config (or a tiny payload value)
+    # doesn't truncate a long answer the user actually wants. Default floor
+    # is 4096 (see settings.min_output_tokens).
+    requested = payload.max_tokens or settings.max_output_tokens
+    max_tokens = max(requested, settings.min_output_tokens)
     temperature = payload.temperature  # pipeline applies QaSampling.temperature when None
 
     if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
