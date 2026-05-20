@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # leaves comfortable headroom even for long reasoning + long answers; the
     # `generation_truncated` WARNING surfaces any case that still overflows.
     max_output_tokens: int = Field(default=8192, validation_alias="MAX_OUTPUT_TOKENS")
+    # Floor for max_tokens we send to providers. Even if MAX_OUTPUT_TOKENS is
+    # set low in deployment env (or a frontend caller passes a tiny number),
+    # we guarantee at least this many output tokens are budgeted — otherwise
+    # users hit truncation mid-answer on responses that easily fit at 4k.
+    min_output_tokens: int = Field(default=4096, validation_alias="MIN_OUTPUT_TOKENS")
     generation_temperature: float = Field(default=0.1, validation_alias="GENERATION_TEMPERATURE")
 
     # Defence in depth against an LLM that decomposes a question into 30+
