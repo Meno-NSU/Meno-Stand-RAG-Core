@@ -75,9 +75,7 @@ async def test_duplicate_does_not_inflate_elo(session):
     await submit_arena_vote(session, _payload(winner="a"))
     await session.commit()
     rating_a_after_first = (
-        await session.execute(
-            select(ArenaRating).where(ArenaRating.model == "vllm/menon-1")
-        )
+        await session.execute(select(ArenaRating).where(ArenaRating.model == "vllm/menon-1"))
     ).scalar_one()
     elo_a_after_first = rating_a_after_first.elo
     wins_after_first = rating_a_after_first.wins
@@ -88,9 +86,7 @@ async def test_duplicate_does_not_inflate_elo(session):
         await session.commit()
 
     rating_a_after_spam = (
-        await session.execute(
-            select(ArenaRating).where(ArenaRating.model == "vllm/menon-1")
-        )
+        await session.execute(select(ArenaRating).where(ArenaRating.model == "vllm/menon-1"))
     ).scalar_one()
     assert rating_a_after_spam.elo == elo_a_after_first
     assert rating_a_after_spam.wins == wins_after_first
