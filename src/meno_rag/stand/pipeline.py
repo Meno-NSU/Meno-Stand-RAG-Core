@@ -166,6 +166,7 @@ class StandRagPipeline:
             context=context,
             abbr_dict=self.resources.abbreviations,
             stemmer=self.resources.stemmer,
+            fewshots=self._select_fewshots(question),
         )
         qa_messages = [
             {"role": "system", "content": system_prompt_with_datetime(datetime.now())},
@@ -512,6 +513,12 @@ class StandRagPipeline:
             context, sources = result
             return {"sources": len(sources), "context_tokens": max(1, len(context.split())) if context else 0}
         return {}
+
+
+    def _select_fewshots(self, question: str) -> list[Any] | None:
+        if not self.resources.fewshots_enabled:
+            return None
+        return self.resources.fewshot_retriever.retrieve(question, k=self.settings.n_few_shots)
 
 
 _LARGE_QA_PROMPT_CHARS_WARN = 30000

@@ -3,6 +3,7 @@ from typing import Optional
 
 from nltk.stem.snowball import SnowballStemmer
 
+from meno_rag.stand.fewshots import FewshotExample
 from meno_rag.stand.prompts import QA_SYSTEM_PROMPT
 from meno_rag.stand.rewriting import find_candidates_to_abbreviations
 
@@ -38,6 +39,7 @@ def prepare_prompt_for_question_answering(
     context: str,
     abbr_dict: dict,
     stemmer: Optional[SnowballStemmer] = None,
+    fewshots: Optional[list[FewshotExample]] = None,
 ) -> str:
     num_relevant_documents = calculate_number_of_documents_in_context(context)
     found_abbreviations = find_candidates_to_abbreviations(
@@ -62,6 +64,16 @@ def prepare_prompt_for_question_answering(
         input_prompt += "==========\nDIALOGUE HISTORY\n==========\n\n"
         input_prompt += dialogue_history
         input_prompt += "\n\n"
+    if fewshots:
+        input_prompt += "==========\nFEW-SHOT EXAMPLES\n==========\n\n"
+        input_prompt += (
+            "Ниже приведены примеры корректных ответов на релевантные вопросы. "
+            "Используйте их как ориентир по стилю, структуре и уровню детализации.\n\n"
+        )
+        for i, fs in enumerate(fewshots, 1):
+            input_prompt += f"--- ПРИМЕР {i} ---\n"
+            input_prompt += f"Вопрос: {fs.question}\n"
+            input_prompt += f"Ответ: {fs.answer}\n\n"
     input_prompt += "==========\nCURRENT QUESTION\n==========\n\n"
     input_prompt += user_question + "\n\n"
     input_prompt += "==========\nINSTRUCTION\n==========\n\n"

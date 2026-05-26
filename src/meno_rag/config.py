@@ -61,7 +61,8 @@ class Settings(BaseSettings):
     max_qa_prompt_chars: int = Field(default=60000, validation_alias="MAX_QA_PROMPT_CHARS")
 
     stand_compat_context_order: bool = Field(default=True, validation_alias="STAND_COMPAT_CONTEXT_ORDER")
-    qa_fewshots_enabled: bool = Field(default=False, validation_alias="QA_FEWSHOTS_ENABLED")
+    qa_fewshots_enabled: bool = Field(default=True, validation_alias="QA_FEWSHOTS_ENABLED")
+    n_few_shots: int = Field(default=3, validation_alias="N_FEW_SHOTS")
 
     model_cache_ttl_seconds: float = Field(default=300.0, validation_alias="MODEL_CACHE_TTL_SECONDS")
     model_discovery_timeout_seconds: float = Field(default=5.0, validation_alias="MODEL_DISCOVERY_TIMEOUT_SECONDS")
@@ -134,6 +135,10 @@ class Settings(BaseSettings):
     @property
     def bm25_index_dir(self) -> Path:
         return self.stand_resources_dir / "knowledge" / "bm25"
+
+    @property
+    def fewshots_path(self) -> Path:
+        return Path("fewshots_qa.json")
 
     @property
     def vllm_endpoint_list(self) -> list[str]:
