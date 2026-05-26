@@ -514,7 +514,6 @@ class StandRagPipeline:
             return {"sources": len(sources), "context_tokens": max(1, len(context.split())) if context else 0}
         return {}
 
-
     def _select_fewshots(self, question: str) -> list[Any] | None:
         if not self.resources.fewshots_enabled:
             return None

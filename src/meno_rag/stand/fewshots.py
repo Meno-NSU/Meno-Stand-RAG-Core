@@ -40,9 +40,7 @@ class FewshotRetriever:
 
     def _build_index(self) -> None:
         texts = [ex.question for ex in self._examples]
-        tokenized_texts = [
-            tokenize_and_normalize_text(text, self._stemmer) for text in texts
-        ]
+        tokenized_texts = [tokenize_and_normalize_text(text, self._stemmer) for text in texts]
         corpus_tokens = bm25s.tokenize(tokenized_texts, stemmer=None, stopwords=[])
         self._retriever = bm25s.BM25()
         self._retriever.index(corpus_tokens)
