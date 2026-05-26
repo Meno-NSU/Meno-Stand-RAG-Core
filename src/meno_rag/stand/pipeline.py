@@ -517,7 +517,14 @@ class StandRagPipeline:
     def _select_fewshots(self, question: str) -> list[Any] | None:
         if not self.resources.fewshots_enabled:
             return None
-        return self.resources.fewshot_retriever.retrieve(question, k=self.settings.n_few_shots)
+        selected = self.resources.fewshot_retriever.retrieve(question, k=self.settings.n_few_shots)
+        logger.info(
+            "fewshots_selected",
+            question_preview=question[:200],
+            count=len(selected),
+            questions=[fs.question[:120] for fs in selected],
+        )
+        return selected
 
 
 _LARGE_QA_PROMPT_CHARS_WARN = 30000
