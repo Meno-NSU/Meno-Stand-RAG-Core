@@ -32,10 +32,13 @@ class Settings(BaseSettings):
     # Hard cap on candidates sent to the LLM reranker PER rewrite query. The
     # fused dense+lexical list can reach ~2*top_k (~100) per query, and rerank
     # issues one LLM call per candidate — by far the dominant vLLM cost under
-    # load. Candidates arrive pre-sorted by retrieval score, so cutting to the
-    # top-N before rerank slashes LLM calls with little recall loss (only
-    # `rerank_top_k`=12 survive per query anyway). Set 0 to disable the cut.
-    rerank_candidates_per_query: int = Field(default=24, validation_alias="RERANK_CANDIDATES_PER_QUERY")
+    # load. Candidates arrive pre-sorted by retrieval score, and rerank is
+    # pointwise (independent per chunk), so cutting the low-ranked tail before
+    # rerank does NOT change the scores of survivors — it only forgoes rescuing
+    # a chunk both retrievers under-ranked past this cap. Default 40 is
+    # conservative (>3x the `rerank_top_k`=12 that survive per query); lower it
+    # for more vLLM savings, raise it (or 0 = disable) if a recall eval regresses.
+    rerank_candidates_per_query: int = Field(default=40, validation_alias="RERANK_CANDIDATES_PER_QUERY")
     rerank_weight: float = Field(default=0.8, validation_alias="RERANK_WEIGHT")
     min_document_quality: float = Field(default=0.0, validation_alias="MIN_DOCUMENT_QUALITY")
     max_history_answer_words: int = Field(default=9, validation_alias="MAX_HISTORY_ANSWER_WORDS")

@@ -14,6 +14,15 @@ def test_new_concurrency_defaults():
     assert s.embed_concurrency == 8
 
 
+def test_pipeline_budget_defaults():
+    s = Settings()
+    # Conservative default: score the top-40 fused candidates per query before
+    # rerank (vs ~100 uncapped), well above the 12 that survive into context.
+    assert s.rerank_candidates_per_query == 40
+    assert s.rerank_top_k == 12
+    assert s.max_context_chunks == 12
+
+
 def test_frida_device_default():
     s = Settings()
     assert s.frida_device == "auto"
