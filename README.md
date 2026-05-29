@@ -59,6 +59,12 @@ If you hit the untracked state, pick ONE of the two recovery paths:
 That single command drops all ORM-known tables plus `alembic_version`, then runs a clean
 bootstrap. No separate `uv sync`, no separate reset call.
 
+Because this permanently deletes all application data (conversations, messages, pipeline
+runs, the arena leaderboard) and cannot be undone, `--fresh` requires confirmation: it
+prompts you to type `REMOVE_ALL_DATABASES` before doing anything. In a non-interactive
+shell (CI, scripts) it refuses unless you opt in explicitly with
+`MENO_FRESH_CONFIRM=REMOVE_ALL_DATABASES ./scripts/run_backend.sh start --fresh`.
+
 **2. Keep the existing data** — for production where data is real:
 
 ```bash
