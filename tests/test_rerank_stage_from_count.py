@@ -82,6 +82,36 @@ async def test_rerank_stage_detail_includes_from_count(monkeypatch):
     assert detail["from"] >= detail["kept"]
 
 
+@pytest.mark.asyncio
+async def test_from_count_travels_with_result_not_shared_pipeline_state(monkeypatch):
+    """Two rerank runs on one shared pipeline must each report their own input
+    count. If the count lived in shared instance state, the second run would
+    overwrite it and the first run's detail would report the wrong `from`."""
+    pipeline = StandRagPipeline(
+        settings=get_settings(),
+        resources=_StubResources(),
+        llm_router=_RerankStub(),
+        rewrite_semaphore=asyncio.Semaphore(1),
+        rerank_semaphore=asyncio.Semaphore(8),
+        generation_semaphore=asyncio.Semaphore(1),
+        embed_semaphore=asyncio.Semaphore(1),
+    )
+    monkeypatch.setattr(
+        "meno_rag.stand.pipeline.prepare_context",
+        lambda **kwargs: (["dummy doc"], ["dummy ref"]),
+    )
+    runtime = ModelRuntime(model_id="m", base_url="http://x/v1")
+
+    result_small = await pipeline._rerank([{"query": "q", "candidates": [(1, 0.5), (2, 0.5)]}], runtime)
+    result_big = await pipeline._rerank(
+        [{"query": "q", "candidates": [(i, 0.5) for i in range(8)]}], runtime
+    )
+
+    # The big run ran last; with shared state the small run's `from` would read 8.
+    assert pipeline._stage_detail(StageName.RERANK, result_small)["from"] == 2
+    assert pipeline._stage_detail(StageName.RERANK, result_big)["from"] == 8
+
+
 def test_rerank_stage_detail_zero_when_called_before_rerank():
     """A pipeline that never ran rerank yet shouldn't crash if something
     asks for the rerank detail; it just reports zero."""

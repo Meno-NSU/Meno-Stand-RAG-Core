@@ -1,5 +1,5 @@
 from datetime import UTC
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -45,6 +45,7 @@ async def test_or_selection_returns_split_runtime_with_first_vllm_as_core():
         ]
     )
     vllm_registry.resolve_model = AsyncMock(return_value=("menon-1", "http://v/v1"))
+    vllm_registry.lookup_endpoint = Mock(return_value="http://v")
     or_registry = AsyncMock()
     or_registry.list_models = AsyncMock(return_value=[{"id": "d/c:free", "provider": "openrouter", "featured": True}])
     status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
@@ -64,6 +65,7 @@ async def test_or_selection_returns_split_runtime_with_first_vllm_as_core():
     assert rt.generation.base_url == "http://or/v1"
     assert rt.core.provider == "vllm"
     assert rt.core.model_id == "menon-1"  # first vllm by endpoint order + created asc
+    assert rt.core.base_url == "http://v/v1"  # endpoint resolved via registry
 
 
 @pytest.mark.asyncio
@@ -75,6 +77,7 @@ async def test_or_selection_uses_configured_rewrite_rerank_model_if_available():
             {"id": "menon-2", "endpoint": "http://v", "created": 200},
         ]
     )
+    vllm_registry.lookup_endpoint = Mock(return_value="http://v")
     or_registry = AsyncMock()
     or_registry.list_models = AsyncMock(return_value=[{"id": "d/c:free", "provider": "openrouter", "featured": True}])
     status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)

@@ -83,7 +83,9 @@ async def _resolve_core_runtime(
     if rag_rewrite_rerank_model:
         for m in vllm_models_sorted:
             if m["id"] == rag_rewrite_rerank_model:
-                endpoint = m.get("endpoint")
+                # Resolve via the registry so a model served by several
+                # endpoints round-robins instead of pinning to one.
+                endpoint = vllm_registry.lookup_endpoint(m["id"])
                 return ModelRuntime(
                     provider="vllm",
                     model_id=m["id"],
@@ -91,7 +93,7 @@ async def _resolve_core_runtime(
                 )
 
     first = vllm_models_sorted[0]
-    endpoint = first.get("endpoint")
+    endpoint = vllm_registry.lookup_endpoint(first["id"])
     return ModelRuntime(
         provider="vllm",
         model_id=first["id"],
