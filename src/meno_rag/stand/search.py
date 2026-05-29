@@ -1,5 +1,5 @@
 import math
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -54,8 +54,8 @@ def find_relevant_chunks(
     search_query: str,
     retriever: Any,
     max_num_chunks: int,
-    stemmer: Optional[SnowballStemmer] = None,
-    embedder: Optional[tuple[PreTrainedTokenizer | PreTrainedTokenizerFast, T5EncoderModel, str]] = None,
+    stemmer: SnowballStemmer | None = None,
+    embedder: tuple[PreTrainedTokenizer | PreTrainedTokenizerFast, T5EncoderModel, str] | None = None,
 ) -> list[tuple[int, float]]:
     relevant_chunks: list[tuple[int, float]] = []
     if isinstance(retriever, BM25):
@@ -85,8 +85,8 @@ def find_relevant_chunks(
 
 
 def combine_relevant_chunks(
-    chunk_list_1: Optional[list[tuple[int, float]]] = None,
-    chunk_list_2: Optional[list[tuple[int, float]]] = None,
+    chunk_list_1: list[tuple[int, float]] | None = None,
+    chunk_list_2: list[tuple[int, float]] | None = None,
 ) -> list[tuple[int, float]]:
     united_chunks: dict[int, float] = {}
     if chunk_list_1 is not None:

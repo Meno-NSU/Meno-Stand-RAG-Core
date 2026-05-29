@@ -39,7 +39,7 @@ from meno_rag.llm import VLLMClient, VLLMRegistry
 from meno_rag.llm.openrouter_client import OpenRouterClient
 from meno_rag.llm.openrouter_registry import OpenRouterRegistry
 from meno_rag.llm.router import LLMRouter
-from meno_rag.llm.status import InMemoryModelStatusStore, RedisModelStatusStore
+from meno_rag.llm.status import InMemoryModelStatusStore, ModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest, ClearHistoryRequest, ClearHistoryResponse
 from meno_rag.stand.pipeline import PipelineRuntime, StandRagPipeline
@@ -97,6 +97,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("vllm_startup_discovery_failed", error=str(exc))
 
+    status_store: ModelStatusStore
     if redis is not None:
         status_store = RedisModelStatusStore(
             redis=redis,
@@ -542,7 +543,7 @@ async def _non_stream_response(
     created_ts: int,
     session_id: str,
     max_tokens: int,
-    temperature: float,
+    temperature: float | None,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -629,7 +630,7 @@ async def _stream_response(
     created_ts: int,
     session_id: str,
     max_tokens: int,
-    temperature: float,
+    temperature: float | None,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -647,7 +648,7 @@ async def _stream_response(
         while not prepare_task.done() or not stage_queue.empty():
             try:
                 event = await asyncio.wait_for(stage_queue.get(), timeout=0.1)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             if event.duration_ms is not None:
                 stage_durations[event.stage] = event.duration_ms

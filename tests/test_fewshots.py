@@ -14,9 +14,9 @@ import pytest
 pytest.importorskip("nltk")
 pytest.importorskip("bm25s")
 
-from nltk.stem.snowball import SnowballStemmer  # noqa: E402
+from nltk.stem.snowball import SnowballStemmer
 
-from meno_rag.stand.fewshots import FewshotExample, FewshotRetriever, load_fewshots  # noqa: E402
+from meno_rag.stand.fewshots import FewshotExample, FewshotRetriever, load_fewshots
 
 
 @pytest.fixture(scope="module")

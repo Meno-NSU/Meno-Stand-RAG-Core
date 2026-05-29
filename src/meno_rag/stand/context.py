@@ -84,7 +84,7 @@ def prepare_relevant_documents(
     min_document_quality: float,
 ) -> dict[int, dict[str, Any]]:
     selected_documents: dict[int, dict[str, Any]] = {}
-    for global_index, relevance in zip(indices_of_relevant_chunks, scores_of_relevant_chunks):
+    for global_index, relevance in zip(indices_of_relevant_chunks, scores_of_relevant_chunks, strict=False):
         document_index, local_chunk_index = global_chunk_index_to_local(global_index, documents, chunk_mapping)
         if float(documents[document_index].get("quality_score", 1.0)) >= min_document_quality:
             if document_index in selected_documents:
@@ -115,7 +115,7 @@ def prepare_context(
     descriptions_of_selected_documents: list[str] = []
     descriptions_of_urls: list[str] = []
     ordered_indices_of_selected_documents = sorted(
-        list(selected_documents.keys()),
+        selected_documents.keys(),
         key=lambda idx: selected_documents[idx]["relevance"],
     )
     max_number_width = len(f"{len(ordered_indices_of_selected_documents)}. ")
@@ -149,10 +149,7 @@ def references_to_sources(references: list[str]) -> list[dict[str, str]]:
         if not lines:
             continue
         first_line = lines[0].strip()
-        if ". " in first_line:
-            title = first_line.split(". ", 1)[1].strip()
-        else:
-            title = first_line
+        title = first_line.split(". ", 1)[1].strip() if ". " in first_line else first_line
         url = lines[-1].strip()
         sources.append({"document_title": title, "source_url": url})
     return sources

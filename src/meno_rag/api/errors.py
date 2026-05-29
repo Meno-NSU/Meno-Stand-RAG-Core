@@ -14,8 +14,8 @@ and a human-readable failure message:
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
-from typing import Optional
 
 import httpx
 
@@ -39,7 +39,7 @@ class ClassifiedError:
     user_message: str
     retryable: bool
     http_status: int
-    retry_after_sec: Optional[int] = None
+    retry_after_sec: int | None = None
 
 
 # User-facing strings live next to the codes so the mapping stays obvious.
@@ -176,10 +176,8 @@ def classify_error(exc: BaseException) -> ClassifiedError:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         body_preview = ""
-        try:
+        with contextlib.suppress(Exception):  # pragma: no cover
             body_preview = exc.response.text[:500]
-        except Exception:  # pragma: no cover
-            pass
         if 500 <= status < 600:
             return ClassifiedError(
                 code="transient_upstream_5xx",

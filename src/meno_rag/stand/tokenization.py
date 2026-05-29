@@ -1,12 +1,11 @@
 import re
-from typing import Optional
 
 from nltk import wordpunct_tokenize
 from nltk.stem.snowball import SnowballStemmer
 from razdel import tokenize
 
 
-def tokenize_and_normalize_text(s: str, stemmer: Optional[SnowballStemmer] = None) -> str:
+def tokenize_and_normalize_text(s: str, stemmer: SnowballStemmer | None = None) -> str:
     re_for_digit = re.compile(r"\d+")
     new_tokens: list[str] = []
     for cur in tokenize(s):
@@ -14,7 +13,7 @@ def tokenize_and_normalize_text(s: str, stemmer: Optional[SnowballStemmer] = Non
             new_tokens += list(
                 filter(
                     lambda x2: (len(x2) > 0) and x2.isalpha(),
-                    map(lambda x1: x1.strip().lower(), wordpunct_tokenize(cur.text)),
+                    (token.strip().lower() for token in wordpunct_tokenize(cur.text)),
                 )
             )
         else:
@@ -27,7 +26,7 @@ def tokenize_and_normalize_text(s: str, stemmer: Optional[SnowballStemmer] = Non
         stemmed_tokens = list(
             filter(
                 lambda it2: len(it2) > 0,
-                map(lambda it1: stemmer.stem(it1).strip(), new_tokens),
+                (stemmer.stem(token).strip() for token in new_tokens),
             )
         )
     if len(stemmed_tokens) == 0:

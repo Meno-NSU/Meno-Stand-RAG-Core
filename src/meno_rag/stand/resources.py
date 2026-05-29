@@ -52,7 +52,8 @@ def load_stand_resources(settings: Settings) -> StandResources:
     stemmer = SnowballStemmer("russian")
     device = _resolve_device(settings.frida_device)
     tokenizer = AutoTokenizer.from_pretrained(settings.frida_embedder_name)
-    model = T5EncoderModel.from_pretrained(settings.frida_embedder_name).to(device).eval()
+    # transformers' incomplete stubs mistype `.to(str)`; the call is correct at runtime.
+    model = T5EncoderModel.from_pretrained(settings.frida_embedder_name).to(device).eval()  # type: ignore[arg-type]
     abbreviations = load_abbreviations(settings.abbreviations_path)
 
     fewshots_enabled = settings.qa_fewshots_enabled

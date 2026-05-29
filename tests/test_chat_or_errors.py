@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -30,7 +30,7 @@ def client_with_or(monkeypatch):
 def test_pre_flight_429_when_or_model_is_rate_limited(client_with_or):
     import asyncio
 
-    until = datetime.now(timezone.utc) + timedelta(minutes=5)
+    until = datetime.now(UTC) + timedelta(minutes=5)
     asyncio.get_event_loop().run_until_complete(
         client_with_or.app.state.model_status_store.mark_rate_limited(
             "d/c:free", until=until, error="rate_limit_exceeded"

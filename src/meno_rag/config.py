@@ -1,6 +1,5 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,7 +17,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(default="EMPTY", validation_alias=AliasChoices("OPENAI_API_KEY", "VLLM_API_KEY"))
     vllm_endpoints: str = Field(default="http://127.0.0.1:9020", validation_alias="VLLM_ENDPOINTS")
-    default_model: Optional[str] = Field(default=None, validation_alias=AliasChoices("DEFAULT_MODEL", "LLM_MODEL_NAME"))
+    default_model: str | None = Field(default=None, validation_alias=AliasChoices("DEFAULT_MODEL", "LLM_MODEL_NAME"))
 
     stand_resources_dir: Path = Field(default=Path("resources/stand_nsu"), validation_alias="STAND_RESOURCES_DIR")
     frida_embedder_name: str = Field(default="ai-forever/FRIDA", validation_alias="FRIDA_EMBEDDER_NAME")
@@ -72,7 +71,7 @@ class Settings(BaseSettings):
     # shipped inside the package (`meno_rag/stand/fewshots_qa.json`) is used,
     # which is resolved relative to the source tree — NOT the process CWD — so
     # it works identically under uvicorn, systemd, Docker, and wheel installs.
-    fewshots_path_override: Optional[Path] = Field(default=None, validation_alias="FEWSHOTS_PATH")
+    fewshots_path_override: Path | None = Field(default=None, validation_alias="FEWSHOTS_PATH")
 
     model_cache_ttl_seconds: float = Field(default=300.0, validation_alias="MODEL_CACHE_TTL_SECONDS")
     model_discovery_timeout_seconds: float = Field(default=5.0, validation_alias="MODEL_DISCOVERY_TIMEOUT_SECONDS")
@@ -93,7 +92,7 @@ class Settings(BaseSettings):
     httpx_max_connections: int = Field(default=200, validation_alias="HTTPX_MAX_CONNECTIONS")
     httpx_max_keepalive: int = Field(default=100, validation_alias="HTTPX_MAX_KEEPALIVE")
 
-    redis_url: Optional[str] = Field(default=None, validation_alias="REDIS_URL")
+    redis_url: str | None = Field(default=None, validation_alias="REDIS_URL")
 
     openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
     openrouter_base_url: str = Field(
@@ -117,7 +116,7 @@ class Settings(BaseSettings):
     openrouter_unreachable_backoff_max_seconds: int = Field(
         default=3600, validation_alias="OPENROUTER_UNREACHABLE_BACKOFF_MAX_SECONDS"
     )
-    rag_rewrite_rerank_model: Optional[str] = Field(default=None, validation_alias="RAG_REWRITE_RERANK_MODEL")
+    rag_rewrite_rerank_model: str | None = Field(default=None, validation_alias="RAG_REWRITE_RERANK_MODEL")
 
     model_config = SettingsConfigDict(
         env_file=".env",

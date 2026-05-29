@@ -40,6 +40,7 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "ruff>=0.8.0",
     "fakeredis>=2.26.0",
+    "mypy>=1.13.0",
 ]
 
 [build-system]
@@ -56,8 +57,28 @@ module-name = "meno_rag"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
-ignore = ["E501"]
+select = ["E", "F", "W", "I", "B", "ASYNC", "UP", "SIM", "C4", "PIE", "RUF"]
+ignore = [
+    "E501",    # line length is handled pragmatically, not enforced
+    "RUF001",  # ambiguous-unicode (Cyrillic look-alikes) — false positives on a Russian corpus
+    "RUF002",  # same, in docstrings
+    "RUF003",  # same, in comments
+    "ASYNC109",  # async functions intentionally take explicit `timeout` params passed to clients
+    "UP042",   # str+Enum -> StrEnum changes str()/f-string output; behavioural, not adopting
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test stub classes use class-level mutable defaults intentionally; harmless.
+"tests/**" = ["RUF012"]
+# Dev/benchmark utilities are held to a lighter standard than the service.
+"scripts/**" = ["ASYNC240", "B023", "B904", "SIM105", "UP022"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/meno_rag"]
+# The ML/runtime libs (torch, transformers, faiss, bm25s, razdel, nltk) ship
+# without complete type stubs; we type-check our own code, not theirs.
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

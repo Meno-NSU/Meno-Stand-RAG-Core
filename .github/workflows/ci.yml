@@ -14,12 +14,14 @@ concurrency:
 
 jobs:
   quality:
-    name: Lint, build, and test
+    name: Lint, type-check, build, and test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    env:
-      PYTHON_VERSION: "3.12"
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
 
     steps:
       - name: Checkout repository
@@ -28,7 +30,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: ${{ matrix.python-version }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -51,6 +53,9 @@ jobs:
       - name: Format check
         run: uv run --frozen ruff format --check .
 
+      - name: Type check
+        run: uv run --frozen mypy
+
       - name: Compile Python sources
         run: uv run --frozen python -m compileall -q src tests
 
@@ -59,3 +64,44 @@ jobs:
 
       - name: Test
         run: uv run --frozen pytest -q
+
+  security:
+    name: Security (secret scan + dependency audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # Full history so gitleaks can scan every commit, not just the tip.
+          fetch-depth: 0
+
+      - name: Scan for committed secrets (gitleaks)
+        env:
+          GITLEAKS_VERSION: "8.21.2"
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks detect --source . --no-banner --redact --verbose
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.9.10"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        run: uv sync --all-groups --frozen
+
+      - name: Audit dependencies for known CVEs (advisory)
+        # Advisory only: a freshly-disclosed or unfixable transitive CVE (common
+        # with the torch/transformers stack) must not block merges. Auditing the
+        # synced environment inspects exactly the locked versions we ship.
+        # Review the job output and address findings deliberately.
+        continue-on-error: true
+        run: uv run --frozen --with pip-audit pip-audit --progress-spinner off

@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Optional
 
 from nltk.stem.snowball import SnowballStemmer
 
@@ -9,9 +8,9 @@ from meno_rag.stand.rewriting import find_candidates_to_abbreviations
 
 __all__ = [
     "QA_SYSTEM_PROMPT",
-    "system_prompt_with_datetime",
     "calculate_number_of_documents_in_context",
     "prepare_prompt_for_question_answering",
+    "system_prompt_with_datetime",
 ]
 
 
@@ -38,8 +37,8 @@ def prepare_prompt_for_question_answering(
     dialogue_history: str,
     context: str,
     abbr_dict: dict,
-    stemmer: Optional[SnowballStemmer] = None,
-    fewshots: Optional[list[FewshotExample]] = None,
+    stemmer: SnowballStemmer | None = None,
+    fewshots: list[FewshotExample] | None = None,
 ) -> str:
     num_relevant_documents = calculate_number_of_documents_in_context(context)
     found_abbreviations = find_candidates_to_abbreviations(

@@ -50,7 +50,7 @@ class PipelineRuntime:
     generation: ModelRuntime
 
     @staticmethod
-    def uniform(runtime: ModelRuntime) -> "PipelineRuntime":
+    def uniform(runtime: ModelRuntime) -> PipelineRuntime:
         return PipelineRuntime(core=runtime, generation=runtime)
 
     @property
@@ -265,7 +265,7 @@ class StandRagPipeline:
     async def _timed_stage(
         self,
         stage_name: str,
-        emit: Callable[[str, str, float | None, dict[str, Any] | None], Awaitable[None]],
+        emit: Callable[[str, str, float | None, dict[str, Any] | None, str | None], Awaitable[None]],
         fn: Callable[[], Awaitable[Any] | Any],
         durations: dict[str, float],
         details: dict[str, dict[str, Any]],
@@ -404,7 +404,7 @@ class StandRagPipeline:
                 filter(
                     lambda it: it[1] > 0.0,
                     sorted(
-                        zip([item[0] for item in candidates], context_scores),
+                        zip([item[0] for item in candidates], context_scores, strict=False),
                         key=lambda it: (-it[1], it[0]),
                     ),
                 )
@@ -497,7 +497,7 @@ class StandRagPipeline:
         kept_references: list[str] = []
         total = 0
         sep_chars = len("\n\n")
-        for idx, (doc_text, ref) in enumerate(zip(prepared_context, prepared_references)):
+        for idx, (doc_text, ref) in enumerate(zip(prepared_context, prepared_references, strict=False)):
             piece = f"==========\nDOCUMENT {idx + 1}\n==========\n\n{doc_text.strip()}"
             extra = len(piece) + (sep_chars if kept_context else 0)
             if kept_context and total + extra > budget:

@@ -13,14 +13,14 @@ import pytest
 
 pytest.importorskip("nltk")
 
-from nltk.stem.snowball import SnowballStemmer  # noqa: E402
+from nltk.stem.snowball import SnowballStemmer
 
-from meno_rag.api.events import StageName  # noqa: E402
-from meno_rag.config import Settings  # noqa: E402
-from meno_rag.schemas import ChatMessage  # noqa: E402
-from meno_rag.stand.fewshots import FewshotExample  # noqa: E402
-from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StandRagPipeline  # noqa: E402
-from meno_rag.stand.qa import prepare_prompt_for_question_answering  # noqa: E402
+from meno_rag.api.events import StageName
+from meno_rag.config import Settings
+from meno_rag.schemas import ChatMessage
+from meno_rag.stand.fewshots import FewshotExample
+from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StandRagPipeline
+from meno_rag.stand.qa import prepare_prompt_for_question_answering
 
 
 class _StubRetriever:

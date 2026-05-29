@@ -24,8 +24,8 @@ class LLMRouter:
             return await self._vllm.chat_completion(
                 base_url=runtime.base_url, model=runtime.model_id, messages=messages, **kwargs
             )
-        self._require_openrouter()
-        return await self._openrouter.chat_completion(model=runtime.model_id, messages=messages, **kwargs)
+        openrouter = self._require_openrouter()
+        return await openrouter.chat_completion(model=runtime.model_id, messages=messages, **kwargs)
 
     async def chat_completion_text(
         self, *, runtime: ModelRuntime, messages: list[dict[str, str]], **kwargs: Any
@@ -34,8 +34,8 @@ class LLMRouter:
             return await self._vllm.chat_completion_text(
                 base_url=runtime.base_url, model=runtime.model_id, messages=messages, **kwargs
             )
-        self._require_openrouter()
-        return await self._openrouter.chat_completion_text(model=runtime.model_id, messages=messages, **kwargs)
+        openrouter = self._require_openrouter()
+        return await openrouter.chat_completion_text(model=runtime.model_id, messages=messages, **kwargs)
 
     async def stream_chat_completion(
         self, *, runtime: ModelRuntime, messages: list[dict[str, str]], **kwargs: Any
@@ -46,10 +46,11 @@ class LLMRouter:
             ):
                 yield token
             return
-        self._require_openrouter()
-        async for token in self._openrouter.stream_chat_completion(model=runtime.model_id, messages=messages, **kwargs):
+        openrouter = self._require_openrouter()
+        async for token in openrouter.stream_chat_completion(model=runtime.model_id, messages=messages, **kwargs):
             yield token
 
-    def _require_openrouter(self) -> None:
+    def _require_openrouter(self) -> OpenRouterClient:
         if self._openrouter is None:
             raise RuntimeError("openrouter_disabled: requested provider=openrouter but OPENROUTER_API_KEY is empty")
+        return self._openrouter
