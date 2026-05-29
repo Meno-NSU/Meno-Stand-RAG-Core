@@ -5,14 +5,14 @@ from typing import Any
 from meno_rag.stand.prompts import SYSTEM_PROMPT_FOR_RELEVANCE
 
 __all__ = [
-    "SYSTEM_PROMPT_FOR_RELEVANCE",
     "MAX_RERANKER_TOKENS",
     "POSSIBLE_LABELS",
+    "SYSTEM_PROMPT_FOR_RELEVANCE",
     "build_prompt",
-    "score_from_logprobs",
-    "score_from_json_response",
     "rerank_merge_score",
     "response_format_schema",
+    "score_from_json_response",
+    "score_from_logprobs",
 ]
 
 MAX_RERANKER_TOKENS: int = 8192
@@ -49,7 +49,7 @@ def score_from_logprobs(choice: dict[str, Any]) -> float:
     exp_values = {k: math.exp(v - max_lp) for k, v in raw.items()}
     total = sum(exp_values.values())
     probs = {k: v / total for k, v in exp_values.items()}
-    predicted_class = int(max(probs, key=probs.get))
+    predicted_class = int(max(probs, key=lambda label: probs[label]))
     if predicted_class == 2:
         return probs["2"]
     return 0.0

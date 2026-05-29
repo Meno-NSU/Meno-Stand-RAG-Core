@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import fakeredis.aioredis
 import pytest
@@ -24,7 +24,7 @@ async def test_unknown_model_is_available(redis):
 @pytest.mark.asyncio
 async def test_mark_rate_limited_persists_with_ttl(redis):
     store = RedisModelStatusStore(redis=redis, backoff_seconds=60, backoff_max_seconds=3600)
-    reset = datetime.now(timezone.utc) + timedelta(seconds=120)
+    reset = datetime.now(UTC) + timedelta(seconds=120)
     await store.mark_rate_limited("m", until=reset, error="rate_limit_exceeded")
     s = await store.get("m")
     assert s.state == ModelStatusState.RATE_LIMITED
@@ -61,7 +61,7 @@ async def test_mark_ok_clears_failures(redis):
 async def test_list_all_returns_marked_models(redis):
     store = RedisModelStatusStore(redis=redis, backoff_seconds=60, backoff_max_seconds=3600)
     await store.mark_unreachable("model-a", error="timeout")
-    until = datetime.now(timezone.utc) + timedelta(seconds=100)
+    until = datetime.now(UTC) + timedelta(seconds=100)
     await store.mark_rate_limited("model-b", until=until, error="429")
     items = await store.list_all()
     assert set(items.keys()) == {"model-a", "model-b"}

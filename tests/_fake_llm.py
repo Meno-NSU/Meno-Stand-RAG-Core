@@ -20,7 +20,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "llm_responses"
 
 def _key(stage: str, messages: list[dict[str, str]]) -> str:
     last = messages[-1]["content"] if messages else ""
-    digest = hashlib.sha256(f"{stage}|{last}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{stage}|{last}".encode()).hexdigest()[:16]
     return f"{stage}_{digest}"
 
 

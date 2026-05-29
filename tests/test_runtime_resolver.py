@@ -1,3 +1,4 @@
+from datetime import UTC
 from unittest.mock import AsyncMock
 
 import pytest
@@ -98,9 +99,9 @@ async def test_or_rate_limited_raises_before_pipeline():
     or_registry = AsyncMock()
     or_registry.list_models = AsyncMock(return_value=[{"id": "d/c:free", "provider": "openrouter"}])
     status_store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    until = datetime.now(timezone.utc) + timedelta(minutes=5)
+    until = datetime.now(UTC) + timedelta(minutes=5)
     await status_store.mark_rate_limited("d/c:free", until=until, error="x")
 
     with pytest.raises(ModelRateLimitedError) as exc:

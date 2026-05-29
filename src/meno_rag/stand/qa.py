@@ -1,16 +1,16 @@
 from datetime import datetime
-from typing import Optional
 
 from nltk.stem.snowball import SnowballStemmer
 
+from meno_rag.stand.fewshots import FewshotExample
 from meno_rag.stand.prompts import QA_SYSTEM_PROMPT
 from meno_rag.stand.rewriting import find_candidates_to_abbreviations
 
 __all__ = [
     "QA_SYSTEM_PROMPT",
-    "system_prompt_with_datetime",
     "calculate_number_of_documents_in_context",
     "prepare_prompt_for_question_answering",
+    "system_prompt_with_datetime",
 ]
 
 
@@ -37,7 +37,8 @@ def prepare_prompt_for_question_answering(
     dialogue_history: str,
     context: str,
     abbr_dict: dict,
-    stemmer: Optional[SnowballStemmer] = None,
+    stemmer: SnowballStemmer | None = None,
+    fewshots: list[FewshotExample] | None = None,
 ) -> str:
     num_relevant_documents = calculate_number_of_documents_in_context(context)
     found_abbreviations = find_candidates_to_abbreviations(
@@ -62,6 +63,23 @@ def prepare_prompt_for_question_answering(
         input_prompt += "==========\nDIALOGUE HISTORY\n==========\n\n"
         input_prompt += dialogue_history
         input_prompt += "\n\n"
+    if fewshots:
+        input_prompt += "==========\nFEW-SHOT EXAMPLES\n==========\n\n"
+        input_prompt += (
+            "Ниже приведены ПРИМЕРЫ из других диалогов — исключительно как образец "
+            "стиля, структуры, тона и уровня детализации ответа. Это НЕ источник фактов.\n"
+            "- Не переносите из примеров никакие конкретные сведения (имена, фамилии, "
+            "должности, числа, даты, баллы, названия программ и подразделений).\n"
+            "- Все фактические утверждения берите ТОЛЬКО из разделов DOCUMENT и из истории "
+            "диалога. Если факт встречается в примере, но отсутствует в документах, — "
+            "не используйте его.\n"
+            "- Соблюдайте принцип: объём и структура ответа должны соответствовать сложности "
+            "вопроса (на простой вопрос — короткий ответ).\n\n"
+        )
+        for i, fs in enumerate(fewshots, 1):
+            input_prompt += f"--- ПРИМЕР {i} ---\n"
+            input_prompt += f"Вопрос: {fs.question}\n"
+            input_prompt += f"Ответ: {fs.answer}\n\n"
     input_prompt += "==========\nCURRENT QUESTION\n==========\n\n"
     input_prompt += user_question + "\n\n"
     input_prompt += "==========\nINSTRUCTION\n==========\n\n"

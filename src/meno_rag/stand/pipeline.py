@@ -50,7 +50,7 @@ class PipelineRuntime:
     generation: ModelRuntime
 
     @staticmethod
-    def uniform(runtime: ModelRuntime) -> "PipelineRuntime":
+    def uniform(runtime: ModelRuntime) -> PipelineRuntime:
         return PipelineRuntime(core=runtime, generation=runtime)
 
     @property
@@ -127,6 +127,19 @@ class StandRagPipeline:
             model_id=runtime.core.model_id,
         )
 
+        # Few-shot selection is fail-safe and surfaced as its own stage so the
+        # UI can show "found a similar case". Only run (and emit) when enabled
+        # to keep the processing chain clean when the feature is off.
+        selected_fewshots: list[tuple[Any, float]] = []
+        if self.resources.fewshots_enabled:
+            selected_fewshots = await self._timed_stage(
+                StageName.FEWSHOT_SELECTION,
+                emit,
+                lambda: self._select_fewshots(question, search_queries),
+                stage_durations,
+                stage_details,
+            )
+
         retrieval_batches = await self._timed_stage(
             StageName.RETRIEVAL,
             emit,
@@ -152,20 +165,27 @@ class StandRagPipeline:
             model_id=runtime.core.model_id,
         )
 
+        # Reserve the few-shot character allowance out of the QA prompt budget
+        # so context + few-shots together stay within `max_qa_prompt_chars`.
+        fewshots_chars = self._fewshots_char_cost(selected_fewshots)
+        context_budget = max(self.settings.max_qa_prompt_chars - fewshots_chars, 0)
+
         context, sources = await self._timed_stage(
             StageName.CONTEXT_ASSEMBLY,
             emit,
-            lambda: self._assemble_context(reranked_global_chunks),
+            lambda: self._assemble_context(reranked_global_chunks, budget_override=context_budget),
             stage_durations,
             stage_details,
         )
 
+        fewshots_for_prompt = [example for example, _score in selected_fewshots]
         qa_user_prompt = prepare_prompt_for_question_answering(
             user_question=question,
             dialogue_history=prepared_dialogue_history,
             context=context,
             abbr_dict=self.resources.abbreviations,
             stemmer=self.resources.stemmer,
+            fewshots=fewshots_for_prompt or None,
         )
         qa_messages = [
             {"role": "system", "content": system_prompt_with_datetime(datetime.now())},
@@ -245,7 +265,7 @@ class StandRagPipeline:
     async def _timed_stage(
         self,
         stage_name: str,
-        emit: Callable[[str, str, float | None, dict[str, Any] | None], Awaitable[None]],
+        emit: Callable[[str, str, float | None, dict[str, Any] | None, str | None], Awaitable[None]],
         fn: Callable[[], Awaitable[Any] | Any],
         durations: dict[str, float],
         details: dict[str, dict[str, Any]],
@@ -384,7 +404,7 @@ class StandRagPipeline:
                 filter(
                     lambda it: it[1] > 0.0,
                     sorted(
-                        zip([item[0] for item in candidates], context_scores),
+                        zip([item[0] for item in candidates], context_scores, strict=False),
                         key=lambda it: (-it[1], it[0]),
                     ),
                 )
@@ -455,7 +475,9 @@ class StandRagPipeline:
                 )
                 return score_from_json_response(str(response["choices"][0]["message"]["content"]))
 
-    def _assemble_context(self, chunks: list[tuple[int, float]]) -> tuple[str, list[dict[str, str]]]:
+    def _assemble_context(
+        self, chunks: list[tuple[int, float]], budget_override: int | None = None
+    ) -> tuple[str, list[dict[str, str]]]:
         if not chunks:
             return "", []
         prepared_context, prepared_references = prepare_context(
@@ -468,12 +490,14 @@ class StandRagPipeline:
         # Greedy char-budget truncation: documents are already sorted by
         # relevance, so we keep them in order until the budget is reached.
         # `sources` and `context` must stay in sync — drop the tail of both.
-        budget = self.settings.max_qa_prompt_chars
+        # `budget_override` lets the caller reserve room for few-shots so the
+        # combined QA prompt stays within `max_qa_prompt_chars`.
+        budget = self.settings.max_qa_prompt_chars if budget_override is None else budget_override
         kept_context: list[str] = []
         kept_references: list[str] = []
         total = 0
         sep_chars = len("\n\n")
-        for idx, (doc_text, ref) in enumerate(zip(prepared_context, prepared_references)):
+        for idx, (doc_text, ref) in enumerate(zip(prepared_context, prepared_references, strict=False)):
             piece = f"==========\nDOCUMENT {idx + 1}\n==========\n\n{doc_text.strip()}"
             extra = len(piece) + (sep_chars if kept_context else 0)
             if kept_context and total + extra > budget:
@@ -497,6 +521,21 @@ class StandRagPipeline:
             return {"expanded": result, "original": ""}
         if stage_name == StageName.QUERY_REWRITE:
             return {"resolved_coreferences": result[0] if result else "", "search_queries": result}
+        if stage_name == StageName.FEWSHOT_SELECTION:
+            # Surfaced in the (collapsible) processing chain so the user can
+            # see which similar curated cases the system attached as examples.
+            examples = result or []
+            return {
+                "count": len(examples),
+                "examples": [
+                    {
+                        "question": example.question,
+                        "answer_preview": example.answer[:300],
+                        "score": round(float(score), 4),
+                    }
+                    for example, score in examples
+                ],
+            }
         if stage_name == StageName.RETRIEVAL:
             dense = sum(len(batch["dense"]) for batch in result)
             lexical = sum(len(batch["lexical"]) for batch in result)
@@ -513,8 +552,48 @@ class StandRagPipeline:
             return {"sources": len(sources), "context_tokens": max(1, len(context.split())) if context else 0}
         return {}
 
+    def _select_fewshots(self, question: str, search_queries: list[str]) -> list[tuple[Any, float]]:
+        """Pick few-shot examples for the QA prompt as (example, score) pairs.
+
+        Fully fail-safe: ANY error (disabled flag, retriever fault, bad data)
+        degrades to an empty list so the answer is always produced. Retrieval
+        uses the rewritten (coreference-resolved) queries together with the raw
+        question so follow-up turns ("а чем он занимается?") still match. The
+        result is bounded by `max_fewshots_chars` so few-shots can never blow
+        the QA prompt budget.
+        """
+        try:
+            if not self.resources.fewshots_enabled:
+                return []
+            query_text = " ".join([question, *(search_queries or [])]).strip()
+            if not query_text:
+                return []
+            scored = self.resources.fewshot_retriever.retrieve(query_text, k=self.settings.n_few_shots)
+            budget = self.settings.max_fewshots_chars
+            kept: list[tuple[Any, float]] = []
+            used = 0
+            for example, score in scored:
+                cost = len(example.question) + len(example.answer) + _FEWSHOT_RENDER_OVERHEAD
+                if kept and used + cost > budget:
+                    break
+                kept.append((example, score))
+                used += cost
+            logger.info("fewshots_selected", count=len(kept), chars=used)
+            return kept
+        except Exception as exc:
+            logger.warning("fewshots_selection_failed", error=repr(exc))
+            return []
+
+    @staticmethod
+    def _fewshots_char_cost(fewshots: list[tuple[Any, float]]) -> int:
+        return sum(len(ex.question) + len(ex.answer) + _FEWSHOT_RENDER_OVERHEAD for ex, _score in fewshots)
+
 
 _LARGE_QA_PROMPT_CHARS_WARN = 30000
+# Approximate per-example chars added by the few-shot prompt template
+# ("--- ПРИМЕР n ---", "Вопрос: ", "Ответ: ", blank lines) on top of the raw
+# question+answer text. Used for budget accounting only — a rough upper bound.
+_FEWSHOT_RENDER_OVERHEAD = 40
 
 
 def _dedupe_and_cap_queries(queries: list[str], max_queries: int) -> list[str]:

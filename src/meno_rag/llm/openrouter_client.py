@@ -8,6 +8,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC
 from typing import Any
 
 import httpx
@@ -200,11 +201,11 @@ class OpenRouterClient:
             return data
 
     async def _handle_429(self, model: str, response: httpx.Response) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         reset_at, retry_after = parse_rate_limit_headers(dict(response.headers))
         if reset_at is None:
-            reset_at = datetime.now(timezone.utc) + timedelta(seconds=60)
+            reset_at = datetime.now(UTC) + timedelta(seconds=60)
         log = logger.bind(model_provider="openrouter", model_id=model)
         log.warning(
             "or_request_rate_limited",

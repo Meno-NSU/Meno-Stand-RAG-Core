@@ -38,4 +38,4 @@ def extract_thinking(content: str) -> tuple[str, str]:
 
 
 def has_thinking(content: str | None) -> bool:
-    return bool(content) and "<think" in content.lower()
+    return content is not None and "<think" in content.lower()

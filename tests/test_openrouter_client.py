@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -76,7 +76,7 @@ async def test_429_raises_rate_limit_error_and_updates_store():
         )
         with pytest.raises(OpenRouterRateLimitError) as exc_info:
             await client.chat_completion(model="m", messages=[{"role": "user", "content": "hi"}])
-        assert exc_info.value.reset_at == datetime.fromtimestamp(1900000000, tz=timezone.utc)
+        assert exc_info.value.reset_at == datetime.fromtimestamp(1900000000, tz=UTC)
         s = await status_store.get("m")
         assert s.state.value == "rate_limited"
 

@@ -2,7 +2,7 @@
 input and the expected ClassifiedError fields. Keep mappings here in sync with
 api/errors.py so any drift surfaces immediately."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -32,7 +32,7 @@ def _httpx_status_error(status: int, body: str = "") -> httpx.HTTPStatusError:
     [
         (
             lambda: OpenRouterRateLimitError(
-                model_id="m", reset_at=datetime.now(timezone.utc), retry_after_sec=42, message="rl"
+                model_id="m", reset_at=datetime.now(UTC), retry_after_sec=42, message="rl"
             ),
             "model_rate_limited",
             True,
@@ -73,13 +73,13 @@ def _httpx_status_error(status: int, body: str = "") -> httpx.HTTPStatusError:
             400,
         ),
         (
-            lambda: ModelRateLimitedError("m", datetime.now(timezone.utc), retry_after_sec=12),
+            lambda: ModelRateLimitedError("m", datetime.now(UTC), retry_after_sec=12),
             "model_rate_limited",
             True,
             429,
         ),
         (
-            lambda: ModelUnreachableError("m", datetime.now(timezone.utc)),
+            lambda: ModelUnreachableError("m", datetime.now(UTC)),
             "model_unreachable",
             True,
             503,
@@ -152,13 +152,13 @@ def test_classify_error_table(exc_factory, expected_code, expected_retryable, ex
 
 
 def test_rate_limit_passes_retry_after_through():
-    exc = OpenRouterRateLimitError(model_id="m", reset_at=datetime.now(timezone.utc), retry_after_sec=77, message="rl")
+    exc = OpenRouterRateLimitError(model_id="m", reset_at=datetime.now(UTC), retry_after_sec=77, message="rl")
     result = classify_error(exc)
     assert result.retry_after_sec == 77
 
 
 def test_pipeline_rate_limit_passes_retry_after():
-    exc = ModelRateLimitedError("m", datetime.now(timezone.utc), retry_after_sec=99)
+    exc = ModelRateLimitedError("m", datetime.now(UTC), retry_after_sec=99)
     result = classify_error(exc)
     assert result.retry_after_sec == 99
 
@@ -167,12 +167,12 @@ def test_every_classified_error_has_russian_user_message():
     """Sanity: every code path must populate user_message — that's the field
     the frontend renders verbatim, so an empty string would be a regression."""
     samples = [
-        OpenRouterRateLimitError(model_id="m", reset_at=datetime.now(timezone.utc), retry_after_sec=1, message=""),
+        OpenRouterRateLimitError(model_id="m", reset_at=datetime.now(UTC), retry_after_sec=1, message=""),
         OpenRouterUnreachableError(model_id="m", cause="x"),
         OpenRouterBadRequestError(model_id="m", status_code=400, message="bad"),
         OpenRouterUpstreamError(model_id="m", message="upstream"),
-        ModelRateLimitedError("m", datetime.now(timezone.utc), retry_after_sec=1),
-        ModelUnreachableError("m", datetime.now(timezone.utc)),
+        ModelRateLimitedError("m", datetime.now(UTC), retry_after_sec=1),
+        ModelUnreachableError("m", datetime.now(UTC)),
         CoreModelUnavailableError(),
         httpx.TimeoutException("t"),
         _httpx_status_error(503),

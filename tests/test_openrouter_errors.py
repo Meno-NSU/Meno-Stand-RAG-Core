@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from meno_rag.llm.openrouter_errors import (
     OpenRouterRateLimitError,
@@ -10,7 +10,7 @@ from meno_rag.llm.openrouter_errors import (
 def test_parse_rate_limit_headers_uses_reset_timestamp():
     headers = {"X-RateLimit-Reset": "1900000000", "Retry-After": "60"}
     reset, retry_after = parse_rate_limit_headers(headers)
-    assert reset == datetime.fromtimestamp(1900000000, tz=timezone.utc)
+    assert reset == datetime.fromtimestamp(1900000000, tz=UTC)
     assert retry_after == 60
 
 
@@ -28,7 +28,7 @@ def test_parse_rate_limit_headers_returns_none_when_no_info():
 
 
 def test_rate_limit_error_carries_fields():
-    reset = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    reset = datetime(2030, 1, 1, tzinfo=UTC)
     err = OpenRouterRateLimitError(model_id="m", reset_at=reset, retry_after_sec=60, message="x")
     assert err.model_id == "m"
     assert err.reset_at == reset

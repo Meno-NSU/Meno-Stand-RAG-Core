@@ -13,6 +13,7 @@ from nltk.stem.snowball import SnowballStemmer
 from transformers import AutoTokenizer, T5EncoderModel
 
 from meno_rag.config import Settings
+from meno_rag.stand.fewshots import FewshotRetriever, load_fewshots
 from meno_rag.stand.rewriting import load_abbreviations
 
 logger = structlog.get_logger(__name__)
@@ -27,6 +28,8 @@ class StandResources:
     stemmer: SnowballStemmer
     embedder: tuple[Any, Any, str]  # (tokenizer, model, device_str)
     abbreviations: dict[str, dict[str, str | list[str]]]
+    fewshot_retriever: FewshotRetriever
+    fewshots_enabled: bool
     missing_quality_count: int
 
 
@@ -49,8 +52,16 @@ def load_stand_resources(settings: Settings) -> StandResources:
     stemmer = SnowballStemmer("russian")
     device = _resolve_device(settings.frida_device)
     tokenizer = AutoTokenizer.from_pretrained(settings.frida_embedder_name)
-    model = T5EncoderModel.from_pretrained(settings.frida_embedder_name).to(device).eval()
+    # transformers' incomplete stubs mistype `.to(str)`; the call is correct at runtime.
+    model = T5EncoderModel.from_pretrained(settings.frida_embedder_name).to(device).eval()  # type: ignore[arg-type]
     abbreviations = load_abbreviations(settings.abbreviations_path)
+
+    fewshots_enabled = settings.qa_fewshots_enabled
+    if fewshots_enabled:
+        fewshot_examples = load_fewshots(settings.fewshots_path)
+        fewshot_retriever = FewshotRetriever(fewshot_examples, stemmer)
+    else:
+        fewshot_retriever = FewshotRetriever([], stemmer)
 
     logger.info(
         "stand_resources_loaded",
@@ -69,6 +80,8 @@ def load_stand_resources(settings: Settings) -> StandResources:
         stemmer=stemmer,
         embedder=(tokenizer, model, device),
         abbreviations=abbreviations,
+        fewshot_retriever=fewshot_retriever,
+        fewshots_enabled=fewshots_enabled,
         missing_quality_count=missing_quality_count,
     )
 

@@ -1,4 +1,4 @@
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -9,16 +9,16 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = None
+    model: str | None = None
     messages: list[ChatMessage]
     stream: bool = False
-    max_tokens: Optional[int] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    stop: Optional[str | list[str]] = None
-    user: Optional[str] = None
-    knowledge_base_id: Optional[str] = None
-    knowledge_base: Optional[str] = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    stop: str | list[str] | None = None
+    user: str | None = None
+    knowledge_base_id: str | None = None
+    knowledge_base: str | None = None
 
     model_config = {"extra": "allow"}
 
@@ -41,13 +41,13 @@ class VoteRequest(BaseModel):
     model_b: str = Field(..., min_length=1)
     kb_b: str = Field(..., min_length=1)
     winner: Literal["a", "b", "tie", "both_bad"]
-    response_a: Optional[str] = None
-    response_b: Optional[str] = None
-    question: Optional[str] = None
-    session_id: Optional[str] = None
-    turn_index: Optional[int] = Field(default=None, ge=0)
-    history_len_a: Optional[int] = Field(default=None, ge=0)
-    history_len_b: Optional[int] = Field(default=None, ge=0)
+    response_a: str | None = None
+    response_b: str | None = None
+    question: str | None = None
+    session_id: str | None = None
+    turn_index: int | None = Field(default=None, ge=0)
+    history_len_a: int | None = Field(default=None, ge=0)
+    history_len_b: int | None = Field(default=None, ge=0)
 
 
 class PipelineOutcome(BaseModel):

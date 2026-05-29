@@ -6,7 +6,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from meno_rag.config import get_settings
-from meno_rag.db.orm import Base  # noqa: F401
+from meno_rag.db.orm import Base
 
 config = context.config
 

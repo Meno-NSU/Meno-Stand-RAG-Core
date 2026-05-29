@@ -74,7 +74,7 @@ class VLLMRegistry:
             model_id = normalized or fallback or "menon-1"
             return model_id, None
 
-        if fallback not in available:
+        if fallback is None or fallback not in available:
             fallback = available[0]
 
         model_id = normalized or fallback

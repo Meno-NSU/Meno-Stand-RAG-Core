@@ -1,7 +1,6 @@
 import json
 import re
 from pathlib import Path
-from typing import Optional
 
 from nltk.stem.snowball import SnowballStemmer
 
@@ -10,8 +9,8 @@ from meno_rag.stand.prompts import FEW_SHOTS, REWRITING_SYSTEM_PROMPT
 from meno_rag.stand.tokenization import tokenize_and_normalize_text
 
 __all__ = [
-    "REWRITING_SYSTEM_PROMPT",
     "FEW_SHOTS",
+    "REWRITING_SYSTEM_PROMPT",
     "find_candidates_to_abbreviations",
     "load_abbreviations",
     "parse_rewritten_queries",
@@ -35,21 +34,21 @@ def load_abbreviations(src_fname: str | Path) -> dict[str, dict[str, str | list[
                 if len(norm_val) == 0:
                     raise OSError(f'The file "{src_fname}" contains a wrong record: {k}: {src_abbr[k]}.')
                 explanations_set.add(norm_val)
-            explanations = sorted(list(explanations_set))
+            explanations = sorted(explanations_set)
         else:
             raise OSError(f'The file "{src_fname}" contains a wrong record: {k}: {src_abbr[k]}.')
         if (len(prep_k) == 0) or (len(explanations) == 0):
             raise OSError(f'The file "{src_fname}" contains a wrong record: {k}: {src_abbr[k]}.')
         if prep_k in prep_abbr:
             raise OSError(f'The file "{src_fname}" contains a duplicated abbreviation {k}.')
-        prep_abbr[prep_k] = {"abbreviation": k, "explanation": sorted(list(explanations))}
+        prep_abbr[prep_k] = {"abbreviation": k, "explanation": sorted(explanations)}
     return prep_abbr
 
 
 def find_candidates_to_abbreviations(
     source_text: str,
     all_abbreviations: dict[str, dict[str, str | list[str]]],
-    stemmer: Optional[SnowballStemmer] = None,
+    stemmer: SnowballStemmer | None = None,
 ) -> str:
     tokens = set(tokenize_and_normalize_text(source_text, stemmer).split())
     selected_abbreviations = set()
@@ -64,7 +63,7 @@ def find_candidates_to_abbreviations(
     if len(selected_abbreviations) == 0:
         return ""
     explanation = ""
-    for src_abbr in sorted(list(selected_abbreviations)):
+    for src_abbr in sorted(selected_abbreviations):
         explanations = all_abbreviations[src_abbr]["explanation"]
         assert isinstance(explanations, list)
         for val in explanations:
@@ -76,8 +75,8 @@ def prepare_prompt_for_rewriting(
     cur_question: str,
     dialogue_history: str,
     abbr_dict: dict[str, dict[str, str | list[str]]],
-    stemmer: Optional[SnowballStemmer] = None,
-    few_shots: Optional[list[dict[str, str]]] = None,
+    stemmer: SnowballStemmer | None = None,
+    few_shots: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     prep_question = cur_question.strip()
     if len(prep_question) == 0:
@@ -133,9 +132,7 @@ def _looks_like_query(line: str) -> bool:
         return False
     if _BARE_TAG_RE.match(cleaned):
         return False
-    if _BARE_BULLET_RE.match(cleaned):
-        return False
-    return True
+    return not _BARE_BULLET_RE.match(cleaned)
 
 
 def parse_rewritten_queries(text: str) -> list[str]:

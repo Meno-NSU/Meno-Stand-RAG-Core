@@ -16,25 +16,25 @@ def test_rewriting_system_prompt_matches_meno_stand():
     from meno_rag.stand.rewriting import REWRITING_SYSTEM_PROMPT
 
     expected = (FIXTURES / "rewriting_system_prompt.txt").read_text(encoding="utf-8")
-    assert REWRITING_SYSTEM_PROMPT == expected
+    assert expected == REWRITING_SYSTEM_PROMPT
 
 
 def test_rewriting_few_shots_match_meno_stand():
     from meno_rag.stand.rewriting import FEW_SHOTS
 
     expected = json.loads((FIXTURES / "few_shots.json").read_text(encoding="utf-8"))
-    assert FEW_SHOTS == expected
+    assert expected == FEW_SHOTS
 
 
 def test_rerank_system_prompt_matches_meno_stand():
     from meno_rag.stand.rerank import SYSTEM_PROMPT_FOR_RELEVANCE
 
     expected = (FIXTURES / "rerank_system_prompt.txt").read_text(encoding="utf-8")
-    assert SYSTEM_PROMPT_FOR_RELEVANCE == expected
+    assert expected == SYSTEM_PROMPT_FOR_RELEVANCE
 
 
 def test_qa_system_prompt_matches_meno_stand():
     from meno_rag.stand.qa import QA_SYSTEM_PROMPT
 
     expected = (FIXTURES / "qa_system_prompt.txt").read_text(encoding="utf-8")
-    assert QA_SYSTEM_PROMPT == expected
+    assert expected == QA_SYSTEM_PROMPT

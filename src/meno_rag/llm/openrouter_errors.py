@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 
 class OpenRouterRateLimitError(Exception):
@@ -61,7 +61,7 @@ def parse_rate_limit_headers(headers: dict[str, str]) -> tuple[datetime | None, 
     retry_after: int | None = int(retry_raw) if retry_raw and retry_raw.isdigit() else None
     reset_at: datetime | None = None
     if reset_raw and reset_raw.isdigit():
-        reset_at = datetime.fromtimestamp(int(reset_raw), tz=timezone.utc)
+        reset_at = datetime.fromtimestamp(int(reset_raw), tz=UTC)
     elif retry_after is not None:
-        reset_at = datetime.now(timezone.utc) + timedelta(seconds=retry_after)
+        reset_at = datetime.now(UTC) + timedelta(seconds=retry_after)
     return reset_at, retry_after

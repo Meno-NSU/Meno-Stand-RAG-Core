@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -23,7 +23,7 @@ async def ensure_conversation(session: AsyncSession, conversation_id: str) -> Co
         conversation = Conversation(id=conversation_id)
         session.add(conversation)
         await session.flush()
-    conversation.updated_at = datetime.now(timezone.utc)
+    conversation.updated_at = datetime.now(UTC)
     return conversation
 
 
@@ -232,6 +232,6 @@ async def _apply_vote_to_ratings(session: AsyncSession, vote: dict[str, Any]) ->
     rating_b.matches += 1
     rating_a.elo = elo_a + K_FACTOR * (score_a - expected_a)
     rating_b.elo = elo_b + K_FACTOR * (score_b - expected_b)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rating_a.updated_at = now
     rating_b.updated_at = now

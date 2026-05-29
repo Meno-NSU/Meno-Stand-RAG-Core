@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -16,7 +16,7 @@ async def test_unknown_model_is_available_by_default():
 @pytest.mark.asyncio
 async def test_mark_rate_limited_persists_until_field():
     store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
-    reset = datetime.now(timezone.utc) + timedelta(seconds=120)
+    reset = datetime.now(UTC) + timedelta(seconds=120)
     await store.mark_rate_limited("m", until=reset, error="rate_limit_exceeded")
     s = await store.get("m")
     assert s.state == ModelStatusState.RATE_LIMITED
@@ -27,7 +27,7 @@ async def test_mark_rate_limited_persists_until_field():
 @pytest.mark.asyncio
 async def test_rate_limit_auto_clears_after_until():
     store = InMemoryModelStatusStore(backoff_seconds=60, backoff_max_seconds=3600)
-    past = datetime.now(timezone.utc) - timedelta(seconds=10)
+    past = datetime.now(UTC) - timedelta(seconds=10)
     await store.mark_rate_limited("m", until=past, error=None)
     s = await store.get("m")
     assert s.state == ModelStatusState.AVAILABLE

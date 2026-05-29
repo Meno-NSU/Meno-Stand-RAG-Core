@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from razdel import tokenize
 
@@ -21,8 +21,8 @@ def crop_long_text(src: str, tokenize_fn: Callable[[str], list[tuple[int, int]]]
 
 def prepare_dialogue_history(
     source_dialogue: list[dict[str, str]],
-    tokenize_fn: Optional[Callable[[str], list[tuple[int, int]]]] = tokenize_russian_text,
-    max_words: Optional[int] = None,
+    tokenize_fn: Callable[[str], list[tuple[int, int]]] | None = tokenize_russian_text,
+    max_words: int | None = None,
 ) -> str:
     if not isinstance(source_dialogue, list):
         raise ValueError(f"The source dialogue is wrong! Expected {type(['1', '2'])}, got {type(source_dialogue)}.")
@@ -61,7 +61,11 @@ def prepare_dialogue_history(
 
     user_question = " ".join(source_dialogue[0]["content"].split()).strip()
     assistant_answer = " ".join(source_dialogue[1]["content"].split()).strip()
-    cropped_answer = assistant_answer if max_words is None else crop_long_text(assistant_answer, tokenize_fn, max_words)
+    if max_words is None:
+        cropped_answer = assistant_answer
+    else:
+        assert tokenize_fn is not None  # guaranteed by the validation above
+        cropped_answer = crop_long_text(assistant_answer, tokenize_fn, max_words)
     textualized_dialogue = "----------\nTURN 1\n----------\n**Реплика пользователя:** " + user_question
     if cropped_answer == assistant_answer:
         textualized_dialogue += "\n**Ответ ассистента:** " + assistant_answer + "\n"
@@ -72,9 +76,11 @@ def prepare_dialogue_history(
     for turn_idx in range(1, num_turns):
         user_question = " ".join(source_dialogue[turn_idx * 2]["content"].split()).strip()
         assistant_answer = " ".join(source_dialogue[turn_idx * 2 + 1]["content"].split()).strip()
-        cropped_answer = (
-            assistant_answer if max_words is None else crop_long_text(assistant_answer, tokenize_fn, max_words)
-        )
+        if max_words is None:
+            cropped_answer = assistant_answer
+        else:
+            assert tokenize_fn is not None  # guaranteed by the validation above
+            cropped_answer = crop_long_text(assistant_answer, tokenize_fn, max_words)
         textualized_dialogue += f"\n----------\nTURN {turn_idx + 1}\n----------\n**Реплика пользователя:** "
         textualized_dialogue += user_question
         if cropped_answer == assistant_answer:
