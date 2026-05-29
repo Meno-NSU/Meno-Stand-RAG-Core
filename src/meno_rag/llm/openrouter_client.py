@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from datetime import UTC
 from typing import Any
 
@@ -87,7 +87,7 @@ class OpenRouterClient:
         temperature: float | None = None,
         seed: int | None = None,
         timeout: float | None = None,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str, None]:
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens

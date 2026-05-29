@@ -257,22 +257,30 @@ async def request_id_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
+    # Don't let Prometheus scrapes inflate the very series they read.
+    if request.scope.get("path") == "/metrics":
+        return await call_next(request)
+
     # HTTP-level counters/latency/in-flight for every route. The route template
     # (not the raw URL) is used as the `path` label so unmatched/random URLs
     # collapse into a single "unmatched" series instead of exploding cardinality.
     # Note: for StreamingResponse this measures time-to-headers, not full stream
     # duration — the chat stream's own `chat_in_flight` gauge covers that.
     started = time.perf_counter()
+    status = 500  # default so an unhandled exception is still counted as 5xx
     with metrics_mod.http_in_flight():
-        response = await call_next(request)
-    route = request.scope.get("route")
-    path = getattr(route, "path", None) or "unmatched"
-    metrics_mod.record_http_request(
-        method=request.method,
-        path=path,
-        status=response.status_code,
-        seconds=time.perf_counter() - started,
-    )
+        try:
+            response = await call_next(request)
+            status = response.status_code
+        finally:
+            route = request.scope.get("route")
+            path = getattr(route, "path", None) or "unmatched"
+            metrics_mod.record_http_request(
+                method=request.method,
+                path=path,
+                status=status,
+                seconds=time.perf_counter() - started,
+            )
     return response
 
 

@@ -72,11 +72,18 @@ class VLLMRegistry:
         # gets `core_model_unavailable` until the next successful probe.
         if success_count == 0 and self._endpoints:
             self.last_discovery_ok = False
-            self._cache_valid_until = time.monotonic() + self._failure_retry
             if self._cache:
+                # Have a last-good list — serve it stale and bound how often
+                # dead endpoints are re-probed (retry after failure_retry, not
+                # on every request).
+                self._cache_valid_until = time.monotonic() + self._failure_retry
                 logger.warning("vllm_discovery_failed_serving_cache", cached_count=len(self._cache))
                 metrics.record_discovery(registry="vllm", outcome="stale")
             else:
+                # Cold start, nothing to serve: do NOT cache the empty result,
+                # so the next call re-probes and we recover the instant vLLM
+                # comes up.
+                self._cache_valid_until = 0.0
                 metrics.record_discovery(registry="vllm", outcome="failed")
             return self._cache
 

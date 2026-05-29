@@ -108,6 +108,27 @@ def test_http_requests_are_counted_by_middleware(client):
     assert 'path="/healthz"' in text
 
 
+def test_metrics_endpoint_is_not_self_counted(client):
+    client.get("/metrics")
+    text = client.get("/metrics").text
+    assert 'path="/metrics"' not in text
+
+
+def test_middleware_counts_unhandled_exception_as_500():
+    from meno_rag.api.main import app
+
+    @app.get("/_boom_metrics_test")
+    async def _boom():  # pragma: no cover - body raises
+        raise RuntimeError("boom")
+
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.get("/_boom_metrics_test")
+        assert r.status_code == 500
+        text = c.get("/metrics").text
+    assert 'path="/_boom_metrics_test"' in text
+    assert 'status="500"' in text
+
+
 # --- Chat-handler instrumentation (provider/stream/status + in-flight) ---
 
 

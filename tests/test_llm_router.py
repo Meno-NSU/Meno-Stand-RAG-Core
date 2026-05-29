@@ -95,6 +95,33 @@ async def test_router_records_error_outcome_and_reraises():
     assert 'meno_llm_calls_total{endpoint="http://e-err/v1",outcome="error",provider="vllm",stage="rerank"}' in text
 
 
+class _TrackedStream:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def stream_chat_completion(self, *, base_url, model, messages, **kwargs):
+        try:
+            for token in ("a", "b", "c"):
+                yield token
+        finally:
+            self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_stream_closes_inner_generator_on_early_consumer_exit():
+    # When the consumer (Starlette) stops early / disconnects, the router must
+    # deterministically close the upstream stream so the httpx connection is
+    # released instead of lingering until GC.
+    fake = _TrackedStream()
+    router = LLMRouter(vllm=fake, openrouter=None)
+    rt = ModelRuntime(provider="vllm", model_id="m", base_url="http://e/v1")
+    agen = router.stream_chat_completion(runtime=rt, messages=[], stage="generation")
+    async for _ in agen:
+        break  # consume one token, then abandon
+    await agen.aclose()  # what Starlette does on teardown
+    assert fake.closed is True
+
+
 @pytest.mark.asyncio
 async def test_router_records_stream_metrics_on_completion():
     from meno_rag.api import metrics

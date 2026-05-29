@@ -41,6 +41,21 @@ async def test_serves_stale_cache_when_all_endpoints_fail():
 
 
 @pytest.mark.asyncio
+async def test_cold_start_failure_keeps_retrying_until_first_success():
+    # No prior cache: a failed discovery must NOT pin an empty list for the
+    # retry window — the next call must re-probe so we recover the instant
+    # vLLM comes up (regression guard).
+    state: dict[str, Any] = {"all_down": True, "model": "m1"}
+    async with _http(state) as http:
+        reg = VLLMRegistry(["http://e"], http_client=http, timeout=1.0, cache_ttl=60.0)
+        first = await reg.list_models()
+        assert first == []
+        state["all_down"] = False
+        second = await reg.list_models()
+    assert [m["id"] for m in second] == ["m1"]
+
+
+@pytest.mark.asyncio
 async def test_updates_cache_when_endpoint_recovers():
     state: dict[str, Any] = {"model": "m1"}
     async with _http(state) as http:

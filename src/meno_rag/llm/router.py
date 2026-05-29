@@ -5,6 +5,7 @@ implementations."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -69,8 +70,12 @@ class LLMRouter:
                 gen = self._require_openrouter().stream_chat_completion(
                     model=runtime.model_id, messages=messages, **kwargs
                 )
-            async for token in gen:
-                yield token
+            # aclosing guarantees the upstream generator (and its httpx stream
+            # connection) is closed promptly when the consumer stops early or
+            # disconnects, instead of lingering until GC finalization.
+            async with contextlib.aclosing(gen):
+                async for token in gen:
+                    yield token
         except (asyncio.CancelledError, GeneratorExit):
             # Client disconnect / cancellation is not an LLM failure — record it
             # distinctly so it doesn't inflate the error rate, then re-raise.
