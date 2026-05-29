@@ -9,6 +9,7 @@ from typing import Any
 class StageName:
     ABBREVIATION_EXPANSION = "abbreviation_expansion"
     QUERY_REWRITE = "query_rewrite"
+    FEWSHOT_SELECTION = "fewshot_selection"
     RETRIEVAL = "retrieval"
     FUSION = "fusion"
     RERANK = "rerank"

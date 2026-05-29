@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     stand_compat_context_order: bool = Field(default=True, validation_alias="STAND_COMPAT_CONTEXT_ORDER")
     qa_fewshots_enabled: bool = Field(default=True, validation_alias="QA_FEWSHOTS_ENABLED")
     n_few_shots: int = Field(default=3, validation_alias="N_FEW_SHOTS")
+    # Hard cap on the total characters of few-shot examples injected into the
+    # QA prompt. Reserved out of `max_qa_prompt_chars` so few-shots can never
+    # blow the QA prompt past its budget regardless of how verbose the matched
+    # examples are.
+    max_fewshots_chars: int = Field(default=8000, validation_alias="MAX_FEWSHOTS_CHARS")
+    # Optional override for the few-shot corpus location. When unset, the file
+    # shipped inside the package (`meno_rag/stand/fewshots_qa.json`) is used,
+    # which is resolved relative to the source tree — NOT the process CWD — so
+    # it works identically under uvicorn, systemd, Docker, and wheel installs.
+    fewshots_path_override: Optional[Path] = Field(default=None, validation_alias="FEWSHOTS_PATH")
 
     model_cache_ttl_seconds: float = Field(default=300.0, validation_alias="MODEL_CACHE_TTL_SECONDS")
     model_discovery_timeout_seconds: float = Field(default=5.0, validation_alias="MODEL_DISCOVERY_TIMEOUT_SECONDS")
@@ -138,7 +148,12 @@ class Settings(BaseSettings):
 
     @property
     def fewshots_path(self) -> Path:
-        return Path("fewshots_qa.json")
+        if self.fewshots_path_override is not None:
+            return self.fewshots_path_override
+        # Packaged data file, resolved relative to this module's directory so
+        # it is found regardless of the process working directory and ships in
+        # the wheel alongside the code.
+        return Path(__file__).resolve().parent / "stand" / "fewshots_qa.json"
 
     @property
     def vllm_endpoint_list(self) -> list[str]:
