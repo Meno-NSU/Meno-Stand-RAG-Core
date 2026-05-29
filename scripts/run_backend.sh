@@ -28,6 +28,47 @@ set -- "${POSITIONAL[@]:-start}"
 
 mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
 
+# --fresh runs `meno-rag-reset --yes`, which DROPS every application table
+# (conversations, messages, pipeline runs, sources, arena votes + leaderboard)
+# plus alembic_version. It is permanent and cannot be undone. Because `start
+# --fresh` passes --yes automatically, it bypasses the dry-run that the bare
+# reset command has — so we gate it behind an explicit typed confirmation.
+DESTRUCTIVE_TOKEN="REMOVE_ALL_DATABASES"
+
+confirm_fresh() {
+    cat >&2 <<EOF
+
+############################################################################
+# DANGER: --fresh will DROP ALL application data in the configured database
+#   (DATABASE_URL=${DATABASE_URL:-<read from .env at runtime>})
+# This permanently deletes every conversation, message, pipeline run, and the
+# entire arena leaderboard. It CANNOT be undone.
+############################################################################
+EOF
+    # Non-interactive opt-in for automation: set MENO_FRESH_CONFIRM to the token.
+    if [[ -n "${MENO_FRESH_CONFIRM:-}" ]]; then
+        if [[ "$MENO_FRESH_CONFIRM" == "$DESTRUCTIVE_TOKEN" ]]; then
+            echo "MENO_FRESH_CONFIRM matches; proceeding with the destructive wipe." >&2
+            return 0
+        fi
+        echo "MENO_FRESH_CONFIRM is set but does not equal '$DESTRUCTIVE_TOKEN'. Aborting; nothing was touched." >&2
+        exit 3
+    fi
+    # No TTY and no env opt-in: refuse rather than silently wipe in a script/CI.
+    if [[ ! -t 0 ]]; then
+        echo "Refusing --fresh in a non-interactive shell. To proceed deliberately, run with" >&2
+        echo "  MENO_FRESH_CONFIRM=$DESTRUCTIVE_TOKEN ./scripts/run_backend.sh start --fresh" >&2
+        exit 3
+    fi
+    printf 'Type %s to confirm the irreversible wipe (anything else aborts): ' "$DESTRUCTIVE_TOKEN" >&2
+    read -r reply || reply=""
+    if [[ "$reply" != "$DESTRUCTIVE_TOKEN" ]]; then
+        echo "Confirmation did not match. Aborting; no data was touched." >&2
+        exit 3
+    fi
+    echo "Confirmed. Proceeding with the destructive wipe." >&2
+}
+
 ensure_venv() {
     # Self-heal: if the tooling is missing (fresh clone, after a pull that
     # adds new entry points, partial sync), run uv sync once. This keeps
@@ -194,12 +235,14 @@ logs() {
 
 case "${1:-start}" in
     start)
+        if [[ "$FRESH" -eq 1 ]]; then confirm_fresh; fi
         start
         ;;
     stop)
         stop
         ;;
     restart)
+        if [[ "$FRESH" -eq 1 ]]; then confirm_fresh; fi
         stop
         start
         ;;
@@ -216,8 +259,10 @@ case "${1:-start}" in
     *)
         echo "Usage: $0 [--fresh] [start|stop|restart|status|logs|foreground]"
         echo ""
-        echo "  --fresh     Drop all application tables before starting (destructive,"
-        echo "              only valid with start/restart)."
+        echo "  --fresh     Drop ALL application tables before starting (permanent,"
+        echo "              only valid with start/restart). Prompts for the typed"
+        echo "              confirmation '$DESTRUCTIVE_TOKEN'; in a non-interactive"
+        echo "              shell set MENO_FRESH_CONFIRM=$DESTRUCTIVE_TOKEN to proceed."
         exit 2
         ;;
 esac
