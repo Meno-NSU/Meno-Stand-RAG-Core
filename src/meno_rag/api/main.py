@@ -349,6 +349,13 @@ async def list_models(request: Request):
         vllm_models, settings.rag_rewrite_rerank_model, settings.vllm_endpoint_list
     )
 
+    # Meno-Web pre-selects the first model in this list for a fresh session, so
+    # surface the configured DEFAULT_MODEL first to make it the out-of-the-box
+    # choice. Stable sort keeps every other model's relative order untouched.
+    default_id = (settings.default_model or "").strip()
+    if default_id:
+        merged.sort(key=lambda m: 0 if m["id"] == default_id else 1)
+
     return {"object": "list", "data": merged, "core_model_id": core_model_id}
 
 
