@@ -103,9 +103,7 @@ async def test_from_count_travels_with_result_not_shared_pipeline_state(monkeypa
     runtime = ModelRuntime(model_id="m", base_url="http://x/v1")
 
     result_small = await pipeline._rerank([{"query": "q", "candidates": [(1, 0.5), (2, 0.5)]}], runtime)
-    result_big = await pipeline._rerank(
-        [{"query": "q", "candidates": [(i, 0.5) for i in range(8)]}], runtime
-    )
+    result_big = await pipeline._rerank([{"query": "q", "candidates": [(i, 0.5) for i in range(8)]}], runtime)
 
     # The big run ran last; with shared state the small run's `from` would read 8.
     assert pipeline._stage_detail(StageName.RERANK, result_small)["from"] == 2

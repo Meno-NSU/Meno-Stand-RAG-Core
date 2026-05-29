@@ -130,9 +130,7 @@ class VLLMRegistry:
         return model_id, f"{endpoint}/v1" if endpoint else None
 
     def lookup_endpoint(self, model_id: str) -> str | None:
-        endpoints = [
-            model["endpoint"] for model in self._cache if model["id"] == model_id and model.get("endpoint")
-        ]
+        endpoints = [model["endpoint"] for model in self._cache if model["id"] == model_id and model.get("endpoint")]
         if not endpoints:
             return None
         if len(endpoints) == 1:

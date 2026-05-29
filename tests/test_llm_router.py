@@ -76,10 +76,7 @@ async def test_router_records_llm_call_metrics_per_endpoint_and_stage():
     rt = ModelRuntime(provider="vllm", model_id="m", base_url="http://e-rerank/v1")
     await router.chat_completion(runtime=rt, messages=[{"role": "user", "content": "q"}], stage="rerank")
     text = metrics.render()[0].decode()
-    assert (
-        'meno_llm_calls_total{endpoint="http://e-rerank/v1",outcome="ok",provider="vllm",stage="rerank"}'
-        in text
-    )
+    assert 'meno_llm_calls_total{endpoint="http://e-rerank/v1",outcome="ok",provider="vllm",stage="rerank"}' in text
     assert 'meno_llm_latency_seconds_count{endpoint="http://e-rerank/v1",provider="vllm",stage="rerank"}' in text
 
 
@@ -136,7 +133,4 @@ async def test_router_records_stream_metrics_on_completion():
     ]
     assert chunks == ["a", "b"]
     text = metrics.render()[0].decode()
-    assert (
-        'meno_llm_calls_total{endpoint="http://e-stream/v1",outcome="ok",provider="vllm",stage="generation"}'
-        in text
-    )
+    assert 'meno_llm_calls_total{endpoint="http://e-stream/v1",outcome="ok",provider="vllm",stage="generation"}' in text

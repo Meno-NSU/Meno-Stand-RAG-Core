@@ -24,14 +24,9 @@ def test_record_chat_request_increments_labeled_counter():
 def test_record_llm_call_tracks_count_and_latency_per_endpoint():
     from meno_rag.api import metrics
 
-    metrics.record_llm_call(
-        provider="vllm", endpoint="http://e1/v1", stage="rerank", outcome="ok", seconds=0.01
-    )
+    metrics.record_llm_call(provider="vllm", endpoint="http://e1/v1", stage="rerank", outcome="ok", seconds=0.01)
     text = metrics.render()[0].decode()
-    assert (
-        'meno_llm_calls_total{endpoint="http://e1/v1",outcome="ok",provider="vllm",stage="rerank"}'
-        in text
-    )
+    assert 'meno_llm_calls_total{endpoint="http://e1/v1",outcome="ok",provider="vllm",stage="rerank"}' in text
     assert 'meno_llm_latency_seconds_count{endpoint="http://e1/v1",provider="vllm",stage="rerank"}' in text
 
 
