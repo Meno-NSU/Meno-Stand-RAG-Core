@@ -896,6 +896,12 @@ async def _stream_response(
             stage=stage,
         )
     finally:
+        # If the client disconnected mid-prepare, the background prepare task is
+        # still running the (expensive) rewrite/retrieval/rerank work. Cancel it
+        # so it stops consuming vLLM capacity once nobody is listening — the
+        # admission slot is about to be released below.
+        if not prepare_task.done():
+            prepare_task.cancel()
         metrics_mod.dec_chat_in_flight()
         if on_finish is not None:
             on_finish()

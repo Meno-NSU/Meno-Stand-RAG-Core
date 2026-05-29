@@ -33,7 +33,10 @@ class LLMRouter:
             else:
                 openrouter = self._require_openrouter()
                 result = await openrouter.chat_completion(model=runtime.model_id, messages=messages, **kwargs)
-        except BaseException:
+        except asyncio.CancelledError:
+            self._record(runtime, stage, "cancelled", started)
+            raise
+        except Exception:
             self._record(runtime, stage, "error", started)
             raise
         self._record(runtime, stage, "ok", started)
@@ -51,7 +54,10 @@ class LLMRouter:
             else:
                 openrouter = self._require_openrouter()
                 result = await openrouter.chat_completion_text(model=runtime.model_id, messages=messages, **kwargs)
-        except BaseException:
+        except asyncio.CancelledError:
+            self._record(runtime, stage, "cancelled", started)
+            raise
+        except Exception:
             self._record(runtime, stage, "error", started)
             raise
         self._record(runtime, stage, "ok", started)
@@ -81,7 +87,7 @@ class LLMRouter:
             # distinctly so it doesn't inflate the error rate, then re-raise.
             self._record(runtime, stage, "cancelled", started)
             raise
-        except BaseException:
+        except Exception:
             self._record(runtime, stage, "error", started)
             raise
         else:

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from meno_rag.llm.router import LLMRouter
@@ -134,3 +136,40 @@ async def test_router_records_stream_metrics_on_completion():
     assert chunks == ["a", "b"]
     text = metrics.render()[0].decode()
     assert 'meno_llm_calls_total{endpoint="http://e-stream/v1",outcome="ok",provider="vllm",stage="generation"}' in text
+
+
+class _CancelClient:
+    async def chat_completion(self, **kwargs):
+        raise asyncio.CancelledError()
+
+    async def chat_completion_text(self, **kwargs):
+        raise asyncio.CancelledError()
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_records_cancelled_not_error_on_cancellation():
+    from meno_rag.api import metrics
+
+    router = LLMRouter(vllm=_CancelClient(), openrouter=None)
+    rt = ModelRuntime(provider="vllm", model_id="m", base_url="http://e-cancel/v1")
+    with pytest.raises(asyncio.CancelledError):
+        await router.chat_completion(runtime=rt, messages=[], stage="rerank")
+    text = metrics.render()[0].decode()
+    assert (
+        'meno_llm_calls_total{endpoint="http://e-cancel/v1",outcome="cancelled",provider="vllm",stage="rerank"}' in text
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_text_records_cancelled_not_error_on_cancellation():
+    from meno_rag.api import metrics
+
+    router = LLMRouter(vllm=_CancelClient(), openrouter=None)
+    rt = ModelRuntime(provider="vllm", model_id="m", base_url="http://e-cancel-text/v1")
+    with pytest.raises(asyncio.CancelledError):
+        await router.chat_completion_text(runtime=rt, messages=[], stage="generation")
+    text = metrics.render()[0].decode()
+    assert (
+        'meno_llm_calls_total{endpoint="http://e-cancel-text/v1",outcome="cancelled",provider="vllm",stage="generation"}'
+        in text
+    )
