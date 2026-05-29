@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import httpx
@@ -77,7 +77,7 @@ class VLLMClient:
         temperature: float | None = None,
         seed: int | None = None,
         timeout: float = 240.0,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str, None]:
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
 import httpx
 import structlog
+
+from meno_rag.api import metrics
 
 logger = structlog.get_logger(__name__)
 
@@ -25,16 +28,30 @@ class VLLMRegistry:
         self._timeout = timeout
         self._cache_ttl = cache_ttl
         self._cache: list[ModelRecord] = []
-        self._cache_ts = 0.0
+        # Time-based cache validity (monotonic). Using a deadline rather than
+        # `bool(self._cache)` lets an endpoint that legitimately serves zero
+        # models still be cached, and lets the stale-serving path below bound
+        # how often dead endpoints are re-probed.
+        self._cache_valid_until = 0.0
+        # On discovery failure, retry sooner than the success TTL so recovery
+        # is detected quickly without hammering dead endpoints every request.
+        self._failure_retry = min(cache_ttl, 10.0)
+        self._discovery_lock = asyncio.Lock()
+        self.last_discovery_ok = False
+        # Round-robin cursor per model_id, so a model served by several
+        # endpoints spreads load instead of pinning every request to the first.
+        self._rr_cursor: dict[str, int] = {}
 
     async def discover(self) -> list[ModelRecord]:
         models: list[ModelRecord] = []
+        success_count = 0
         for base_url in self._endpoints:
             url = f"{base_url}/v1/models"
             try:
                 response = await self._http.get(url, timeout=self._timeout)
                 response.raise_for_status()
                 body = response.json()
+                success_count += 1
                 for model in body.get("data", []):
                     models.append(
                         {
@@ -48,14 +65,43 @@ class VLLMRegistry:
                 logger.info("vllm_models_discovered", endpoint=base_url, count=len(body.get("data", [])))
             except Exception as exc:
                 logger.warning("vllm_model_discovery_failed", endpoint=base_url, error=str(exc))
+
+        # Fail-open: a total discovery failure must not blank the last good
+        # model list. Without this, one transient `/v1/models` blip (a vLLM
+        # restart, a 5s timeout under load) wipes the registry and every user
+        # gets `core_model_unavailable` until the next successful probe.
+        if success_count == 0 and self._endpoints:
+            self.last_discovery_ok = False
+            if self._cache:
+                # Have a last-good list — serve it stale and bound how often
+                # dead endpoints are re-probed (retry after failure_retry, not
+                # on every request).
+                self._cache_valid_until = time.monotonic() + self._failure_retry
+                logger.warning("vllm_discovery_failed_serving_cache", cached_count=len(self._cache))
+                metrics.record_discovery(registry="vllm", outcome="stale")
+            else:
+                # Cold start, nothing to serve: do NOT cache the empty result,
+                # so the next call re-probes and we recover the instant vLLM
+                # comes up.
+                self._cache_valid_until = 0.0
+                metrics.record_discovery(registry="vllm", outcome="failed")
+            return self._cache
+
         self._cache = models
-        self._cache_ts = time.monotonic()
+        self._cache_valid_until = time.monotonic() + self._cache_ttl
+        self.last_discovery_ok = True
+        metrics.record_discovery(registry="vllm", outcome="ok")
         return models
 
     async def list_models(self) -> list[ModelRecord]:
-        if not self._cache or (time.monotonic() - self._cache_ts) > self._cache_ttl:
+        if time.monotonic() <= self._cache_valid_until:
+            return self._cache
+        # Single-flight: coalesce concurrent cache-miss refreshes so a burst of
+        # requests after TTL expiry triggers one discovery, not one per request.
+        async with self._discovery_lock:
+            if time.monotonic() <= self._cache_valid_until:
+                return self._cache
             return await self.discover()
-        return self._cache
 
     async def refresh(self) -> list[ModelRecord]:
         return await self.discover()
@@ -84,7 +130,14 @@ class VLLMRegistry:
         return model_id, f"{endpoint}/v1" if endpoint else None
 
     def lookup_endpoint(self, model_id: str) -> str | None:
-        for model in self._cache:
-            if model["id"] == model_id:
-                return model.get("endpoint")
-        return None
+        endpoints = [model["endpoint"] for model in self._cache if model["id"] == model_id and model.get("endpoint")]
+        if not endpoints:
+            return None
+        if len(endpoints) == 1:
+            return endpoints[0]
+        # Multiple endpoints serve this model — round-robin across them. The
+        # cursor is per-request granularity (resolve happens once per chat), so
+        # consecutive requests for the same model land on different endpoints.
+        cursor = self._rr_cursor.get(model_id, 0)
+        self._rr_cursor[model_id] = cursor + 1
+        return endpoints[cursor % len(endpoints)]

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -69,6 +72,8 @@ class StandRagPipeline:
         rerank_semaphore: asyncio.Semaphore,
         generation_semaphore: asyncio.Semaphore,
         embed_semaphore: asyncio.Semaphore,
+        bm25_semaphore: asyncio.Semaphore | None = None,
+        retrieval_executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self.settings = settings
         self.resources = resources
@@ -77,10 +82,11 @@ class StandRagPipeline:
         self.rerank_semaphore = rerank_semaphore
         self.generation_semaphore = generation_semaphore
         self.embed_semaphore = embed_semaphore
-        # Number of candidates that entered the most recent _rerank call —
-        # surfaced as the `from` field in the rerank stage detail so the UI
-        # can render "Отобрано топ-N из X" instead of "из ?".
-        self._rerank_input_count: int = 0
+        # Optional: when provided, BM25 retrieval is concurrency-bounded and all
+        # retrieval runs on a dedicated executor instead of the shared default
+        # thread pool. Defaults (None) preserve the legacy asyncio.to_thread path.
+        self.bm25_semaphore = bm25_semaphore
+        self.retrieval_executor = retrieval_executor
 
     async def prepare(
         self,
@@ -221,6 +227,7 @@ class StandRagPipeline:
             answer = await self.llm_router.chat_completion_text(
                 runtime=runtime.generation,
                 messages=outcome.qa_messages,
+                stage=StageName.GENERATION,
                 max_tokens=max_tokens or self.settings.max_output_tokens,
                 temperature=sampling.temperature if temperature is None else temperature,
                 seed=sampling.seed,
@@ -249,6 +256,7 @@ class StandRagPipeline:
             async for token in self.llm_router.stream_chat_completion(
                 runtime=runtime.generation,
                 messages=outcome.qa_messages,
+                stage=StageName.GENERATION,
                 max_tokens=max_tokens or self.settings.max_output_tokens,
                 temperature=sampling.temperature if temperature is None else temperature,
                 seed=sampling.seed,
@@ -310,6 +318,7 @@ class StandRagPipeline:
             rewritten = await self.llm_router.chat_completion_text(
                 runtime=runtime,
                 messages=input_messages,
+                stage=StageName.QUERY_REWRITE,
                 max_tokens=sampling.max_tokens,
                 temperature=sampling.temperature,
                 seed=sampling.seed,
@@ -355,8 +364,11 @@ class StandRagPipeline:
     async def _retrieve(self, search_queries: list[str]) -> list[dict[str, Any]]:
         batches: list[dict[str, Any]] = []
         for query in search_queries:
+            # embed_semaphore bounds the GPU/embed (FAISS) path; bm25_semaphore
+            # bounds the CPU (lexical) path. Both run on the retrieval executor
+            # so a burst of concurrent requests can't starve the default pool.
             async with self.embed_semaphore:
-                dense = await asyncio.to_thread(
+                dense = await self._run_retrieval(
                     find_relevant_chunks,
                     query,
                     self.resources.faiss_retriever,
@@ -364,16 +376,25 @@ class StandRagPipeline:
                     None,
                     self.resources.embedder,
                 )
-            lexical = await asyncio.to_thread(
-                find_relevant_chunks,
-                query,
-                self.resources.bm25_retriever,
-                self.settings.top_k,
-                self.resources.stemmer,
-                None,
-            )
+            async with _maybe_semaphore(self.bm25_semaphore):
+                lexical = await self._run_retrieval(
+                    find_relevant_chunks,
+                    query,
+                    self.resources.bm25_retriever,
+                    self.settings.top_k,
+                    self.resources.stemmer,
+                    None,
+                )
             batches.append({"query": query, "dense": dense, "lexical": lexical})
         return batches
+
+    async def _run_retrieval(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """Run a blocking retrieval call on the dedicated executor when present,
+        else fall back to the default asyncio thread pool."""
+        if self.retrieval_executor is not None:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self.retrieval_executor, functools.partial(fn, *args))
+        return await asyncio.to_thread(fn, *args)
 
     def _fuse(self, retrieval_batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
         fused = []
@@ -383,18 +404,23 @@ class StandRagPipeline:
         return fused
 
     async def _rerank(self, fused_batches: list[dict[str, Any]], runtime: ModelRuntime) -> list[tuple[int, float]]:
-        # Remember how many candidates we were asked to score so the UI can
-        # render "Отобрано топ-N из X" without a placeholder `?`. Read back
-        # from `_stage_detail` for RERANK; cleared after each pipeline run is
-        # not strictly necessary since every chat starts with a fresh
-        # `_rerank` call that overwrites it.
-        self._rerank_input_count = sum(len(batch["candidates"]) for batch in fused_batches)
+        # Count candidates actually scored (post-cap) so the UI can render
+        # "Отобрано топ-N из X" with X = what the reranker really looked at.
+        scored_total = 0
         global_chunks: list[tuple[int, float]] = []
         for batch in fused_batches:
             query = batch["query"]
-            candidates: list[tuple[int, float]] = batch["candidates"]
+            # Pre-rerank cut: score only the top-N candidates per query. The
+            # fused list is sorted by retrieval score, so the survivors of the
+            # post-rerank `rerank_top_k` cut are almost always already here —
+            # but we save the LLM calls for the long tail. This is the single
+            # biggest reduction in vLLM rerank load under concurrency.
+            candidates: list[tuple[int, float]] = _cap_rerank_candidates(
+                batch["candidates"], self.settings.rerank_candidates_per_query
+            )
             if not candidates:
                 continue
+            scored_total += len(candidates)
             scoring = [self._score_chunk_with_llm(query, chunk_id, runtime) for chunk_id, _ in candidates]
             scores = await asyncio.gather(*scoring)
             context_scores: list[float] = []
@@ -417,7 +443,12 @@ class StandRagPipeline:
         # queries × 12) would push 96 chunks into the QA context.
         if len(global_chunks) > self.settings.max_context_chunks:
             global_chunks = global_chunks[: self.settings.max_context_chunks]
-        return global_chunks
+        # Carry the scored-candidate count ON the result rather than in shared
+        # instance state, so concurrent requests can't clobber each other's
+        # "Отобрано топ-N из X" count.
+        output = _RerankOutput(global_chunks)
+        output.scored_candidates = scored_total
+        return output
 
     async def _score_chunk_with_llm(self, query: str, chunk_id: int, runtime: ModelRuntime) -> float:
         cur_doc = prepare_context(
@@ -451,6 +482,7 @@ class StandRagPipeline:
                 response = await self.llm_router.chat_completion(
                     runtime=runtime,
                     messages=prompt,
+                    stage=StageName.RERANK,
                     max_tokens=sampling.max_tokens,
                     temperature=sampling.temperature,
                     logprobs=sampling.logprobs,
@@ -467,6 +499,7 @@ class StandRagPipeline:
                 response = await self.llm_router.chat_completion(
                     runtime=runtime,
                     messages=build_prompt(query, cur_doc, is_json=True),
+                    stage=StageName.RERANK,
                     max_tokens=20,
                     temperature=0.0,
                     response_format=response_format_schema(),
@@ -545,8 +578,11 @@ class StandRagPipeline:
         if stage_name == StageName.RERANK:
             # `from`: how many candidates the reranker scored (input). `kept`:
             # how many survived the > 0 score filter and global cap (output).
-            # UI uses both to render "Отобрано топ-{kept} из {from}".
-            return {"kept": len(result), "from": self._rerank_input_count}
+            # UI uses both to render "Отобрано топ-{kept} из {from}". The input
+            # count rides on the result object (see _RerankOutput); a plain list
+            # (e.g. rerank never ran) falls back to its own length.
+            scored = getattr(result, "scored_candidates", len(result))
+            return {"kept": len(result), "from": scored}
         if stage_name == StageName.CONTEXT_ASSEMBLY:
             context, sources = result
             return {"sources": len(sources), "context_tokens": max(1, len(context.split())) if context else 0}
@@ -594,6 +630,39 @@ _LARGE_QA_PROMPT_CHARS_WARN = 30000
 # ("--- ПРИМЕР n ---", "Вопрос: ", "Ответ: ", blank lines) on top of the raw
 # question+answer text. Used for budget accounting only — a rough upper bound.
 _FEWSHOT_RENDER_OVERHEAD = 40
+
+
+class _RerankOutput(list):
+    """The reranked ``(chunk_id, score)`` list, plus how many candidates were
+    actually scored. Subclassing ``list`` keeps every downstream consumer
+    working while letting the rerank stage detail read its input count off the
+    result instead of shared pipeline state."""
+
+    scored_candidates: int = 0
+
+
+@contextlib.asynccontextmanager
+async def _maybe_semaphore(semaphore: asyncio.Semaphore | None) -> AsyncIterator[None]:
+    """Acquire `semaphore` if provided, else a no-op — lets the bm25 bound be
+    optional without sprinkling None-checks at the call site."""
+    if semaphore is None:
+        yield
+    else:
+        async with semaphore:
+            yield
+
+
+def _cap_rerank_candidates(candidates: list[tuple[int, float]], cap: int) -> list[tuple[int, float]]:
+    """Keep only the top-`cap` fused candidates before LLM reranking.
+
+    Candidates arrive pre-sorted by retrieval score (combine_relevant_chunks),
+    so this drops the least-promising tail. `cap <= 0` disables the cut. Named
+    and tested because it is a load-bearing bound on per-request vLLM rerank
+    calls, mirroring `_dedupe_and_cap_queries`.
+    """
+    if cap > 0 and len(candidates) > cap:
+        return candidates[:cap]
+    return candidates
 
 
 def _dedupe_and_cap_queries(queries: list[str], max_queries: int) -> list[str]:

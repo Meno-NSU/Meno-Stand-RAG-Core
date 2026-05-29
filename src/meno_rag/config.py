@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", validation_alias="APP_HOST")
     app_port: int = Field(default=9006, validation_alias="APP_PORT")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+    app_env: str = Field(default="development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
 
     database_url: str = Field(
         default="sqlite+aiosqlite:///./var/meno_rag.sqlite3",
@@ -28,6 +29,16 @@ class Settings(BaseSettings):
     # calls without measurable recall loss on the NSU corpus.
     top_k: int = Field(default=50, validation_alias="TOP_K")
     rerank_top_k: int = Field(default=12, validation_alias="RERANK_TOP_K")
+    # Hard cap on candidates sent to the LLM reranker PER rewrite query. The
+    # fused dense+lexical list can reach ~2*top_k (~100) per query, and rerank
+    # issues one LLM call per candidate — by far the dominant vLLM cost under
+    # load. Candidates arrive pre-sorted by retrieval score, and rerank is
+    # pointwise (independent per chunk), so cutting the low-ranked tail before
+    # rerank does NOT change the scores of survivors — it only forgoes rescuing
+    # a chunk both retrievers under-ranked past this cap. Default 40 is
+    # conservative (>3x the `rerank_top_k`=12 that survive per query); lower it
+    # for more vLLM savings, raise it (or 0 = disable) if a recall eval regresses.
+    rerank_candidates_per_query: int = Field(default=40, validation_alias="RERANK_CANDIDATES_PER_QUERY")
     rerank_weight: float = Field(default=0.8, validation_alias="RERANK_WEIGHT")
     min_document_quality: float = Field(default=0.0, validation_alias="MIN_DOCUMENT_QUALITY")
     max_history_answer_words: int = Field(default=9, validation_alias="MAX_HISTORY_ANSWER_WORDS")
@@ -79,10 +90,25 @@ class Settings(BaseSettings):
     rerank_timeout_seconds: float = Field(default=120.0, validation_alias="RERANK_TIMEOUT_SECONDS")
     generation_timeout_seconds: float = Field(default=240.0, validation_alias="GENERATION_TIMEOUT_SECONDS")
 
+    # Admission control: max chat requests allowed in flight before the API
+    # fast-fails with 503 + Retry-After instead of queueing unboundedly. Sized
+    # above the ~50-100 target (arena doubles it to ~200 concurrent streams) so
+    # legitimate load is never rejected, while a runaway flood is capped. 0
+    # disables the limit (legacy unbounded behavior).
+    max_concurrent_chats: int = Field(default=256, validation_alias="MAX_CONCURRENT_CHATS")
+
     rewrite_concurrency: int = Field(default=32, validation_alias="REWRITE_CONCURRENCY")
     rerank_concurrency: int = Field(default=64, validation_alias="RERANK_CONCURRENCY")
     generation_concurrency: int = Field(default=32, validation_alias="GENERATION_CONCURRENCY")
     embed_concurrency: int = Field(default=8, validation_alias="EMBED_CONCURRENCY")
+    # BM25 (lexical) retrieval runs in threads. Bound it so a burst of concurrent
+    # requests can't flood the thread pool and starve the FAISS/embed work that
+    # shares it. CPU-bound; tune to core count.
+    bm25_concurrency: int = Field(default=8, validation_alias="BM25_CONCURRENCY")
+    # Dedicated thread pool for retrieval (FAISS + BM25), isolated from the
+    # default asyncio executor so retrieval can't contend with unrelated
+    # to-thread work. 0 = auto (embed_concurrency + bm25_concurrency).
+    retrieval_executor_max_workers: int = Field(default=0, validation_alias="RETRIEVAL_EXECUTOR_MAX_WORKERS")
 
     frida_device: str = Field(default="auto", validation_alias="FRIDA_DEVICE")
 
@@ -165,6 +191,14 @@ class Settings(BaseSettings):
     @property
     def openrouter_enabled(self) -> bool:
         return bool(self.openrouter_api_key.strip())
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.database_url.strip().lower().startswith("sqlite")
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() in {"production", "prod"}
 
 
 @lru_cache(maxsize=1)

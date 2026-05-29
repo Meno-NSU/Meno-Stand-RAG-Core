@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -11,10 +13,12 @@ import structlog
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import text
 
 from meno_rag.api import arena
+from meno_rag.api import metrics as metrics_mod
+from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
 from meno_rag.api.events import (
     StageEvent,
@@ -55,10 +59,34 @@ RAG_ENGINE_ID = "stand_rag"
 _HEALTH_QUERY = text("SELECT 1")
 
 
+def check_runtime_safety(settings: Settings) -> list[str]:
+    """Validate the deployment config. Returns non-fatal warnings; raises on a
+    fatal misconfiguration so the process refuses to start.
+
+    SQLite serializes writes and uses a single connection — fine for dev/CI,
+    but under concurrent load it throws "database is locked" and becomes a
+    bottleneck. In production we refuse it outright; in dev we only warn."""
+    warnings: list[str] = []
+    if settings.is_sqlite:
+        if settings.is_production:
+            raise RuntimeError(
+                "DATABASE_URL is SQLite but APP_ENV=production. SQLite serializes writes and "
+                "cannot handle concurrent load — set DATABASE_URL to PostgreSQL "
+                "(postgresql+asyncpg://...)."
+            )
+        warnings.append(
+            "database_sqlite_dev_only: DATABASE_URL is SQLite — single-writer, not for "
+            "production/load. Use PostgreSQL for >1 concurrent user."
+        )
+    return warnings
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
+    for warning in check_runtime_safety(settings):
+        logger.warning(warning)
     database = Database(
         settings.database_url,
         pool_size=settings.db_pool_size,
@@ -143,6 +171,11 @@ async def lifespan(app: FastAPI):
         openrouter=openrouter_client,
     )
 
+    retrieval_workers = settings.retrieval_executor_max_workers or (
+        settings.embed_concurrency + settings.bm25_concurrency
+    )
+    retrieval_executor = ThreadPoolExecutor(max_workers=retrieval_workers, thread_name_prefix="retrieval")
+
     resources = None
     pipeline = None
     try:
@@ -164,6 +197,8 @@ async def lifespan(app: FastAPI):
             rerank_semaphore=asyncio.Semaphore(settings.rerank_concurrency),
             generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
             embed_semaphore=asyncio.Semaphore(settings.embed_concurrency),
+            bm25_semaphore=asyncio.Semaphore(settings.bm25_concurrency),
+            retrieval_executor=retrieval_executor,
         )
     except Exception as exc:
         logger.exception("stand_resources_load_failed", error=str(exc))
@@ -180,6 +215,8 @@ async def lifespan(app: FastAPI):
     app.state.openrouter_client = openrouter_client
     app.state.model_status_store = status_store
     app.state.llm_router = llm_router
+    app.state.admission = AdmissionController(settings.max_concurrent_chats)
+    app.state.retrieval_executor = retrieval_executor
 
     yield
 
@@ -187,6 +224,7 @@ async def lifespan(app: FastAPI):
         await redis.close()
     await http_client.aclose()
     await database.close()
+    retrieval_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def create_app() -> FastAPI:
@@ -215,6 +253,44 @@ async def request_id_middleware(request: Request, call_next):
         return response
     finally:
         structlog.contextvars.unbind_contextvars("request_id")
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    # Don't let Prometheus scrapes inflate the very series they read.
+    if request.scope.get("path") == "/metrics":
+        return await call_next(request)
+
+    # HTTP-level counters/latency/in-flight for every route. The route template
+    # (not the raw URL) is used as the `path` label so unmatched/random URLs
+    # collapse into a single "unmatched" series instead of exploding cardinality.
+    # Note: for StreamingResponse this measures time-to-headers, not full stream
+    # duration — the chat stream's own `chat_in_flight` gauge covers that.
+    started = time.perf_counter()
+    status = 500  # default so an unhandled exception is still counted as 5xx
+    with metrics_mod.http_in_flight():
+        try:
+            response = await call_next(request)
+            status = response.status_code
+        finally:
+            route = request.scope.get("route")
+            path = getattr(route, "path", None) or "unmatched"
+            metrics_mod.record_http_request(
+                method=request.method,
+                path=path,
+                status=status,
+                seconds=time.perf_counter() - started,
+            )
+    return response
+
+
+@app.get("/metrics")
+async def metrics_endpoint(request: Request):
+    admission = getattr(request.app.state, "admission", None)
+    if admission is not None:
+        metrics_mod.set_admission(active=admission.active, limit=admission.max_concurrent)
+    body, content_type = metrics_mod.render()
+    return Response(content=body, media_type=content_type)
 
 
 @app.get("/healthz")
@@ -462,62 +538,82 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     if pipeline is None:
         return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
 
-    settings: Settings = request.app.state.settings
+    # Admission control: fast-fail under overload rather than queueing forever.
+    admission: AdmissionController = request.app.state.admission
+    if not admission.try_acquire():
+        metrics_mod.record_error("overloaded")
+        return _overloaded_response()
+
+    # The slot is released here for every synchronous outcome (errors and the
+    # non-stream success path). For streaming we hand the release to the
+    # generator via `on_finish`, since the work outlives this function.
+    released = False
     try:
-        runtime = await _resolve_runtime(request.app, payload.model)
-    except ValueError as exc:
-        return _error_response(400, str(exc), "model_not_found", param="model")
-    except ModelRateLimitedError as exc:
-        return _model_rate_limited_response(exc)
-    except ModelUnreachableError as exc:
-        return _model_unreachable_response(exc)
-    except CoreModelUnavailableError:
-        return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
+        settings: Settings = request.app.state.settings
+        try:
+            runtime = await _resolve_runtime(request.app, payload.model)
+        except ValueError as exc:
+            metrics_mod.record_error("model_not_found")
+            return _error_response(400, str(exc), "model_not_found", param="model")
+        except ModelRateLimitedError as exc:
+            metrics_mod.record_error("model_rate_limited")
+            return _model_rate_limited_response(exc)
+        except ModelUnreachableError as exc:
+            metrics_mod.record_error("model_unreachable")
+            return _model_unreachable_response(exc)
+        except CoreModelUnavailableError:
+            metrics_mod.record_error("core_model_unavailable")
+            return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
 
-    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-    created_ts = int(time.time())
-    session_id = payload.user or f"session-{completion_id}"
-    # Apply an explicit floor so a stingy env config (or a tiny payload value)
-    # doesn't truncate a long answer the user actually wants. Default floor
-    # is 4096 (see settings.min_output_tokens).
-    requested = payload.max_tokens or settings.max_output_tokens
-    max_tokens = max(requested, settings.min_output_tokens)
-    temperature = payload.temperature  # pipeline applies QaSampling.temperature when None
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created_ts = int(time.time())
+        session_id = payload.user or f"session-{completion_id}"
+        # Apply an explicit floor so a stingy env config (or a tiny payload value)
+        # doesn't truncate a long answer the user actually wants. Default floor
+        # is 4096 (see settings.min_output_tokens).
+        requested = payload.max_tokens or settings.max_output_tokens
+        max_tokens = max(requested, settings.min_output_tokens)
+        temperature = payload.temperature  # pipeline applies QaSampling.temperature when None
 
-    if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
-        return _error_response(
-            400,
-            f"Unknown knowledge_base_id={payload.knowledge_base_id!r}.",
-            "invalid_request_error",
-            "knowledge_base_id",
+        if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
+            return _error_response(
+                400,
+                f"Unknown knowledge_base_id={payload.knowledge_base_id!r}.",
+                "invalid_request_error",
+                "knowledge_base_id",
+            )
+
+        if payload.stream:
+            released = True  # the streaming generator now owns the release
+            return StreamingResponse(
+                _stream_response(
+                    request=request,
+                    payload=payload,
+                    runtime=runtime,
+                    completion_id=completion_id,
+                    created_ts=created_ts,
+                    session_id=session_id,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    on_finish=admission.release,
+                ),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+            )
+
+        return await _non_stream_response(
+            request=request,
+            payload=payload,
+            runtime=runtime,
+            completion_id=completion_id,
+            created_ts=created_ts,
+            session_id=session_id,
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
-
-    if payload.stream:
-        return StreamingResponse(
-            _stream_response(
-                request=request,
-                payload=payload,
-                runtime=runtime,
-                completion_id=completion_id,
-                created_ts=created_ts,
-                session_id=session_id,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
-        )
-
-    return await _non_stream_response(
-        request=request,
-        payload=payload,
-        runtime=runtime,
-        completion_id=completion_id,
-        created_ts=created_ts,
-        session_id=session_id,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    finally:
+        if not released:
+            admission.release()
 
 
 async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> PipelineRuntime:
@@ -551,6 +647,7 @@ async def _non_stream_response(
     answer = ""
     outcome = None
     generation_ms = 0.0
+    metrics_mod.inc_chat_in_flight()
     try:
         outcome = await pipeline.prepare(messages=payload.messages, runtime=runtime)
         gen_started = time.perf_counter()
@@ -584,6 +681,13 @@ async def _non_stream_response(
             error_code=classified.code,
             error_stage=stage,
         )
+        metrics_mod.record_error(classified.code)
+        metrics_mod.record_chat_request(
+            provider=runtime.generation.provider,
+            stream=False,
+            status="error",
+            seconds=time.perf_counter() - started,
+        )
         await _persist_failure(
             database,
             completion_id,
@@ -596,7 +700,15 @@ async def _non_stream_response(
             stage=stage,
         )
         return _classified_error_response(classified, retry_id=completion_id, stage=stage)
+    finally:
+        metrics_mod.dec_chat_in_flight()
 
+    metrics_mod.record_chat_request(
+        provider=runtime.generation.provider,
+        stream=False,
+        status="ok",
+        seconds=time.perf_counter() - started,
+    )
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -631,6 +743,7 @@ async def _stream_response(
     session_id: str,
     max_tokens: int,
     temperature: float | None,
+    on_finish: Callable[[], None] | None = None,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -638,6 +751,7 @@ async def _stream_response(
     stage_queue: asyncio.Queue[StageEvent] = asyncio.Queue()
     stage_durations: dict[str, float] = {}
     answer_parts: list[str] = []
+    metrics_mod.inc_chat_in_flight()
 
     async def sink(event: StageEvent) -> None:
         await stage_queue.put(event)
@@ -720,6 +834,12 @@ async def _stream_response(
             total_ms=total_ms,
             stream=True,
         )
+        metrics_mod.record_chat_request(
+            provider=runtime.generation.provider,
+            stream=True,
+            status="ok",
+            seconds=time.perf_counter() - started,
+        )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
         classified = classify_error(exc)
@@ -757,6 +877,13 @@ async def _stream_response(
         err_chunk["error"] = payload_dict["error"]
         yield sse_data(err_chunk)
         yield sse_data("[DONE]")
+        metrics_mod.record_error(classified.code)
+        metrics_mod.record_chat_request(
+            provider=runtime.generation.provider,
+            stream=True,
+            status="error",
+            seconds=time.perf_counter() - started,
+        )
         await _persist_failure(
             database,
             completion_id,
@@ -768,6 +895,16 @@ async def _stream_response(
             classified=classified,
             stage=stage,
         )
+    finally:
+        # If the client disconnected mid-prepare, the background prepare task is
+        # still running the (expensive) rewrite/retrieval/rerank work. Cancel it
+        # so it stops consuming vLLM capacity once nobody is listening — the
+        # admission slot is about to be released below.
+        if not prepare_task.done():
+            prepare_task.cancel()
+        metrics_mod.dec_chat_in_flight()
+        if on_finish is not None:
+            on_finish()
 
 
 async def _persist_success(
@@ -921,6 +1058,21 @@ def _classified_error_response(classified: ClassifiedError, *, retry_id: str, st
     return JSONResponse(
         status_code=classified.http_status,
         content=_classified_error_payload(classified, retry_id=retry_id, stage=stage),
+    )
+
+
+def _overloaded_response(retry_after_sec: int = 5) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(retry_after_sec)},
+        content={
+            "error": {
+                "message": "Сервис временно перегружен. Повторите запрос через несколько секунд.",
+                "type": "server_error",
+                "code": "overloaded",
+                "retry_after_sec": retry_after_sec,
+            }
+        },
     )
 
 
