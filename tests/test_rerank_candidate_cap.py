@@ -33,6 +33,8 @@ def test_cap_below_count_is_noop():
 class _StubResources:
     documents: list = []
     chunk_mapping: dict = {}
+    abbreviations: dict = {}
+    stemmer = None
 
 
 class _CountingRerank:
@@ -88,7 +90,7 @@ async def test_rerank_only_scores_capped_candidates(monkeypatch):
 
     fused = [{"query": "q", "candidates": [(i, 0.9 - i * 0.01) for i in range(10)]}]
     runtime = ModelRuntime(model_id="m", base_url="http://x/v1")
-    result = await pipeline._rerank(fused, runtime)
+    result = await pipeline._rerank(fused, "вопрос пользователя", "", runtime)
 
     assert fake.calls == 3  # only the top-3 candidates were scored, not all 10
     detail = pipeline._stage_detail(StageName.RERANK, result)

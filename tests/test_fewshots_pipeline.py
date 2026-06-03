@@ -184,7 +184,7 @@ def _stub_heavy_stages(monkeypatch, pipeline):
     def fake_fuse(batches):
         return [{"query": "q", "candidates": []}]
 
-    async def fake_rerank(fused, runtime):
+    async def fake_rerank(fused, user_question, dialogue_history, runtime):
         return [(0, 0.9)]
 
     def fake_assemble(chunks, budget_override=None):
