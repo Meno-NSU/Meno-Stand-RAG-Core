@@ -165,7 +165,7 @@ class StandRagPipeline:
         reranked_global_chunks = await self._timed_stage(
             StageName.RERANK,
             emit,
-            lambda: self._rerank(fused_batches, runtime.core),
+            lambda: self._rerank(fused_batches, question, prepared_dialogue_history, runtime.core),
             stage_durations,
             stage_details,
             model_id=runtime.core.model_id,
@@ -403,54 +403,63 @@ class StandRagPipeline:
             fused.append({"query": batch["query"], "candidates": candidates})
         return fused
 
-    async def _rerank(self, fused_batches: list[dict[str, Any]], runtime: ModelRuntime) -> list[tuple[int, float]]:
-        # Count candidates actually scored (post-cap) so the UI can render
-        # "Отобрано топ-N из X" with X = what the reranker really looked at.
-        scored_total = 0
-        global_chunks: list[tuple[int, float]] = []
+    async def _rerank(
+        self,
+        fused_batches: list[dict[str, Any]],
+        user_question: str,
+        dialogue_history: str,
+        runtime: ModelRuntime,
+    ) -> list[tuple[int, float]]:
+        # Merge candidates from every rewrite-query batch into ONE deduped set,
+        # keeping the best retrieval score per chunk, then score each unique
+        # candidate ONCE against the user's actual question (with dialogue history
+        # + abbreviations) — judging "is this a factual basis to ANSWER the
+        # question", not topical relevance to a rewrite query. This both improves
+        # ranking and cuts rerank LLM calls vs the old per-query scoring.
+        merged: dict[int, float] = {}
         for batch in fused_batches:
-            query = batch["query"]
-            # Pre-rerank cut: score only the top-N candidates per query. The
-            # fused list is sorted by retrieval score, so the survivors of the
-            # post-rerank `rerank_top_k` cut are almost always already here —
-            # but we save the LLM calls for the long tail. This is the single
-            # biggest reduction in vLLM rerank load under concurrency.
-            candidates: list[tuple[int, float]] = _cap_rerank_candidates(
-                batch["candidates"], self.settings.rerank_candidates_per_query
+            for chunk_id, retrieval_score in batch["candidates"]:
+                if chunk_id not in merged or retrieval_score > merged[chunk_id]:
+                    merged[chunk_id] = retrieval_score
+        # Pre-rerank cut: keep only the top-N by retrieval score before the LLM
+        # pass (the survivors of the post-rerank `rerank_top_k` cut are almost
+        # always already here), the single biggest reduction in vLLM rerank load.
+        candidates: list[tuple[int, float]] = _cap_rerank_candidates(
+            sorted(merged.items(), key=lambda it: (-it[1], it[0])),
+            self.settings.rerank_candidates_per_query,
+        )
+        if not candidates:
+            output = _RerankOutput([])
+            output.scored_candidates = 0
+            return output
+        scoring = [
+            self._score_chunk_with_llm(user_question, dialogue_history, chunk_id, runtime) for chunk_id, _ in candidates
+        ]
+        scores = await asyncio.gather(*scoring)
+        context_scores = [
+            rerank_merge_score(retrieval_score, scores[idx], self.settings.rerank_weight)
+            for idx, (_, retrieval_score) in enumerate(candidates)
+        ]
+        ordered = list(
+            filter(
+                lambda it: it[1] > 0.0,
+                sorted(
+                    zip([item[0] for item in candidates], context_scores, strict=False),
+                    key=lambda it: (-it[1], it[0]),
+                ),
             )
-            if not candidates:
-                continue
-            scored_total += len(candidates)
-            scoring = [self._score_chunk_with_llm(query, chunk_id, runtime) for chunk_id, _ in candidates]
-            scores = await asyncio.gather(*scoring)
-            context_scores: list[float] = []
-            for idx, (_, retrieval_score) in enumerate(candidates):
-                context_scores.append(rerank_merge_score(retrieval_score, scores[idx], self.settings.rerank_weight))
-            ordered = list(
-                filter(
-                    lambda it: it[1] > 0.0,
-                    sorted(
-                        zip([item[0] for item in candidates], context_scores, strict=False),
-                        key=lambda it: (-it[1], it[0]),
-                    ),
-                )
-            )
-            if len(ordered) > self.settings.rerank_top_k:
-                ordered = ordered[: self.settings.rerank_top_k]
-            global_chunks = combine_relevant_chunks(global_chunks, ordered)
-        # `rerank_top_k` is a per-query cap; without a global cap on the
-        # cumulative merge across queries, a multi-aspect rewrite (e.g. 8
-        # queries × 12) would push 96 chunks into the QA context.
-        if len(global_chunks) > self.settings.max_context_chunks:
-            global_chunks = global_chunks[: self.settings.max_context_chunks]
+        )
+        if len(ordered) > self.settings.rerank_top_k:
+            ordered = ordered[: self.settings.rerank_top_k]
         # Carry the scored-candidate count ON the result rather than in shared
-        # instance state, so concurrent requests can't clobber each other's
-        # "Отобрано топ-N из X" count.
-        output = _RerankOutput(global_chunks)
-        output.scored_candidates = scored_total
+        # instance state, so concurrent requests can't clobber each other's count.
+        output = _RerankOutput(ordered)
+        output.scored_candidates = len(candidates)
         return output
 
-    async def _score_chunk_with_llm(self, query: str, chunk_id: int, runtime: ModelRuntime) -> float:
+    async def _score_chunk_with_llm(
+        self, user_question: str, dialogue_history: str, chunk_id: int, runtime: ModelRuntime
+    ) -> float:
         cur_doc = prepare_context(
             indices_of_relevant_chunks=[chunk_id],
             scores_of_relevant_chunks=[1.0],
@@ -458,7 +467,9 @@ class StandRagPipeline:
             chunk_mapping=self.resources.chunk_mapping,
             min_document_quality=0.0,
         )[0][0]
-        prompt = build_prompt(query, cur_doc)
+        prompt = build_prompt(
+            user_question, dialogue_history, cur_doc, self.resources.abbreviations, self.resources.stemmer
+        )
         sampling = RerankSampling()
         # `chat_template_kwargs.enable_thinking=False` is the Qwen3 convention
         # for skipping the `<think>...</think>` preamble in the chat template.
@@ -498,7 +509,14 @@ class StandRagPipeline:
                 # Matches meno_stand rerank_utils.py:106-129.
                 response = await self.llm_router.chat_completion(
                     runtime=runtime,
-                    messages=build_prompt(query, cur_doc, is_json=True),
+                    messages=build_prompt(
+                        user_question,
+                        dialogue_history,
+                        cur_doc,
+                        self.resources.abbreviations,
+                        self.resources.stemmer,
+                        is_json=True,
+                    ),
                     stage=StageName.RERANK,
                     max_tokens=20,
                     temperature=0.0,

@@ -21,6 +21,8 @@ from meno_rag.stand.pipeline import ModelRuntime, StandRagPipeline
 class _StubResources:
     documents: list = []
     chunk_mapping: dict = {}
+    abbreviations: dict = {}
+    stemmer = None
 
 
 class _CapturingClient:
@@ -83,7 +85,7 @@ async def test_rerank_passes_enable_thinking_false_to_llm(monkeypatch):
 
     fused = [{"query": "q", "candidates": [(1, 0.5), (2, 0.5)]}]
     runtime = ModelRuntime(model_id="qwen3-30b-fp16", base_url="http://x/v1")
-    await pipeline._rerank(fused, runtime)
+    await pipeline._rerank(fused, "вопрос пользователя", "", runtime)
 
     assert client.calls, "no rerank LLM calls captured"
     for call in client.calls:

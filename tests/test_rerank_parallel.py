@@ -13,6 +13,8 @@ from meno_rag.stand.pipeline import ModelRuntime, StandRagPipeline
 class _StubResources:
     documents: list = []
     chunk_mapping: dict = {}
+    abbreviations: dict = {}
+    stemmer = None
 
 
 class _SlowFakeClient:
@@ -74,7 +76,7 @@ async def test_rerank_runs_chunks_in_parallel(monkeypatch):
     ]
     runtime = ModelRuntime(model_id="m", base_url="http://x/v1")
     started = time.perf_counter()
-    result = await pipeline._rerank(fused, runtime)
+    result = await pipeline._rerank(fused, "вопрос пользователя", "", runtime)
     elapsed = time.perf_counter() - started
 
     assert fake.calls == 8
