@@ -17,6 +17,7 @@ Exit codes (contract for ops scripts):
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -92,7 +93,34 @@ def _current_heads(engine, alembic_version_present: bool) -> tuple[str, ...]:
         return tuple(MigrationContext.configure(conn).get_current_heads())
 
 
-def run_bootstrap(sync_url: str) -> int:
+def _backup_before_upgrade(sync_url: str, backup_dir: Path | None) -> None:
+    """Best-effort consistent snapshot before applying migrations to a populated DB.
+
+    A failure here is logged but never blocks startup — availability beats a
+    missing pre-migration snapshot, and the periodic scheduler still runs.
+    """
+    prefix = "sqlite:///"
+    if not sync_url.startswith(prefix):
+        return
+    raw = sync_url.removeprefix(prefix)
+    if not raw or raw == ":memory:":
+        return
+    path = Path(raw)
+    if not path.exists():
+        return
+    try:
+        # Resolve the target dir inside the try so a get_settings() failure
+        # (e.g. broken env) can never propagate and block startup.
+        target = backup_dir if backup_dir is not None else get_settings().backup_dir
+        from meno_rag.db.backup import create_snapshot
+
+        dest = create_snapshot(path, target, timestamp=datetime.now(UTC).strftime("%Y%m%dT%H%M%S"))
+        logger.info("db.bootstrap.pre_migration_backup", dest=str(dest))
+    except Exception as exc:
+        logger.warning("db.bootstrap.pre_migration_backup_failed", error=str(exc))
+
+
+def run_bootstrap(sync_url: str, *, backup_dir: Path | None = None) -> int:
     _ensure_sqlite_parent(sync_url)
     cfg = _alembic_config(sync_url)
     engine = create_engine(sync_url)
@@ -135,6 +163,8 @@ def run_bootstrap(sync_url: str) -> int:
         app_tables=len(app_tables),
         current_heads=list(current_heads),
     )
+    if state == "tracked":
+        _backup_before_upgrade(sync_url, backup_dir)
     command.upgrade(cfg, "head")
     return 0
 

@@ -1,0 +1,16 @@
+# tests/test_integrity.py
+from __future__ import annotations
+
+import pytest
+
+from meno_rag.db.session import Database
+
+
+@pytest.mark.asyncio
+async def test_integrity_check_ok_on_fresh_db(tmp_path):
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'i.sqlite3'}")
+    await db.init_models()
+    try:
+        assert await db.integrity_check() == "ok"
+    finally:
+        await db.close()

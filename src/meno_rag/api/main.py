@@ -5,7 +5,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import httpx
@@ -38,6 +38,7 @@ from meno_rag.api.runtime_resolver import (
 from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings
 from meno_rag.db import repositories
+from meno_rag.db.backup import backup_scheduler
 from meno_rag.db.session import Database
 from meno_rag.llm import VLLMClient, VLLMRegistry
 from meno_rag.llm.openrouter_client import OpenRouterClient
@@ -91,8 +92,34 @@ async def lifespan(app: FastAPI):
         settings.database_url,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
+        busy_timeout_ms=settings.sqlite_busy_timeout_ms,
+        synchronous=settings.sqlite_synchronous,
     )
     await database.init_models()
+
+    integrity = await database.integrity_check()
+    if integrity != "ok":
+        # Keep the single container reachable, but make corruption unmissable.
+        logger.critical(
+            "db_integrity_check_failed",
+            result=integrity,
+            note="serving anyway; restore from a backup in var/backups if this persists",
+        )
+    else:
+        logger.info("db_integrity_check_ok")
+
+    backup_task: asyncio.Task | None = None
+    if settings.backup_enabled and settings.sqlite_path is not None:
+        backup_task = asyncio.create_task(
+            backup_scheduler(
+                sqlite_path=settings.sqlite_path,
+                backup_dir=settings.backup_dir,
+                interval_seconds=settings.backup_interval_hours * 3600.0,
+                keep_interval=settings.backup_keep_interval,
+                keep_daily=settings.backup_keep_daily,
+            )
+        )
+        logger.info("backup_scheduler_started", interval_hours=settings.backup_interval_hours)
 
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(
@@ -219,6 +246,11 @@ async def lifespan(app: FastAPI):
     app.state.retrieval_executor = retrieval_executor
 
     yield
+
+    if backup_task is not None:
+        backup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await backup_task
 
     if redis is not None:
         await redis.close()
