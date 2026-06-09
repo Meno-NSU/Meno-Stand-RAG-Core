@@ -202,6 +202,14 @@ class StandRagPipeline:
             stage_details[StageName.ABBREVIATION_EXPANSION]["original"] = question
             stage_details[StageName.ABBREVIATION_EXPANSION]["selected_abbreviations"] = selected_abbreviations
 
+        retrieved_records = build_retrieved_records(
+            reranked_global_chunks, self.resources.chunk_mapping, self.resources.documents
+        )
+        fewshot_records = [
+            {"question": example.question, "score": float(score), "ordinal": idx}
+            for idx, (example, score) in enumerate(selected_fewshots)
+        ]
+
         return PipelineOutcome(
             question=question,
             prepared_dialogue_history=prepared_dialogue_history,
@@ -211,6 +219,8 @@ class StandRagPipeline:
             qa_messages=qa_messages,
             stage_durations_ms=stage_durations,
             stage_details=stage_details,
+            retrieved=retrieved_records,
+            fewshots=fewshot_records,
         )
 
     async def generate_text(
@@ -670,6 +680,39 @@ async def _maybe_semaphore(semaphore: asyncio.Semaphore | None) -> AsyncIterator
     else:
         async with semaphore:
             yield
+
+
+def build_retrieved_records(
+    reranked_chunks: list[tuple[int, float]],
+    chunk_mapping: dict[str, dict[str, int]],
+    documents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Structured record of the rerank-selected chunks: id, rank, merged score, source.
+
+    Title/URL are resolved via the same chunk->document mapping the context
+    assembler uses. Unknown chunk ids degrade to empty source strings rather
+    than raising, so capture can never break a successful response.
+    """
+    records: list[dict[str, Any]] = []
+    for ordinal, (chunk_id, merged) in enumerate(reranked_chunks):
+        title, url = "", ""
+        mapping = chunk_mapping.get(str(chunk_id))
+        if mapping is not None:
+            doc_index = mapping.get("doc_index")
+            if doc_index is not None and 0 <= doc_index < len(documents):
+                doc = documents[doc_index]
+                title = doc.get("doc_title", "") or ""
+                url = doc.get("url", "") or ""
+        records.append(
+            {
+                "chunk_id": int(chunk_id),
+                "ordinal": ordinal,
+                "merged_score": float(merged),
+                "title": title,
+                "url": url,
+            }
+        )
+    return records
 
 
 def _cap_rerank_candidates(candidates: list[tuple[int, float]], cap: int) -> list[tuple[int, float]]:
