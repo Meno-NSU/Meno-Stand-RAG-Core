@@ -139,6 +139,7 @@ def test_reset_main_reads_database_url_env(tmp_path, monkeypatch):
         assert exc.value.code == 0
 
         # Then reset via the CLI entry point
+        monkeypatch.setenv("MENO_ALLOW_DB_RESET", "1")
         monkeypatch.setattr("sys.argv", ["meno-rag-reset", "--yes"])
         with pytest.raises(SystemExit) as exc:
             reset.main()
@@ -152,3 +153,34 @@ def test_reset_main_reads_database_url_env(tmp_path, monkeypatch):
     finally:
         engine.dispose()
     assert tables == set()
+
+
+def test_reset_main_refuses_without_env_flag(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "cli.sqlite3"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db}")
+    monkeypatch.delenv("MENO_ALLOW_DB_RESET", raising=False)
+
+    from meno_rag.config import get_settings
+    from meno_rag.db import migrate, reset
+
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(SystemExit) as exc:
+            migrate.main()
+        assert exc.value.code == 0
+
+        monkeypatch.setattr("sys.argv", ["meno-rag-reset", "--yes"])
+        with pytest.raises(SystemExit) as exc:
+            reset.main()
+        assert exc.value.code == 3
+    finally:
+        get_settings.cache_clear()
+
+    # DB untouched: the schema is still present.
+    engine = create_engine(f"sqlite:///{db}")
+    try:
+        tables = set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+    assert "conversations" in tables
+    assert "MENO_ALLOW_DB_RESET" in capsys.readouterr().err

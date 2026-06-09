@@ -21,6 +21,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -101,4 +102,11 @@ def main() -> None:
 
     settings = get_settings()
     sync_url = settings.database_url.replace("+asyncpg", "").replace("+aiosqlite", "")
+    if args.yes and os.environ.get("MENO_ALLOW_DB_RESET") != "1":
+        print(
+            "Refusing destructive reset: set MENO_ALLOW_DB_RESET=1 to confirm dropping all tables.\n"
+            "  MENO_ALLOW_DB_RESET=1 .venv/bin/meno-rag-reset --yes",
+            file=sys.stderr,
+        )
+        sys.exit(3)
     sys.exit(run_reset(sync_url, confirm=args.yes))
