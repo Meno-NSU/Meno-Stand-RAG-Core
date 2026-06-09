@@ -99,7 +99,12 @@ async def lifespan(app: FastAPI):
 
     integrity = await database.integrity_check()
     if integrity != "ok":
-        logger.error("db_integrity_check_failed", result=integrity)
+        # Keep the single container reachable, but make corruption unmissable.
+        logger.critical(
+            "db_integrity_check_failed",
+            result=integrity,
+            note="serving anyway; restore from a backup in var/backups if this persists",
+        )
     else:
         logger.info("db_integrity_check_ok")
 
