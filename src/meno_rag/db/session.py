@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -58,6 +58,12 @@ class Database:
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+    async def integrity_check(self) -> str:
+        """Run ``PRAGMA quick_check`` and return its first result row ('ok' when healthy)."""
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(text("PRAGMA quick_check"))).first()
+        return str(row[0]) if row else "ok"
 
     async def session(self) -> AsyncIterator[AsyncSession]:
         async with self.sessionmaker() as session:
