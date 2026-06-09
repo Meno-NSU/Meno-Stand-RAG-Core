@@ -108,8 +108,10 @@ def _backup_before_upgrade(sync_url: str, backup_dir: Path | None) -> None:
     path = Path(raw)
     if not path.exists():
         return
-    target = backup_dir if backup_dir is not None else get_settings().backup_dir
     try:
+        # Resolve the target dir inside the try so a get_settings() failure
+        # (e.g. broken env) can never propagate and block startup.
+        target = backup_dir if backup_dir is not None else get_settings().backup_dir
         from meno_rag.db.backup import create_snapshot
 
         dest = create_snapshot(path, target, timestamp=datetime.now(UTC).strftime("%Y%m%dT%H%M%S"))
