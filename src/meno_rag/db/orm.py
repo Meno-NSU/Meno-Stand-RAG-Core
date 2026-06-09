@@ -26,6 +26,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
@@ -96,6 +97,20 @@ class SourceRecord(Base):
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
 
     pipeline_run: Mapped[PipelineRun] = relationship(back_populates="sources")
+
+
+class GenerationRecord(Base):
+    __tablename__ = "generation_records"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), primary_key=True)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    user_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    dialogue_history: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_completion: Mapped[str] = mapped_column(Text, nullable=False)
+    retrieved: Mapped[list | dict | None] = mapped_column(JsonCompat, nullable=True)
+    fewshots: Mapped[list | dict | None] = mapped_column(JsonCompat, nullable=True)
+    generation_params: Mapped[list | dict | None] = mapped_column(JsonCompat, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class ArenaVote(Base):
