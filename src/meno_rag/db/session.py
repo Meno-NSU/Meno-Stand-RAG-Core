@@ -60,10 +60,13 @@ class Database:
         await self.engine.dispose()
 
     async def integrity_check(self) -> str:
-        """Run ``PRAGMA quick_check`` and return its first result row ('ok' when healthy)."""
+        """Run ``PRAGMA quick_check``; return 'ok' when healthy, else the joined error rows."""
         async with self.engine.connect() as conn:
-            row = (await conn.execute(text("PRAGMA quick_check"))).first()
-        return str(row[0]) if row else "ok"
+            rows = (await conn.execute(text("PRAGMA quick_check"))).fetchall()
+        messages = [str(row[0]) for row in rows]
+        if not messages or messages == ["ok"]:
+            return "ok"
+        return "; ".join(messages)
 
     async def session(self) -> AsyncIterator[AsyncSession]:
         async with self.sessionmaker() as session:

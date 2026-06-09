@@ -86,8 +86,15 @@ async def backup_scheduler(
         await asyncio.sleep(interval_seconds)
         try:
             ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-            dest = run_backup_cycle(
-                sqlite_path, backup_dir, keep_interval=keep_interval, keep_daily=keep_daily, timestamp=ts
+            # Offload the synchronous VACUUM INTO to a thread so snapshotting a
+            # large DB can never block the event loop (and thus in-flight requests).
+            dest = await asyncio.to_thread(
+                run_backup_cycle,
+                sqlite_path,
+                backup_dir,
+                keep_interval=keep_interval,
+                keep_daily=keep_daily,
+                timestamp=ts,
             )
             logger.info("backup.cycle_done", dest=str(dest))
         except Exception as exc:  # never let a backup failure kill the loop
