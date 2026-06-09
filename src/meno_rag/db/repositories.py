@@ -10,6 +10,7 @@ from meno_rag.db.orm import (
     ArenaRating,
     ArenaVote,
     Conversation,
+    GenerationRecord,
     Message,
     PipelineRun,
     PipelineStageRun,
@@ -126,6 +127,32 @@ async def add_sources(session: AsyncSession, *, run_id: str, sources: list[dict[
                 ordinal=idx,
             )
         )
+
+
+async def create_generation_record(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    system_prompt: str,
+    user_prompt: str,
+    raw_completion: str,
+    dialogue_history: str | None = None,
+    retrieved: list | dict | None = None,
+    fewshots: list | dict | None = None,
+    generation_params: list | dict | None = None,
+) -> None:
+    session.add(
+        GenerationRecord(
+            run_id=run_id,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            dialogue_history=dialogue_history,
+            raw_completion=raw_completion,
+            retrieved=retrieved,
+            fewshots=fewshots,
+            generation_params=generation_params,
+        )
+    )
 
 
 INITIAL_ELO = 1200.0

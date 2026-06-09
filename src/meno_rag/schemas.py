@@ -59,3 +59,5 @@ class PipelineOutcome(BaseModel):
     qa_messages: list[dict[str, str]]
     stage_durations_ms: dict[str, float] = Field(default_factory=dict)
     stage_details: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    retrieved: list[dict[str, Any]] = Field(default_factory=list)
+    fewshots: list[dict[str, Any]] = Field(default_factory=list)

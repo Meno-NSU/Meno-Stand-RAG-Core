@@ -702,6 +702,8 @@ async def _non_stream_response(
             generation_ms=generation_ms,
             total_ms=total_ms,
             stream=False,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
@@ -865,6 +867,8 @@ async def _stream_response(
             generation_ms=generation_ms,
             total_ms=total_ms,
             stream=True,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
         metrics_mod.record_chat_request(
             provider=runtime.generation.provider,
@@ -939,6 +943,18 @@ async def _stream_response(
             on_finish()
 
 
+def _extract_prompts(qa_messages: list[dict[str, str]]) -> tuple[str, str]:
+    system_prompt = ""
+    user_prompt = ""
+    for message in qa_messages:
+        role = message.get("role")
+        if role == "system" and not system_prompt:
+            system_prompt = message.get("content", "")
+        elif role == "user":
+            user_prompt = message.get("content", "")
+    return system_prompt, user_prompt
+
+
 async def _persist_success(
     *,
     database: Database,
@@ -954,60 +970,86 @@ async def _persist_success(
     generation_ms: float,
     total_ms: float,
     stream: bool,
+    temperature: float | None,
+    max_tokens: int,
 ) -> None:
-    async with database.sessionmaker() as session:
-        await repositories.append_message(
-            session,
-            conversation_id=session_id,
-            role="user",
-            content=question,
-            model=model,
-            knowledge_base_id=KB_ID,
-            request_id=run_id,
-        )
-        await repositories.append_message(
-            session,
-            conversation_id=session_id,
-            role="assistant",
-            content=answer,
-            model=model,
-            knowledge_base_id=KB_ID,
-            request_id=run_id,
-        )
-        await repositories.create_pipeline_run(
-            session,
-            run_id=run_id,
-            session_id=session_id,
-            model=model,
-            generation_model=generation_model,
-            core_model=core_model,
-            endpoint=endpoint,
-            knowledge_base_id=KB_ID,
-            user_question=question,
-            search_queries=outcome.search_queries,
-            total_ms=total_ms,
-            response_len=len(answer),
-            stream=stream,
-        )
-        for stage, duration_ms in outcome.stage_durations_ms.items():
+    try:
+        async with database.sessionmaker() as session:
+            await repositories.append_message(
+                session,
+                conversation_id=session_id,
+                role="user",
+                content=question,
+                model=model,
+                knowledge_base_id=KB_ID,
+                request_id=run_id,
+            )
+            await repositories.append_message(
+                session,
+                conversation_id=session_id,
+                role="assistant",
+                content=answer,
+                model=model,
+                knowledge_base_id=KB_ID,
+                request_id=run_id,
+            )
+            await repositories.create_pipeline_run(
+                session,
+                run_id=run_id,
+                session_id=session_id,
+                model=model,
+                generation_model=generation_model,
+                core_model=core_model,
+                endpoint=endpoint,
+                knowledge_base_id=KB_ID,
+                user_question=question,
+                search_queries=outcome.search_queries,
+                total_ms=total_ms,
+                response_len=len(answer),
+                stream=stream,
+            )
+            await session.flush()  # ensure pipeline_run id is visible for generation_record FK
+            for stage, duration_ms in outcome.stage_durations_ms.items():
+                await repositories.add_pipeline_stage(
+                    session,
+                    run_id=run_id,
+                    stage=stage,
+                    status=StageStatus.COMPLETED,
+                    duration_ms=duration_ms,
+                    detail=outcome.stage_details.get(stage),
+                )
             await repositories.add_pipeline_stage(
                 session,
                 run_id=run_id,
-                stage=stage,
+                stage=StageName.GENERATION,
                 status=StageStatus.COMPLETED,
-                duration_ms=duration_ms,
-                detail=outcome.stage_details.get(stage),
+                duration_ms=generation_ms,
+                detail=None,
             )
-        await repositories.add_pipeline_stage(
-            session,
-            run_id=run_id,
-            stage=StageName.GENERATION,
-            status=StageStatus.COMPLETED,
-            duration_ms=generation_ms,
-            detail=None,
-        )
-        await repositories.add_sources(session, run_id=run_id, sources=outcome.sources)
-        await session.commit()
+            await repositories.add_sources(session, run_id=run_id, sources=outcome.sources)
+            system_prompt, user_prompt = _extract_prompts(outcome.qa_messages)
+            await repositories.create_generation_record(
+                session,
+                run_id=run_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                dialogue_history=outcome.prepared_dialogue_history,
+                raw_completion=answer,
+                retrieved=outcome.retrieved,
+                fewshots=outcome.fewshots,
+                generation_params={
+                    "generation_model": generation_model,
+                    "core_model": core_model,
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                },
+            )
+            await session.commit()
+    except Exception as exc:
+        # Persistence is best-effort: a successful answer was already produced/
+        # streamed to the user. Never convert a good response into an error.
+        logger.warning("persist_success_failed", request_id=run_id, error=str(exc))
+        metrics_mod.record_error("persist_failed")
 
 
 async def _persist_failure(
