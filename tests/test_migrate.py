@@ -45,6 +45,22 @@ def test_run_bootstrap_empty_db_runs_upgrade_to_head(tmp_path):
     assert "messages" in tables
 
 
+def test_run_bootstrap_snapshots_before_migrating_tracked_db(tmp_path):
+    from meno_rag.db.migrate import run_bootstrap
+
+    db = tmp_path / "x.sqlite3"
+    url = f"sqlite:///{db}"
+    bdir = tmp_path / "backups"
+
+    # First run creates the schema (empty DB → no backup expected).
+    assert run_bootstrap(url, backup_dir=bdir) == 0
+    assert list(bdir.glob("meno_rag-*.sqlite3")) == []
+
+    # Second run sees a tracked DB with data → a pre-migration snapshot is taken.
+    assert run_bootstrap(url, backup_dir=bdir) == 0
+    assert len(list(bdir.glob("meno_rag-*.sqlite3"))) == 1
+
+
 def test_run_bootstrap_tracked_db_advances_to_head(tmp_path):
     db = tmp_path / "x.sqlite3"
     url = _sync_sqlite_url(db)
