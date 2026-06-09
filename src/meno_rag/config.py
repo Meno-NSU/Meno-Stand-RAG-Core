@@ -115,6 +115,15 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=20, validation_alias="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=10, validation_alias="DB_MAX_OVERFLOW")
 
+    # --- Durability (S0) ---
+    sqlite_busy_timeout_ms: int = Field(default=5000, validation_alias="SQLITE_BUSY_TIMEOUT_MS")
+    sqlite_synchronous: str = Field(default="NORMAL", validation_alias="SQLITE_SYNCHRONOUS")
+    backup_enabled: bool = Field(default=True, validation_alias="BACKUP_ENABLED")
+    backup_interval_hours: float = Field(default=6.0, validation_alias="BACKUP_INTERVAL_HOURS")
+    backup_keep_interval: int = Field(default=24, validation_alias="BACKUP_KEEP_INTERVAL")
+    backup_keep_daily: int = Field(default=7, validation_alias="BACKUP_KEEP_DAILY")
+    backup_dir: Path = Field(default=Path("var/backups"), validation_alias="BACKUP_DIR")
+
     httpx_max_connections: int = Field(default=200, validation_alias="HTTPX_MAX_CONNECTIONS")
     httpx_max_keepalive: int = Field(default=100, validation_alias="HTTPX_MAX_KEEPALIVE")
 
@@ -195,6 +204,15 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.strip().lower().startswith("sqlite")
+
+    @property
+    def sqlite_path(self) -> Path | None:
+        if not self.is_sqlite:
+            return None
+        _, _, path = self.database_url.partition(":///")
+        if not path or path == ":memory:":
+            return None
+        return Path(path)
 
     @property
     def is_production(self) -> bool:
