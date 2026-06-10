@@ -50,6 +50,23 @@ class VoteRequest(BaseModel):
     history_len_b: int | None = Field(default=None, ge=0)
 
 
+class FeedbackRequest(BaseModel):
+    completion_id: str = Field(..., min_length=1)
+    session_id: str = Field(..., min_length=1)
+    value: Literal["up", "down"]
+    comment: str | None = None
+
+
+class FeedbackClearRequest(BaseModel):
+    completion_id: str = Field(..., min_length=1)
+    session_id: str = Field(..., min_length=1)
+
+
+class SurveyRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    answer: Literal["yes", "maybe", "no", "skipped"]
+
+
 class PipelineOutcome(BaseModel):
     question: str
     prepared_dialogue_history: str
