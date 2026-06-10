@@ -79,6 +79,17 @@ def check_runtime_safety(settings: Settings) -> list[str]:
             "database_sqlite_dev_only: DATABASE_URL is SQLite — single-writer, not for "
             "production/load. Use PostgreSQL for >1 concurrent user."
         )
+    # A weak HS256 secret is forgeable — the single highest-impact auth failure.
+    if settings.auth_enabled and len(settings.auth_jwt_secret.encode("utf-8")) < 32:
+        if settings.is_production:
+            raise RuntimeError(
+                "AUTH_JWT_SECRET is shorter than 32 bytes. Use a long random secret "
+                "(e.g. `openssl rand -hex 32`) in production."
+            )
+        warnings.append(
+            "auth_jwt_secret_weak: AUTH_JWT_SECRET is < 32 bytes — acceptable for dev, but use a "
+            "long random secret in production (HS256 key strength)."
+        )
     return warnings
 
 
@@ -492,6 +503,12 @@ async def diagnostics_openrouter(request: Request):
 
     if not settings.openrouter_enabled or or_registry is None or or_client is None:
         return _error_response(503, "OpenRouter is not configured.", "openrouter_disabled")
+
+    # Same threat model as the chat gate: don't let anonymous callers drive
+    # OpenRouter token consumption when auth is enabled.
+    if settings.auth_enabled and await auth.resolve_optional_user(request) is None:
+        metrics_mod.record_error("auth_required")
+        return _error_response(403, "This diagnostics endpoint requires signing in.", "auth_required")
 
     models = await or_registry.list_models()
     if not models:

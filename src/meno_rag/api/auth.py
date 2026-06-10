@@ -17,14 +17,19 @@ from meno_rag.db import repositories
 from meno_rag.db.orm import User
 from meno_rag.schemas import LoginRequest, NicknameRequest, RegisterRequest
 
+# bcrypt only uses the first 72 bytes of the password and (since 5.0) RAISES on
+# longer input. Truncate to 72 bytes in BOTH hash and verify so a long passphrase
+# can never 500 and the two stay consistent (this matches bcrypt's classic behavior).
+_BCRYPT_MAX_BYTES = 72
+
 
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    return bcrypt.hashpw(password.encode("utf-8")[:_BCRYPT_MAX_BYTES], bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     try:
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+        return bcrypt.checkpw(password.encode("utf-8")[:_BCRYPT_MAX_BYTES], password_hash.encode("utf-8"))
     except (ValueError, TypeError):
         return False
 
