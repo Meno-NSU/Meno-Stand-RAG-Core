@@ -455,6 +455,12 @@ async def list_models(request: Request):
             }
         ]
 
+    current_user = await auth.resolve_optional_user(request)
+    if settings.auth_enabled and current_user is None:
+        for entry in merged:
+            if entry.get("provider") == "openrouter":
+                entry["requires_auth"] = True
+
     core_model_id = resolve_core_model_id_sync(
         vllm_models, settings.rag_rewrite_rerank_model, settings.vllm_endpoint_list
     )
@@ -599,6 +605,16 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             metrics_mod.record_error("core_model_unavailable")
             return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
 
+        current_user = await auth.resolve_optional_user(request)
+        if auth.requires_auth_for_model(
+            runtime.generation.provider, auth_enabled=settings.auth_enabled, authenticated=current_user is not None
+        ):
+            metrics_mod.record_error("auth_required")
+            return _error_response(
+                403, "This model requires signing in. Register or log in to use OpenRouter models.", "auth_required"
+            )
+        user_id = current_user.id if current_user is not None else None
+
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created_ts = int(time.time())
         session_id = payload.user or f"session-{completion_id}"
@@ -629,6 +645,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     session_id=session_id,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    user_id=user_id,
                     on_finish=admission.release,
                 ),
                 media_type="text/event-stream",
@@ -644,6 +661,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             session_id=session_id,
             max_tokens=max_tokens,
             temperature=temperature,
+            user_id=user_id,
         )
     finally:
         if not released:
@@ -674,6 +692,7 @@ async def _non_stream_response(
     session_id: str,
     max_tokens: int,
     temperature: float | None,
+    user_id: str | None = None,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -706,6 +725,7 @@ async def _non_stream_response(
             stream=False,
             temperature=temperature,
             max_tokens=max_tokens,
+            user_id=user_id,
         )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
@@ -779,6 +799,7 @@ async def _stream_response(
     session_id: str,
     max_tokens: int,
     temperature: float | None,
+    user_id: str | None = None,
     on_finish: Callable[[], None] | None = None,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
@@ -871,6 +892,7 @@ async def _stream_response(
             stream=True,
             temperature=temperature,
             max_tokens=max_tokens,
+            user_id=user_id,
         )
         metrics_mod.record_chat_request(
             provider=runtime.generation.provider,
@@ -974,9 +996,11 @@ async def _persist_success(
     stream: bool,
     temperature: float | None,
     max_tokens: int,
+    user_id: str | None = None,
 ) -> None:
     try:
         async with database.sessionmaker() as session:
+            await repositories.ensure_conversation(session, session_id, user_id=user_id)
             await repositories.append_message(
                 session,
                 conversation_id=session_id,

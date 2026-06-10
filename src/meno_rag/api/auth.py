@@ -71,6 +71,15 @@ def _enabled_settings(request: Request):
     return settings
 
 
+def requires_auth_for_model(provider: str, *, auth_enabled: bool, authenticated: bool) -> bool:
+    """True if this model is gated behind login for the current caller.
+
+    OpenRouter models require authentication (cost/abuse control); local vLLM
+    models are always open. When auth is disabled server-wide, nothing is gated.
+    """
+    return auth_enabled and provider == "openrouter" and not authenticated
+
+
 async def resolve_optional_user(request: Request) -> User | None:
     """Return the authenticated User from a Bearer token, or None. Never raises."""
     settings = request.app.state.settings
