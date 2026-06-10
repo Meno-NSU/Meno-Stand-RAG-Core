@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meno_rag.db.orm import (
@@ -358,3 +358,69 @@ async def update_user_nickname(session: AsyncSession, *, user_id: str, nickname:
     user.nickname = nickname
     user.updated_at = datetime.now(UTC)
     return user
+
+
+async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, Any]]:
+    """Registered users ranked by arena votes + feedback given + questions asked.
+
+    Exposes nickname only (never email); a null/empty nickname falls back to
+    ``anon-<first 8 of id>``. Anonymous activity (user_id NULL) is excluded.
+    """
+    vote_counts = dict(
+        (
+            await session.execute(
+                select(ArenaVote.user_id, func.count())
+                .where(ArenaVote.user_id.is_not(None))
+                .group_by(ArenaVote.user_id)
+            )
+        )
+        .tuples()
+        .all()
+    )
+    feedback_counts = dict(
+        (
+            await session.execute(
+                select(MessageFeedback.user_id, func.count())
+                .where(MessageFeedback.user_id.is_not(None))
+                .group_by(MessageFeedback.user_id)
+            )
+        )
+        .tuples()
+        .all()
+    )
+    # The join holds by construction: _persist_success calls ensure_conversation
+    # (conversations.id == session_id) before create_pipeline_run, so every run has
+    # a matching conversation. There is no FK enforcing it — runs inserted outside
+    # that path would be undercounted here.
+    question_counts = dict(
+        (
+            await session.execute(
+                select(Conversation.user_id, func.count(PipelineRun.id))
+                .join(PipelineRun, PipelineRun.session_id == Conversation.id)
+                .where(Conversation.user_id.is_not(None))
+                .group_by(Conversation.user_id)
+            )
+        )
+        .tuples()
+        .all()
+    )
+    user_ids = set(vote_counts) | set(feedback_counts) | set(question_counts)
+    if not user_ids:
+        return []
+    users = (await session.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+    rows: list[dict[str, Any]] = []
+    for user in users:
+        votes = int(vote_counts.get(user.id, 0))
+        feedback = int(feedback_counts.get(user.id, 0))
+        questions = int(question_counts.get(user.id, 0))
+        rows.append(
+            {
+                "nickname": user.nickname or f"anon-{user.id[:8]}",
+                "votes": votes,
+                "feedback": feedback,
+                "questions": questions,
+                "total": votes + feedback + questions,
+            }
+        )
+    rows.sort(key=lambda r: (-r["total"], r["nickname"]))
+    return rows

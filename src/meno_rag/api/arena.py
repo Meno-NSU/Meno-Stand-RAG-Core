@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
+from meno_rag.api import auth
 from meno_rag.db import repositories
 from meno_rag.schemas import VoteRequest
 
@@ -12,9 +13,12 @@ router = APIRouter(prefix="/v1/arena", tags=["arena"])
 async def submit_vote(vote: VoteRequest, request: Request):
     database = request.app.state.database
     lock = request.app.state.arena_lock
+    user = await auth.resolve_optional_user(request)
+    payload = vote.model_dump()
+    payload["user_id"] = user.id if user is not None else None
     key = f"{vote.model_a}:{vote.kb_a}|{vote.model_b}:{vote.kb_b}"
     async with lock.acquire(key), database.sessionmaker() as session:
-        recorded = await repositories.submit_arena_vote(session, vote.model_dump())
+        recorded = await repositories.submit_arena_vote(session, payload)
         await session.commit()
     # `recorded=False` means this (session_id, turn_index) was already counted —
     # we silently no-op so a buggy/spamming client can't inflate the Elo store.
