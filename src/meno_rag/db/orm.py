@@ -174,5 +174,17 @@ class SessionSurvey(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uuid_hex)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    nickname: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 Index("ix_messages_conversation_created", Message.conversation_id, Message.created_at)
 Index("ix_pipeline_stage_run", PipelineStageRun.run_id, PipelineStageRun.stage)
