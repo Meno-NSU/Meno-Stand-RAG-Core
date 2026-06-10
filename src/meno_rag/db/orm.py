@@ -126,6 +126,7 @@ class ArenaVote(Base):
     response_b: Mapped[str | None] = mapped_column(Text, nullable=True)
     question: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     turn_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     history_len_a: Mapped[int | None] = mapped_column(Integer, nullable=True)
     history_len_b: Mapped[int | None] = mapped_column(Integer, nullable=True)
