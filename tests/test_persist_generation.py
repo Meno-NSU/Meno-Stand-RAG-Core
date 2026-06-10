@@ -69,6 +69,40 @@ async def test_persist_success_writes_generation_record(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_persist_success_sets_conversation_user_id(tmp_path):
+    from sqlalchemy import text
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'uid.sqlite3'}")
+    await db.init_models()
+    try:
+        from meno_rag.api.main import _persist_success
+
+        await _persist_success(
+            database=db,
+            run_id="r1",
+            session_id="sess",
+            model="m",
+            generation_model="m",
+            core_model="c",
+            endpoint="http://x/v1",
+            question=_outcome().question,
+            answer="A",
+            outcome=_outcome(),
+            generation_ms=1.0,
+            total_ms=2.0,
+            stream=False,
+            temperature=0.1,
+            max_tokens=4096,
+            user_id="u1",
+        )
+        async with db.sessionmaker() as s:
+            uid = (await s.execute(text("SELECT user_id FROM conversations WHERE id='sess'"))).scalar_one()
+        assert uid == "u1"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_persist_success_is_non_fatal(tmp_path, monkeypatch):
     from sqlalchemy import text
 

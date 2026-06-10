@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import text
 
-from meno_rag.api import arena, feedback
+from meno_rag.api import arena, auth, feedback
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
@@ -78,6 +78,17 @@ def check_runtime_safety(settings: Settings) -> list[str]:
         warnings.append(
             "database_sqlite_dev_only: DATABASE_URL is SQLite — single-writer, not for "
             "production/load. Use PostgreSQL for >1 concurrent user."
+        )
+    # A weak HS256 secret is forgeable — the single highest-impact auth failure.
+    if settings.auth_enabled and len(settings.auth_jwt_secret.encode("utf-8")) < 32:
+        if settings.is_production:
+            raise RuntimeError(
+                "AUTH_JWT_SECRET is shorter than 32 bytes. Use a long random secret "
+                "(e.g. `openssl rand -hex 32`) in production."
+            )
+        warnings.append(
+            "auth_jwt_secret_weak: AUTH_JWT_SECRET is < 32 bytes — acceptable for dev, but use a "
+            "long random secret in production (HS256 key strength)."
         )
     return warnings
 
@@ -269,6 +280,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(arena.router)
+    app.include_router(auth.router)
     app.include_router(feedback.router)
     return app
 
@@ -454,6 +466,12 @@ async def list_models(request: Request):
             }
         ]
 
+    current_user = await auth.resolve_optional_user(request)
+    if settings.auth_enabled and current_user is None:
+        for entry in merged:
+            if entry.get("provider") == "openrouter":
+                entry["requires_auth"] = True
+
     core_model_id = resolve_core_model_id_sync(
         vllm_models, settings.rag_rewrite_rerank_model, settings.vllm_endpoint_list
     )
@@ -485,6 +503,12 @@ async def diagnostics_openrouter(request: Request):
 
     if not settings.openrouter_enabled or or_registry is None or or_client is None:
         return _error_response(503, "OpenRouter is not configured.", "openrouter_disabled")
+
+    # Same threat model as the chat gate: don't let anonymous callers drive
+    # OpenRouter token consumption when auth is enabled.
+    if settings.auth_enabled and await auth.resolve_optional_user(request) is None:
+        metrics_mod.record_error("auth_required")
+        return _error_response(403, "This diagnostics endpoint requires signing in.", "auth_required")
 
     models = await or_registry.list_models()
     if not models:
@@ -598,6 +622,16 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             metrics_mod.record_error("core_model_unavailable")
             return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
 
+        current_user = await auth.resolve_optional_user(request)
+        if auth.requires_auth_for_model(
+            runtime.generation.provider, auth_enabled=settings.auth_enabled, authenticated=current_user is not None
+        ):
+            metrics_mod.record_error("auth_required")
+            return _error_response(
+                403, "This model requires signing in. Register or log in to use OpenRouter models.", "auth_required"
+            )
+        user_id = current_user.id if current_user is not None else None
+
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created_ts = int(time.time())
         session_id = payload.user or f"session-{completion_id}"
@@ -628,6 +662,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     session_id=session_id,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    user_id=user_id,
                     on_finish=admission.release,
                 ),
                 media_type="text/event-stream",
@@ -643,6 +678,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             session_id=session_id,
             max_tokens=max_tokens,
             temperature=temperature,
+            user_id=user_id,
         )
     finally:
         if not released:
@@ -673,6 +709,7 @@ async def _non_stream_response(
     session_id: str,
     max_tokens: int,
     temperature: float | None,
+    user_id: str | None = None,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -705,6 +742,7 @@ async def _non_stream_response(
             stream=False,
             temperature=temperature,
             max_tokens=max_tokens,
+            user_id=user_id,
         )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
@@ -778,6 +816,7 @@ async def _stream_response(
     session_id: str,
     max_tokens: int,
     temperature: float | None,
+    user_id: str | None = None,
     on_finish: Callable[[], None] | None = None,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
@@ -870,6 +909,7 @@ async def _stream_response(
             stream=True,
             temperature=temperature,
             max_tokens=max_tokens,
+            user_id=user_id,
         )
         metrics_mod.record_chat_request(
             provider=runtime.generation.provider,
@@ -973,9 +1013,11 @@ async def _persist_success(
     stream: bool,
     temperature: float | None,
     max_tokens: int,
+    user_id: str | None = None,
 ) -> None:
     try:
         async with database.sessionmaker() as session:
+            await repositories.ensure_conversation(session, session_id, user_id=user_id)
             await repositories.append_message(
                 session,
                 conversation_id=session_id,

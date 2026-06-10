@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     backup_keep_daily: int = Field(default=7, validation_alias="BACKUP_KEEP_DAILY")
     backup_dir: Path = Field(default=Path("var/backups"), validation_alias="BACKUP_DIR")
 
+    auth_jwt_secret: str = Field(default="", validation_alias="AUTH_JWT_SECRET")
+    auth_token_ttl_hours: int = Field(default=720, validation_alias="AUTH_TOKEN_TTL_HOURS")
+
     httpx_max_connections: int = Field(default=200, validation_alias="HTTPX_MAX_CONNECTIONS")
     httpx_max_keepalive: int = Field(default=100, validation_alias="HTTPX_MAX_KEEPALIVE")
 
@@ -213,6 +216,10 @@ class Settings(BaseSettings):
         if not path or path == ":memory:":
             return None
         return Path(path)
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.auth_jwt_secret.strip())
 
     @property
     def is_production(self) -> bool:

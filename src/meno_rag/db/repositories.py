@@ -17,15 +17,20 @@ from meno_rag.db.orm import (
     PipelineStageRun,
     SessionSurvey,
     SourceRecord,
+    User,
 )
 
 
-async def ensure_conversation(session: AsyncSession, conversation_id: str) -> Conversation:
+async def ensure_conversation(
+    session: AsyncSession, conversation_id: str, *, user_id: str | None = None
+) -> Conversation:
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
-        conversation = Conversation(id=conversation_id)
+        conversation = Conversation(id=conversation_id, user_id=user_id)
         session.add(conversation)
         await session.flush()
+    if user_id is not None:
+        conversation.user_id = user_id
     conversation.updated_at = datetime.now(UTC)
     return conversation
 
@@ -328,3 +333,28 @@ async def _apply_vote_to_ratings(session: AsyncSession, vote: dict[str, Any]) ->
     now = datetime.now(UTC)
     rating_a.updated_at = now
     rating_b.updated_at = now
+
+
+async def create_user(session: AsyncSession, *, email: str, password_hash: str, nickname: str | None = None) -> User:
+    user = User(email=email, password_hash=password_hash, nickname=nickname)
+    session.add(user)
+    await session.flush()
+    return user
+
+
+async def get_user_by_email(session: AsyncSession, email: str) -> User | None:
+    result = await session.execute(select(User).where(User.email == email))
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_id(session: AsyncSession, user_id: str) -> User | None:
+    return await session.get(User, user_id)
+
+
+async def update_user_nickname(session: AsyncSession, *, user_id: str, nickname: str) -> User:
+    user = await session.get(User, user_id)
+    if user is None:
+        raise ValueError(f"User {user_id} not found")
+    user.nickname = nickname
+    user.updated_at = datetime.now(UTC)
+    return user
