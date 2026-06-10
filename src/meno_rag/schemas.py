@@ -54,7 +54,7 @@ class FeedbackRequest(BaseModel):
     completion_id: str = Field(..., min_length=1)
     session_id: str = Field(..., min_length=1)
     value: Literal["up", "down"]
-    comment: str | None = None
+    comment: str | None = Field(default=None, max_length=2000)
 
 
 class FeedbackClearRequest(BaseModel):

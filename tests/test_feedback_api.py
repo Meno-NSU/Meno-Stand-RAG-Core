@@ -52,8 +52,16 @@ def test_clear_feedback(client):
 
 
 def test_survey_upserts(client):
-    c, _ = client
+    c, db_path = client
+    assert c.post("/v1/feedback/survey", json={"session_id": "s1", "answer": "maybe"}).status_code == 200
     assert c.post("/v1/feedback/survey", json={"session_id": "s1", "answer": "yes"}).status_code == 200
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT answer FROM session_surveys WHERE session_id = 's1'")).all()
+    finally:
+        engine.dispose()
+    assert len(rows) == 1 and rows[0][0] == "yes"  # upsert in place, not a second row
 
 
 def test_invalid_value_and_answer_rejected(client):

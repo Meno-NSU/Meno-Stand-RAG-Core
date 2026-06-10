@@ -54,7 +54,13 @@ def iter_analytics(session: Session, *, session_id: str | None = None) -> Iterat
     stmt = (
         select(GenerationRecord, PipelineRun, MessageFeedback)
         .join(PipelineRun, GenerationRecord.run_id == PipelineRun.id)
-        .outerjoin(MessageFeedback, MessageFeedback.run_id == PipelineRun.id)
+        # Join the OWNER session's vote only: the unique key is (run_id, session_id),
+        # so a different session that learned the completion_id could also vote on
+        # this run. Matching session_id keeps it one feedback row per turn (no fanout).
+        .outerjoin(
+            MessageFeedback,
+            (MessageFeedback.run_id == PipelineRun.id) & (MessageFeedback.session_id == PipelineRun.session_id),
+        )
         .order_by(PipelineRun.created_at)
     )
     if session_id is not None:

@@ -43,10 +43,15 @@ def test_analytics_includes_feedback(tmp_path: Path):
             s.add(GenerationRecord(run_id="r1", system_prompt="S", user_prompt="U1", raw_completion="A1"))
             s.add(GenerationRecord(run_id="r2", system_prompt="S", user_prompt="U2", raw_completion="A2"))
             s.add(MessageFeedback(id="f1", run_id="r1", session_id="sess", value="down", comment="bad"))
+            # An intruder session that learned the completion_id votes on the same run.
+            # It must NOT fan the run out into a duplicate analytics row.
+            s.add(MessageFeedback(id="f2", run_id="r1", session_id="other", value="up"))
             s.commit()
         with Session(engine) as s:
-            rows = {r["run_id"]: r for r in iter_analytics(s)}
+            all_rows = list(iter_analytics(s))
+            rows = {r["run_id"]: r for r in all_rows}
     finally:
         engine.dispose()
-    assert rows["r1"]["feedback"] == {"value": "down", "comment": "bad"}
+    assert len(all_rows) == 2  # exactly one row per run — the intruder vote does not duplicate r1
+    assert rows["r1"]["feedback"] == {"value": "down", "comment": "bad"}  # the owner session's vote
     assert rows["r2"]["feedback"] is None
