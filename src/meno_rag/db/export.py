@@ -20,7 +20,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from meno_rag.config import get_settings
-from meno_rag.db.orm import GenerationRecord, PipelineRun
+from meno_rag.db.orm import GenerationRecord, MessageFeedback, PipelineRun
 
 
 def _sync_url(database_url: str) -> str:
@@ -51,7 +51,21 @@ def iter_finetuning(session: Session, *, with_context: bool, session_id: str | N
 
 
 def iter_analytics(session: Session, *, session_id: str | None = None) -> Iterator[dict]:
-    for gen, run in _rows(session, session_id=session_id):
+    stmt = (
+        select(GenerationRecord, PipelineRun, MessageFeedback)
+        .join(PipelineRun, GenerationRecord.run_id == PipelineRun.id)
+        # Join the OWNER session's vote only: the unique key is (run_id, session_id),
+        # so a different session that learned the completion_id could also vote on
+        # this run. Matching session_id keeps it one feedback row per turn (no fanout).
+        .outerjoin(
+            MessageFeedback,
+            (MessageFeedback.run_id == PipelineRun.id) & (MessageFeedback.session_id == PipelineRun.session_id),
+        )
+        .order_by(PipelineRun.created_at)
+    )
+    if session_id is not None:
+        stmt = stmt.where(PipelineRun.session_id == session_id)
+    for gen, run, feedback in session.execute(stmt).all():
         yield {
             "run_id": run.id,
             "session_id": run.session_id,
@@ -64,6 +78,7 @@ def iter_analytics(session: Session, *, session_id: str | None = None) -> Iterat
             "retrieved": gen.retrieved,
             "fewshots": gen.fewshots,
             "generation_params": gen.generation_params,
+            "feedback": {"value": feedback.value, "comment": feedback.comment} if feedback is not None else None,
         }
 
 

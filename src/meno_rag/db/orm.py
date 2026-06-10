@@ -148,5 +148,31 @@ class ArenaRating(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class MessageFeedback(Base):
+    __tablename__ = "message_feedback"
+    __table_args__ = (UniqueConstraint("run_id", "session_id", name="uq_message_feedback_run_session"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uuid_hex)
+    run_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    value: Mapped[str] = mapped_column(String(8), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SessionSurvey(Base):
+    __tablename__ = "session_surveys"
+    __table_args__ = (UniqueConstraint("session_id", name="uq_session_survey_session"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uuid_hex)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    answer: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 Index("ix_messages_conversation_created", Message.conversation_id, Message.created_at)
 Index("ix_pipeline_stage_run", PipelineStageRun.run_id, PipelineStageRun.stage)

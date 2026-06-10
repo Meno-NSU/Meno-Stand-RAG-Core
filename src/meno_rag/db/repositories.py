@@ -12,8 +12,10 @@ from meno_rag.db.orm import (
     Conversation,
     GenerationRecord,
     Message,
+    MessageFeedback,
     PipelineRun,
     PipelineStageRun,
+    SessionSurvey,
     SourceRecord,
 )
 
@@ -127,6 +129,70 @@ async def add_sources(session: AsyncSession, *, run_id: str, sources: list[dict[
                 ordinal=idx,
             )
         )
+
+
+async def upsert_message_feedback(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    session_id: str,
+    value: str,
+    comment: str | None = None,
+    user_id: str | None = None,
+) -> None:
+    result = await session.execute(
+        select(MessageFeedback).where(
+            MessageFeedback.run_id == run_id,
+            MessageFeedback.session_id == session_id,
+        )
+    )
+    feedback = result.scalar_one_or_none()
+    if feedback is None:
+        session.add(
+            MessageFeedback(
+                run_id=run_id,
+                session_id=session_id,
+                value=value,
+                comment=comment,
+                user_id=user_id,
+            )
+        )
+    else:
+        feedback.value = value
+        feedback.comment = comment
+        if user_id is not None:
+            feedback.user_id = user_id
+        feedback.updated_at = datetime.now(UTC)
+
+
+async def clear_message_feedback(session: AsyncSession, *, run_id: str, session_id: str) -> int:
+    result = await session.execute(
+        delete(MessageFeedback).where(
+            MessageFeedback.run_id == run_id,
+            MessageFeedback.session_id == session_id,
+        )
+    )
+    # DELETE yields a CursorResult (has rowcount) at runtime; the async execute()
+    # return type is the broader Result, so mypy needs the hint.
+    return result.rowcount or 0  # type: ignore[attr-defined]
+
+
+async def upsert_session_survey(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    answer: str,
+    user_id: str | None = None,
+) -> None:
+    result = await session.execute(select(SessionSurvey).where(SessionSurvey.session_id == session_id))
+    survey = result.scalar_one_or_none()
+    if survey is None:
+        session.add(SessionSurvey(session_id=session_id, answer=answer, user_id=user_id))
+    else:
+        survey.answer = answer
+        if user_id is not None:
+            survey.user_id = user_id
+        survey.updated_at = datetime.now(UTC)
 
 
 async def create_generation_record(
