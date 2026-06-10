@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 import bcrypt
 import jwt
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 
 from meno_rag.db import repositories
 from meno_rag.db.orm import User
@@ -92,10 +93,17 @@ async def register(payload: RegisterRequest, request: Request):
     async with request.app.state.database.sessionmaker() as session:
         if await repositories.get_user_by_email(session, email) is not None:
             raise HTTPException(status_code=409, detail="Email already registered.")
-        user = await repositories.create_user(
-            session, email=email, password_hash=hash_password(payload.password), nickname=payload.nickname
-        )
-        await session.commit()
+        try:
+            # create_user flushes (INSERT), so a lost concurrent-registration
+            # race on the unique-email constraint raises here OR at commit;
+            # wrap both and surface a clean 409 instead of a 500 (the DB
+            # constraint already prevented the duplicate from landing).
+            user = await repositories.create_user(
+                session, email=email, password_hash=hash_password(payload.password), nickname=payload.nickname
+            )
+            await session.commit()
+        except IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="Email already registered.") from exc
         token = create_access_token(user.id, secret=settings.auth_jwt_secret, ttl_hours=settings.auth_token_ttl_hours)
         return {"token": token, "user": _user_dict(user)}
 

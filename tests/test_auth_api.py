@@ -54,3 +54,19 @@ def test_auth_disabled_returns_503(tmp_path):
     with TestClient(_app(tmp_path, secret="")) as c:
         assert c.post("/v1/auth/register", json={"email": "a@b.com", "password": "secret123"}).status_code == 503
         assert c.post("/v1/auth/login", json={"email": "a@b.com", "password": "secret123"}).status_code == 503
+        # me/patch require a token and there's no valid one when auth is off → 401
+        assert c.get("/v1/auth/me").status_code == 401
+        assert c.patch("/v1/auth/me", json={"nickname": "x"}).status_code == 401
+
+
+def test_register_race_returns_409(client, monkeypatch):
+    # Force the duplicate pre-check to always miss, so the second insert hits the
+    # unique-email constraint and must be translated to a clean 409 (not a 500).
+    from meno_rag.db import repositories
+
+    async def always_none(session, email):
+        return None
+
+    monkeypatch.setattr(repositories, "get_user_by_email", always_none)
+    assert client.post("/v1/auth/register", json={"email": "race@x.y", "password": "secret123"}).status_code == 201
+    assert client.post("/v1/auth/register", json={"email": "race@x.y", "password": "secret123"}).status_code == 409
