@@ -17,10 +17,28 @@ def test_analytics_includes_feedback(tmp_path: Path):
     engine = create_engine(url)
     try:
         with Session(engine) as s:
-            s.add(PipelineRun(id="r1", session_id="sess", model="m", generation_model="m",
-                              knowledge_base_id="kb", user_question="Q1?", stream=False))
-            s.add(PipelineRun(id="r2", session_id="sess", model="m", generation_model="m",
-                              knowledge_base_id="kb", user_question="Q2?", stream=False))
+            s.add(
+                PipelineRun(
+                    id="r1",
+                    session_id="sess",
+                    model="m",
+                    generation_model="m",
+                    knowledge_base_id="kb",
+                    user_question="Q1?",
+                    stream=False,
+                )
+            )
+            s.add(
+                PipelineRun(
+                    id="r2",
+                    session_id="sess",
+                    model="m",
+                    generation_model="m",
+                    knowledge_base_id="kb",
+                    user_question="Q2?",
+                    stream=False,
+                )
+            )
             s.flush()
             s.add(GenerationRecord(run_id="r1", system_prompt="S", user_prompt="U1", raw_completion="A1"))
             s.add(GenerationRecord(run_id="r2", system_prompt="S", user_prompt="U2", raw_completion="A2"))

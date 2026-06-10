@@ -33,7 +33,12 @@ def _feedback_rows(db_path):
 def test_post_feedback_upserts(client):
     c, db_path = client
     assert c.post("/v1/feedback", json={"completion_id": "c1", "session_id": "s1", "value": "up"}).status_code == 200
-    assert c.post("/v1/feedback", json={"completion_id": "c1", "session_id": "s1", "value": "down", "comment": "x"}).status_code == 200
+    assert (
+        c.post(
+            "/v1/feedback", json={"completion_id": "c1", "session_id": "s1", "value": "down", "comment": "x"}
+        ).status_code
+        == 200
+    )
     rows = _feedback_rows(db_path)
     assert len(rows) == 1 and rows[0][1] == "down" and rows[0][2] == "x"
 

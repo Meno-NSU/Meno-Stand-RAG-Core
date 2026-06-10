@@ -172,7 +172,9 @@ async def clear_message_feedback(session: AsyncSession, *, run_id: str, session_
             MessageFeedback.session_id == session_id,
         )
     )
-    return result.rowcount or 0
+    # DELETE yields a CursorResult (has rowcount) at runtime; the async execute()
+    # return type is the broader Result, so mypy needs the hint.
+    return result.rowcount or 0  # type: ignore[attr-defined]
 
 
 async def upsert_session_survey(
