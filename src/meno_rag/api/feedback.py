@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
+from meno_rag.api import auth
 from meno_rag.db import repositories
 from meno_rag.schemas import FeedbackClearRequest, FeedbackRequest, SurveyRequest
 
@@ -11,6 +12,7 @@ router = APIRouter(prefix="/v1/feedback", tags=["feedback"])
 @router.post("")
 async def submit_feedback(payload: FeedbackRequest, request: Request):
     database = request.app.state.database
+    user = await auth.resolve_optional_user(request)
     async with database.sessionmaker() as session:
         await repositories.upsert_message_feedback(
             session,
@@ -18,6 +20,7 @@ async def submit_feedback(payload: FeedbackRequest, request: Request):
             session_id=payload.session_id,
             value=payload.value,
             comment=payload.comment,
+            user_id=user.id if user is not None else None,
         )
         await session.commit()
     return {"status": "ok"}
@@ -37,7 +40,13 @@ async def clear_feedback(payload: FeedbackClearRequest, request: Request):
 @router.post("/survey")
 async def submit_survey(payload: SurveyRequest, request: Request):
     database = request.app.state.database
+    user = await auth.resolve_optional_user(request)
     async with database.sessionmaker() as session:
-        await repositories.upsert_session_survey(session, session_id=payload.session_id, answer=payload.answer)
+        await repositories.upsert_session_survey(
+            session,
+            session_id=payload.session_id,
+            answer=payload.answer,
+            user_id=user.id if user is not None else None,
+        )
         await session.commit()
     return {"status": "ok"}
