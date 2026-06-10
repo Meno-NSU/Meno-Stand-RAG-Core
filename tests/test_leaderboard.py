@@ -35,6 +35,10 @@ async def test_contributor_leaderboard_counts_and_sort(tmp_path):
     finally:
         await db.close()
 
+    # Ordering is by total descending; ties are broken by nickname ascending. The
+    # nickname tie-break is intentional — it makes the leaderboard deterministic when
+    # two users have the same total score (otherwise equal-total rows could reorder
+    # run to run).
     assert [r["nickname"] for r in rows] == ["Alice", "anon-u2"]  # sorted by total desc
     assert rows[0] == {"nickname": "Alice", "votes": 2, "feedback": 1, "questions": 1, "total": 4}
     assert rows[1]["votes"] == 1 and rows[1]["total"] == 1
