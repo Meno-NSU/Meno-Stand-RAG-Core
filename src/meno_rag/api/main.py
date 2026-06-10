@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import text
 
-from meno_rag.api import arena, feedback
+from meno_rag.api import arena, auth, feedback
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
@@ -269,6 +269,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(arena.router)
+    app.include_router(auth.router)
     app.include_router(feedback.router)
     return app
 

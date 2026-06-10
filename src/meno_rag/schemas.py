@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 class ChatMessage(BaseModel):
@@ -65,6 +65,21 @@ class FeedbackClearRequest(BaseModel):
 class SurveyRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     answer: Literal["yes", "maybe", "no", "skipped"]
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+    nickname: str | None = Field(default=None, max_length=64)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class NicknameRequest(BaseModel):
+    nickname: str = Field(..., min_length=1, max_length=64)
 
 
 class PipelineOutcome(BaseModel):
