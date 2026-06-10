@@ -384,6 +384,10 @@ async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, 
             )
         ).tuples().all()
     )
+    # The join holds by construction: _persist_success calls ensure_conversation
+    # (conversations.id == session_id) before create_pipeline_run, so every run has
+    # a matching conversation. There is no FK enforcing it — runs inserted outside
+    # that path would be undercounted here.
     question_counts = dict(
         (
             await session.execute(

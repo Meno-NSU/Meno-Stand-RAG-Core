@@ -39,3 +39,16 @@ async def test_contributor_leaderboard_counts_and_sort(tmp_path):
     assert rows[0] == {"nickname": "Alice", "votes": 2, "feedback": 1, "questions": 1, "total": 4}
     assert rows[1]["votes"] == 1 and rows[1]["total"] == 1
     assert all("email" not in r for r in rows)  # privacy: nickname only
+
+
+@pytest.mark.asyncio
+async def test_empty_leaderboard_returns_empty_list(tmp_path):
+    from meno_rag.db import repositories
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'empty.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            assert await repositories.list_contributor_leaderboard(s) == []
+    finally:
+        await db.close()
