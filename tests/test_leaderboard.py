@@ -56,3 +56,30 @@ async def test_empty_leaderboard_returns_empty_list(tmp_path):
             assert await repositories.list_contributor_leaderboard(s) == []
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_leaderboard_tie_break_is_nickname_ascending(tmp_path):
+    from meno_rag.db import repositories
+    from meno_rag.db.orm import ArenaVote, User
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'tie.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            # Two users with the SAME total (1 vote each) but different nicknames.
+            # The ids are deliberately reversed vs. the nicknames (Bob=u1, Aaron=u2)
+            # so that ONLY a nickname-ascending sort can produce ["Aaron", "Bob"] —
+            # insertion/id order would give ["Bob", "Aaron"].
+            s.add(User(id="u1", email="b@x.y", password_hash="h", nickname="Bob"))
+            s.add(User(id="u2", email="a@x.y", password_hash="h", nickname="Aaron"))
+            s.add(ArenaVote(model_a="m", kb_a="k", model_b="n", kb_b="k", winner="a", user_id="u1"))
+            s.add(ArenaVote(model_a="m", kb_a="k", model_b="n", kb_b="k", winner="a", user_id="u2"))
+            await s.commit()
+        async with db.sessionmaker() as s:
+            rows = await repositories.list_contributor_leaderboard(s)
+    finally:
+        await db.close()
+
+    assert all(r["total"] == 1 for r in rows)  # equal totals
+    assert [r["nickname"] for r in rows] == ["Aaron", "Bob"]  # deterministic nickname tie-break
