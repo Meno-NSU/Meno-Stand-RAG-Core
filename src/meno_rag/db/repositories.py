@@ -373,7 +373,9 @@ async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, 
                 .where(ArenaVote.user_id.is_not(None))
                 .group_by(ArenaVote.user_id)
             )
-        ).tuples().all()
+        )
+        .tuples()
+        .all()
     )
     feedback_counts = dict(
         (
@@ -382,7 +384,9 @@ async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, 
                 .where(MessageFeedback.user_id.is_not(None))
                 .group_by(MessageFeedback.user_id)
             )
-        ).tuples().all()
+        )
+        .tuples()
+        .all()
     )
     # The join holds by construction: _persist_success calls ensure_conversation
     # (conversations.id == session_id) before create_pipeline_run, so every run has
@@ -396,7 +400,9 @@ async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, 
                 .where(Conversation.user_id.is_not(None))
                 .group_by(Conversation.user_id)
             )
-        ).tuples().all()
+        )
+        .tuples()
+        .all()
     )
     user_ids = set(vote_counts) | set(feedback_counts) | set(question_counts)
     if not user_ids:
