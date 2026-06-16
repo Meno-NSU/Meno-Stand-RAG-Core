@@ -31,6 +31,7 @@ dependencies = [
     "bcrypt>=5.0.0",
     "pyjwt>=2.13.0",
     "email-validator>=2.3.0",
+    "psycopg2-binary>=2.9",
 ]
 
 [project.scripts]
