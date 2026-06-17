@@ -46,6 +46,7 @@ class Database:
             if max_overflow is not None:
                 engine_kwargs["max_overflow"] = max_overflow
         self.engine: AsyncEngine = create_async_engine(database_url, **engine_kwargs)
+        self._is_sqlite = is_sqlite
         if is_sqlite:
             _install_sqlite_pragmas(self.engine, busy_timeout_ms=busy_timeout_ms, synchronous=synchronous)
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
@@ -59,10 +60,26 @@ class Database:
     async def close(self) -> None:
         await self.engine.dispose()
 
+    def _integrity_probe_sql(self) -> str:
+        """SQL used by :meth:`integrity_check`, chosen by dialect.
+
+        SQLite exposes ``PRAGMA quick_check`` to detect file/page corruption.
+        ``PRAGMA`` is SQLite-only — on PostgreSQL it is a syntax error — so other
+        dialects delegate integrity to the server and use a lightweight
+        ``SELECT 1`` connectivity probe instead.
+        """
+        return "PRAGMA quick_check" if self._is_sqlite else "SELECT 1"
+
     async def integrity_check(self) -> str:
-        """Run ``PRAGMA quick_check``; return 'ok' when healthy, else the joined error rows."""
+        """Return 'ok' when the database is healthy, else the joined error rows.
+
+        SQLite runs ``PRAGMA quick_check`` and parses its result rows; other
+        dialects only confirm the ``SELECT 1`` probe succeeded.
+        """
         async with self.engine.connect() as conn:
-            rows = (await conn.execute(text("PRAGMA quick_check"))).fetchall()
+            rows = (await conn.execute(text(self._integrity_probe_sql()))).fetchall()
+        if not self._is_sqlite:
+            return "ok"
         messages = [str(row[0]) for row in rows]
         if not messages or messages == ["ok"]:
             return "ok"
