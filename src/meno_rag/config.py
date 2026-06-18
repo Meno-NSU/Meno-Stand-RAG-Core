@@ -124,6 +124,23 @@ class Settings(BaseSettings):
     backup_keep_daily: int = Field(default=7, validation_alias="BACKUP_KEEP_DAILY")
     backup_dir: Path = Field(default=Path("var/backups"), validation_alias="BACKUP_DIR")
 
+    # --- Pipeline trace capture ---
+    # Master toggle. Off by default → no second engine, no background writer,
+    # no trace DB required. Flip on (per env) to collect debug/benchmark traces.
+    capture_pipeline_trace: bool = Field(default=False, validation_alias="CAPTURE_PIPELINE_TRACE")
+    # Fraction of requests traced WHEN capture is enabled. 1.0 = every request;
+    # lower it under peak load to cut volume at the source.
+    pipeline_trace_sample_rate: float = Field(default=1.0, validation_alias="PIPELINE_TRACE_SAMPLE_RATE")
+    # Separate store so the main DB never grows. Dev: a sibling sqlite file.
+    # Prod: a dedicated PostgreSQL database (e.g. postgresql+asyncpg://.../meno_rag_trace).
+    trace_database_url: str = Field(
+        default="sqlite+aiosqlite:///./var/meno_rag_trace.sqlite3",
+        validation_alias="TRACE_DATABASE_URL",
+    )
+    # Bound on the background writer's buffer. Beyond it, traces are dropped
+    # (counted, never blocking) so a write spike never stalls the serving path.
+    pipeline_trace_queue_max: int = Field(default=1000, validation_alias="PIPELINE_TRACE_QUEUE_MAX")
+
     auth_jwt_secret: str = Field(default="", validation_alias="AUTH_JWT_SECRET")
     auth_token_ttl_hours: int = Field(default=720, validation_alias="AUTH_TOKEN_TTL_HOURS")
 
