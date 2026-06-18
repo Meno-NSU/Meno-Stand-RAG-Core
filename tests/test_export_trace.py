@@ -57,3 +57,17 @@ def test_export_trace_writes_jsonl(tmp_path: Path):
     line = json.loads(buf.getvalue().strip())
     assert line["run_id"] == "r1"
     assert line["answer"] == "A1"
+
+
+def test_export_trace_handles_uninitialized_store(tmp_path):
+    # A path that does not exist and whose parent dir does not exist either,
+    # and which was never initialized (no pipeline_traces table).
+    buf = io.StringIO()
+    n = export_trace(
+        f"sqlite+aiosqlite:///{tmp_path / 'never' / 'init.sqlite3'}",
+        main_database_url=None,
+        with_feedback=False,
+        out=buf,
+    )
+    assert n == 0
+    assert buf.getvalue() == ""

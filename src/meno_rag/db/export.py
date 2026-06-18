@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from meno_rag.config import get_settings
 from meno_rag.db.orm import GenerationRecord, MessageFeedback, PipelineRun
-from meno_rag.db.trace_store import PipelineTrace
+from meno_rag.db.trace_store import PipelineTrace, TraceBase
 
 
 def _sync_url(database_url: str) -> str:
@@ -119,9 +119,19 @@ def export_trace(
     run_id: str | None = None,
 ) -> int:
     feedback = _feedback_by_run_id(main_database_url) if (with_feedback and main_database_url) else {}
-    engine = create_engine(_sync_url(trace_database_url))
+    sync_url = _sync_url(trace_database_url)
+    # For sqlite, ensure the parent directory exists so a fresh/never-initialized
+    # store opens cleanly instead of raising "unable to open database file".
+    if sync_url.startswith("sqlite:///"):
+        sqlite_path = sync_url.removeprefix("sqlite:///")
+        if sqlite_path and sqlite_path != ":memory:":
+            Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(sync_url)
     count = 0
     try:
+        # Idempotently ensure the table exists: exporting a store that was never
+        # populated (capture never enabled) yields 0 records, not "no such table".
+        TraceBase.metadata.create_all(engine)
         with Session(engine) as session:
             for record in iter_trace(session, session_id=session_id, run_id=run_id):
                 if with_feedback:
