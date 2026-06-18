@@ -123,3 +123,13 @@ def test_retrieval_score_none_when_scored_but_not_fused():
     cand = {c["chunk_id"]: c for c in t["rerank"]["candidates"]}[5]
     assert cand["retrieval_score"] is None
     assert cand["kept"] is False
+
+
+def test_rerank_output_carries_candidate_scores():
+    from meno_rag.stand.pipeline import _RerankOutput
+
+    out = _RerankOutput([(1, 0.9)])
+    assert out.candidate_scores is None
+    out.candidate_scores = {1: 1.0, 2: 0.0}
+    assert out.candidate_scores == {1: 1.0, 2: 0.0}
+    assert list(out) == [(1, 0.9)]

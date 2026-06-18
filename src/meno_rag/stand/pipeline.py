@@ -442,6 +442,7 @@ class StandRagPipeline:
         if not unique_ids:
             output = _RerankOutput([])
             output.scored_candidates = 0
+            output.candidate_scores = {}
             return output
         scores = await asyncio.gather(
             *[self._score_chunk_with_llm(user_question, dialogue_history, chunk_id, runtime) for chunk_id in unique_ids]
@@ -467,6 +468,7 @@ class StandRagPipeline:
         # clobber shared state); it backs the "Отобрано топ-N из X" UI count.
         output = _RerankOutput(global_chunks)
         output.scored_candidates = len(unique_ids)
+        output.candidate_scores = score_by_id
         return output
 
     async def _score_chunk_with_llm(
@@ -669,6 +671,11 @@ class _RerankOutput(list):
     result instead of shared pipeline state."""
 
     scored_candidates: int = 0
+    # Raw per-candidate rerank LLM score for EVERY unique scored chunk id
+    # (including those later dropped by top_k/max_context_chunks). Kept for
+    # trace capture; None when not populated. Set on the result object so
+    # concurrent requests never share state.
+    candidate_scores: dict[int, float] | None = None
 
 
 @contextlib.asynccontextmanager
