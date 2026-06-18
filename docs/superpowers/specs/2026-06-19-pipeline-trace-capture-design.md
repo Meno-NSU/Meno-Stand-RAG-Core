@@ -64,7 +64,7 @@ Table `pipeline_traces` (its own `Base`/metadata, bound to the trace engine):
 ## 6. Write path — background buffered writer (anti-peak)
 A new `db/trace_writer.py`:
 - `asyncio.Queue(maxsize=PIPELINE_TRACE_QUEUE_MAX)`; a single worker task drains it and writes to the trace store (small batches allowed).
-- Handler side (post-generation, non-blocking): `queue.put_nowait({run_id, session_id, trace})`. On `asyncio.QueueFull` (peak) → **drop** the trace and increment a Prometheus counter `pipeline_trace_dropped_total`. The serving path never awaits disk I/O.
+- Handler side (post-generation, non-blocking): `queue.put_nowait({run_id, session_id, trace})`. On `asyncio.QueueFull` (peak) → **drop** the trace. Outcomes are tracked on a single labeled Prometheus counter `meno_pipeline_trace{outcome=...}` (`enqueued` / `dropped` / `written` / `failed`; the dropped count is `meno_pipeline_trace_total{outcome="dropped"}`). The serving path never awaits disk I/O.
 - Lifespan: the worker starts on app startup **only when capture is enabled**; on shutdown it is cancelled after a bounded drain of the remaining queue.
 - **Resilience:** trace-store slowness or unavailability never touches serving — write failures are logged and counted, never retried into the request path. Debug data is sacrificial; the live trade is "lose some traces at peak, never slow a user".
 
