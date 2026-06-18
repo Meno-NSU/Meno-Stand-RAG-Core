@@ -854,7 +854,9 @@ async def _stream_response(
     async def sink(event: StageEvent) -> None:
         await stage_queue.put(event)
 
-    prepare_task = asyncio.create_task(pipeline.prepare(messages=payload.messages, runtime=runtime, stage_sink=sink, capture_trace=capture_trace))
+    prepare_task = asyncio.create_task(
+        pipeline.prepare(messages=payload.messages, runtime=runtime, stage_sink=sink, capture_trace=capture_trace)
+    )
     outcome = None
     try:
         while not prepare_task.done() or not stage_queue.empty():

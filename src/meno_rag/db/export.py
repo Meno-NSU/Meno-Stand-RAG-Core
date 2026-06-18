@@ -103,9 +103,7 @@ def _feedback_by_run_id(main_database_url: str) -> dict[str, dict]:
     engine = create_engine(_sync_url(main_database_url))
     try:
         with Session(engine) as session:
-            rows = session.execute(
-                select(MessageFeedback.run_id, MessageFeedback.value, MessageFeedback.comment)
-            ).all()
+            rows = session.execute(select(MessageFeedback.run_id, MessageFeedback.value, MessageFeedback.comment)).all()
     finally:
         engine.dispose()
     return {run_id: {"value": value, "comment": comment} for run_id, value, comment in rows}

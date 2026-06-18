@@ -29,9 +29,7 @@ class PipelineTrace(TraceBase):
     run_id: Mapped[str] = mapped_column(String(96), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     trace: Mapped[dict | list | None] = mapped_column(JsonCompat, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, nullable=False, index=True
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
 
 
 class TraceStore:

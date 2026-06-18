@@ -177,10 +177,22 @@ async def test_persist_success_no_enqueue_without_trace(tmp_path):
     writer = _SpyWriter()
     try:
         await _persist_success(
-            database=db, run_id="r1", session_id="sess", model="m", generation_model="m",
-            core_model="c", endpoint="http://x/v1", question="Q?", answer="A",
-            outcome=_outcome(), generation_ms=1.0, total_ms=2.0, stream=False,
-            temperature=0.1, max_tokens=4096, trace_writer=writer,
+            database=db,
+            run_id="r1",
+            session_id="sess",
+            model="m",
+            generation_model="m",
+            core_model="c",
+            endpoint="http://x/v1",
+            question="Q?",
+            answer="A",
+            outcome=_outcome(),
+            generation_ms=1.0,
+            total_ms=2.0,
+            stream=False,
+            temperature=0.1,
+            max_tokens=4096,
+            trace_writer=writer,
         )
     finally:
         await db.close()

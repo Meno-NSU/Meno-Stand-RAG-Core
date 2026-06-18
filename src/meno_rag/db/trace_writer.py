@@ -54,9 +54,7 @@ class TraceWriter:
 
     async def _write(self, item: dict[str, Any]) -> None:
         async with self._store.sessionmaker() as session:
-            session.add(
-                PipelineTrace(run_id=item["run_id"], session_id=item["session_id"], trace=item["trace"])
-            )
+            session.add(PipelineTrace(run_id=item["run_id"], session_id=item["session_id"], trace=item["trace"]))
             await session.commit()
 
     async def aclose(self, *, drain_timeout: float = 5.0) -> None:

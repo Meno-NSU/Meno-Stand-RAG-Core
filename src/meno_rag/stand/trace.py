@@ -15,10 +15,7 @@ from meno_rag.stand.context import global_chunk_index_to_text
 
 
 def _rank_entries(pairs: list[tuple[int, float]], score_key: str) -> list[dict[str, Any]]:
-    return [
-        {"chunk_id": int(cid), score_key: float(score), "rank": rank}
-        for rank, (cid, score) in enumerate(pairs)
-    ]
+    return [{"chunk_id": int(cid), score_key: float(score), "rank": rank} for rank, (cid, score) in enumerate(pairs)]
 
 
 def _extract_prompt(qa_messages: list[dict[str, str]]) -> dict[str, str]:
@@ -32,7 +29,9 @@ def _extract_prompt(qa_messages: list[dict[str, str]]) -> dict[str, str]:
     return {"system": system, "user": user}
 
 
-def _chunk_meta(chunk_id: int, documents: list[dict[str, Any]], chunk_mapping: dict[str, dict[str, int]]) -> dict[str, str]:
+def _chunk_meta(
+    chunk_id: int, documents: list[dict[str, Any]], chunk_mapping: dict[str, dict[str, int]]
+) -> dict[str, str]:
     title, url, text = "", "", ""
     mapping = chunk_mapping.get(str(chunk_id))
     if mapping is not None:
