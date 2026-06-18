@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 import uuid
 from collections.abc import Callable
@@ -40,6 +41,8 @@ from meno_rag.config import Settings, get_settings
 from meno_rag.db import repositories
 from meno_rag.db.backup import backup_scheduler
 from meno_rag.db.session import Database
+from meno_rag.db.trace_store import TraceStore
+from meno_rag.db.trace_writer import TraceWriter
 from meno_rag.llm import VLLMClient, VLLMRegistry
 from meno_rag.llm.openrouter_client import OpenRouterClient
 from meno_rag.llm.openrouter_registry import OpenRouterRegistry
@@ -107,6 +110,15 @@ async def lifespan(app: FastAPI):
         synchronous=settings.sqlite_synchronous,
     )
     await database.init_models()
+
+    trace_store: TraceStore | None = None
+    trace_writer: TraceWriter | None = None
+    if settings.capture_pipeline_trace:
+        trace_store = TraceStore(settings.trace_database_url)
+        await trace_store.init_models()
+        trace_writer = TraceWriter(trace_store, queue_max=settings.pipeline_trace_queue_max)
+        trace_writer.start()
+        logger.info("pipeline_trace_capture_enabled", sample_rate=settings.pipeline_trace_sample_rate)
 
     integrity = await database.integrity_check()
     if integrity != "ok":
@@ -255,6 +267,7 @@ async def lifespan(app: FastAPI):
     app.state.llm_router = llm_router
     app.state.admission = AdmissionController(settings.max_concurrent_chats)
     app.state.retrieval_executor = retrieval_executor
+    app.state.trace_writer = trace_writer
 
     yield
 
@@ -263,6 +276,10 @@ async def lifespan(app: FastAPI):
         with suppress(asyncio.CancelledError):
             await backup_task
 
+    if trace_writer is not None:
+        await trace_writer.aclose()
+    if trace_store is not None:
+        await trace_store.close()
     if redis is not None:
         await redis.close()
     await http_client.aclose()
@@ -642,6 +659,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         requested = payload.max_tokens or settings.max_output_tokens
         max_tokens = max(requested, settings.min_output_tokens)
         temperature = payload.temperature  # pipeline applies QaSampling.temperature when None
+        capture_trace = settings.capture_pipeline_trace and random.random() < settings.pipeline_trace_sample_rate
 
         if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
             return _error_response(
@@ -665,6 +683,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     temperature=temperature,
                     user_id=user_id,
                     on_finish=admission.release,
+                    capture_trace=capture_trace,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
@@ -680,6 +699,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             max_tokens=max_tokens,
             temperature=temperature,
             user_id=user_id,
+            capture_trace=capture_trace,
         )
     finally:
         if not released:
@@ -711,6 +731,7 @@ async def _non_stream_response(
     max_tokens: int,
     temperature: float | None,
     user_id: str | None = None,
+    capture_trace: bool = False,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -720,7 +741,7 @@ async def _non_stream_response(
     generation_ms = 0.0
     metrics_mod.inc_chat_in_flight()
     try:
-        outcome = await pipeline.prepare(messages=payload.messages, runtime=runtime)
+        outcome = await pipeline.prepare(messages=payload.messages, runtime=runtime, capture_trace=capture_trace)
         gen_started = time.perf_counter()
         answer = await pipeline.generate_text(
             outcome=outcome, runtime=runtime, max_tokens=max_tokens, temperature=temperature
@@ -744,6 +765,7 @@ async def _non_stream_response(
             temperature=temperature,
             max_tokens=max_tokens,
             user_id=user_id,
+            trace_writer=request.app.state.trace_writer,
         )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
@@ -819,6 +841,7 @@ async def _stream_response(
     temperature: float | None,
     user_id: str | None = None,
     on_finish: Callable[[], None] | None = None,
+    capture_trace: bool = False,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -831,7 +854,7 @@ async def _stream_response(
     async def sink(event: StageEvent) -> None:
         await stage_queue.put(event)
 
-    prepare_task = asyncio.create_task(pipeline.prepare(messages=payload.messages, runtime=runtime, stage_sink=sink))
+    prepare_task = asyncio.create_task(pipeline.prepare(messages=payload.messages, runtime=runtime, stage_sink=sink, capture_trace=capture_trace))
     outcome = None
     try:
         while not prepare_task.done() or not stage_queue.empty():
@@ -911,6 +934,7 @@ async def _stream_response(
             temperature=temperature,
             max_tokens=max_tokens,
             user_id=user_id,
+            trace_writer=request.app.state.trace_writer,
         )
         metrics_mod.record_chat_request(
             provider=runtime.generation.provider,
@@ -1015,7 +1039,11 @@ async def _persist_success(
     temperature: float | None,
     max_tokens: int,
     user_id: str | None = None,
+    trace_writer: TraceWriter | None = None,
 ) -> None:
+    trace = getattr(outcome, "trace", None)
+    if trace_writer is not None and trace is not None:
+        trace_writer.enqueue(run_id=run_id, session_id=session_id, trace={**trace, "answer": answer})
     try:
         async with database.sessionmaker() as session:
             await repositories.ensure_conversation(session, session_id, user_id=user_id)
