@@ -34,6 +34,7 @@ from meno_rag.stand.rewriting import (
 )
 from meno_rag.stand.sampling import QaSampling, RerankSampling, RewriteSampling
 from meno_rag.stand.search import combine_relevant_chunks, find_relevant_chunks
+from meno_rag.stand.trace import build_pipeline_trace
 
 logger = structlog.get_logger(__name__)
 
@@ -94,6 +95,7 @@ class StandRagPipeline:
         messages: list[ChatMessage],
         runtime: PipelineRuntime,
         stage_sink: StageSink | None = None,
+        capture_trace: bool = False,
     ) -> PipelineOutcome:
         question, history = extract_question_and_history(messages)
         prepared_dialogue_history = prepare_dialogue_history(
@@ -210,6 +212,20 @@ class StandRagPipeline:
             for idx, (example, score) in enumerate(selected_fewshots)
         ]
 
+        trace = None
+        if capture_trace:
+            trace = build_pipeline_trace(
+                question=question,
+                search_queries=search_queries,
+                retrieval_batches=retrieval_batches,
+                fused_batches=fused_batches,
+                candidate_scores=getattr(reranked_global_chunks, "candidate_scores", None) or {},
+                reranked_chunks=list(reranked_global_chunks),
+                qa_messages=qa_messages,
+                documents=self.resources.documents,
+                chunk_mapping=self.resources.chunk_mapping,
+            )
+
         return PipelineOutcome(
             question=question,
             prepared_dialogue_history=prepared_dialogue_history,
@@ -221,6 +237,7 @@ class StandRagPipeline:
             stage_details=stage_details,
             retrieved=retrieved_records,
             fewshots=fewshot_records,
+            trace=trace,
         )
 
     async def generate_text(
