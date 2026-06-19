@@ -89,6 +89,12 @@ _ADMISSION_LIMIT = Gauge(
     "Admission-control concurrency limit (0 = unlimited).",
     registry=REGISTRY,
 )
+_PIPELINE_TRACE = Counter(
+    "meno_pipeline_trace",
+    "Pipeline trace capture outcomes (enqueued/dropped/written/failed).",
+    labelnames=("outcome",),
+    registry=REGISTRY,
+)
 
 
 def _bool_label(value: bool) -> str:
@@ -125,6 +131,10 @@ def chat_in_flight() -> Iterator[None]:
 
 def record_error(code: str) -> None:
     _ERRORS.labels(code=code).inc()
+
+
+def record_trace(outcome: str) -> None:
+    _PIPELINE_TRACE.labels(outcome=outcome).inc()
 
 
 def record_discovery(*, registry: str, outcome: str) -> None:

@@ -33,3 +33,15 @@ async def test_pipeline_snapshot_matches_golden(snapshot_pipeline, snapshot_ques
     }
     expected = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
     assert actual == expected, "Snapshot drift. If intentional, regenerate snapshot."
+
+
+@pytest.mark.asyncio
+async def test_prepare_capture_trace_populates_trace(snapshot_pipeline, snapshot_question):
+    pipeline, runtime = snapshot_pipeline
+    off = await pipeline.prepare(messages=snapshot_question, runtime=runtime)
+    assert off.trace is None
+
+    on = await pipeline.prepare(messages=snapshot_question, runtime=runtime, capture_trace=True)
+    assert on.trace is not None
+    assert set(on.trace.keys()) >= {"question", "retrieval", "fusion", "rerank", "prompt", "chunks"}
+    assert on.trace["rerank"]["scored_candidates"] >= 0

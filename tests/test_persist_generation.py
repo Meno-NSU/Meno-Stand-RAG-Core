@@ -122,3 +122,78 @@ async def test_persist_success_is_non_fatal(tmp_path, monkeypatch):
         assert n == 0  # whole turn rolled back atomically
     finally:
         await db.close()
+
+
+class _SpyWriter:
+    def __init__(self):
+        self.calls = []
+
+    def enqueue(self, *, run_id, session_id, trace):
+        self.calls.append({"run_id": run_id, "session_id": session_id, "trace": trace})
+
+
+@pytest.mark.asyncio
+async def test_persist_success_enqueues_trace_with_answer(tmp_path):
+    from meno_rag.api.main import _persist_success
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'tr.sqlite3'}")
+    await db.init_models()
+    writer = _SpyWriter()
+    outcome = _outcome()
+    outcome.trace = {"question": "Q?", "rerank": {"scored_candidates": 1}}
+    try:
+        await _persist_success(
+            database=db,
+            run_id="r1",
+            session_id="sess",
+            model="m",
+            generation_model="m",
+            core_model="c",
+            endpoint="http://x/v1",
+            question=outcome.question,
+            answer="THE ANSWER",
+            outcome=outcome,
+            generation_ms=1.0,
+            total_ms=2.0,
+            stream=False,
+            temperature=0.1,
+            max_tokens=4096,
+            trace_writer=writer,
+        )
+    finally:
+        await db.close()
+    assert len(writer.calls) == 1
+    assert writer.calls[0]["run_id"] == "r1"
+    assert writer.calls[0]["trace"]["answer"] == "THE ANSWER"
+    assert writer.calls[0]["trace"]["rerank"]["scored_candidates"] == 1
+
+
+@pytest.mark.asyncio
+async def test_persist_success_no_enqueue_without_trace(tmp_path):
+    from meno_rag.api.main import _persist_success
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'tr2.sqlite3'}")
+    await db.init_models()
+    writer = _SpyWriter()
+    try:
+        await _persist_success(
+            database=db,
+            run_id="r1",
+            session_id="sess",
+            model="m",
+            generation_model="m",
+            core_model="c",
+            endpoint="http://x/v1",
+            question="Q?",
+            answer="A",
+            outcome=_outcome(),
+            generation_ms=1.0,
+            total_ms=2.0,
+            stream=False,
+            temperature=0.1,
+            max_tokens=4096,
+            trace_writer=writer,
+        )
+    finally:
+        await db.close()
+    assert writer.calls == []  # _outcome() has trace=None

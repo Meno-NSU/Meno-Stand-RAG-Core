@@ -19,7 +19,7 @@ class _HangingPipeline:
     def __init__(self) -> None:
         self.cancelled = False
 
-    async def prepare(self, *, messages, runtime, stage_sink=None):
+    async def prepare(self, *, messages, runtime, stage_sink=None, capture_trace=False):
         # Emit one stage event so the generator reaches a yield, then hang as if
         # retrieval/rerank were still running.
         if stage_sink is not None:

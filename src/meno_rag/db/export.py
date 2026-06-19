@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from meno_rag.config import get_settings
 from meno_rag.db.orm import GenerationRecord, MessageFeedback, PipelineRun
+from meno_rag.db.trace_store import PipelineTrace, TraceBase
 
 
 def _sync_url(database_url: str) -> str:
@@ -82,6 +83,66 @@ def iter_analytics(session: Session, *, session_id: str | None = None) -> Iterat
         }
 
 
+def iter_trace(session: Session, *, session_id: str | None = None, run_id: str | None = None) -> Iterator[dict]:
+    stmt = select(PipelineTrace).order_by(PipelineTrace.created_at)
+    if run_id is not None:
+        stmt = stmt.where(PipelineTrace.run_id == run_id)
+    if session_id is not None:
+        stmt = stmt.where(PipelineTrace.session_id == session_id)
+    for row in session.execute(stmt).scalars().all():
+        rec = {
+            "run_id": row.run_id,
+            "session_id": row.session_id,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        rec.update(row.trace or {})
+        yield rec
+
+
+def _feedback_by_run_id(main_database_url: str) -> dict[str, dict]:
+    engine = create_engine(_sync_url(main_database_url))
+    try:
+        with Session(engine) as session:
+            rows = session.execute(select(MessageFeedback.run_id, MessageFeedback.value, MessageFeedback.comment)).all()
+    finally:
+        engine.dispose()
+    return {run_id: {"value": value, "comment": comment} for run_id, value, comment in rows}
+
+
+def export_trace(
+    trace_database_url: str,
+    *,
+    main_database_url: str | None,
+    with_feedback: bool,
+    out: TextIO,
+    session_id: str | None = None,
+    run_id: str | None = None,
+) -> int:
+    feedback = _feedback_by_run_id(main_database_url) if (with_feedback and main_database_url) else {}
+    sync_url = _sync_url(trace_database_url)
+    # For sqlite, ensure the parent directory exists so a fresh/never-initialized
+    # store opens cleanly instead of raising "unable to open database file".
+    if sync_url.startswith("sqlite:///"):
+        sqlite_path = sync_url.removeprefix("sqlite:///")
+        if sqlite_path and sqlite_path != ":memory:":
+            Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(sync_url)
+    count = 0
+    try:
+        # Idempotently ensure the table exists: exporting a store that was never
+        # populated (capture never enabled) yields 0 records, not "no such table".
+        TraceBase.metadata.create_all(engine)
+        with Session(engine) as session:
+            for record in iter_trace(session, session_id=session_id, run_id=run_id):
+                if with_feedback:
+                    record["feedback"] = feedback.get(record["run_id"])
+                out.write(json.dumps(record, ensure_ascii=False) + "\n")
+                count += 1
+    finally:
+        engine.dispose()
+    return count
+
+
 def export(database_url: str, *, fmt: str, with_context: bool, out: TextIO, session_id: str | None = None) -> int:
     engine = create_engine(_sync_url(database_url))
     count = 0
@@ -105,7 +166,13 @@ def main() -> None:
         prog="meno-rag-export",
         description="Read-only export of stored dialogues as JSONL (analytics or fine-tuning).",
     )
-    parser.add_argument("--format", choices=["finetuning", "analytics"], default="analytics")
+    parser.add_argument("--format", choices=["finetuning", "analytics", "trace"], default="analytics")
+    parser.add_argument("--run-id", default=None, help="trace only: filter to a single completion/run id")
+    parser.add_argument(
+        "--with-feedback",
+        action="store_true",
+        help="trace only: merge thumbs up/down from the main DB by run_id",
+    )
     parser.add_argument(
         "--with-context",
         action="store_true",
@@ -116,21 +183,28 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    if args.out == "-":
-        n = export(
+
+    def _run(stream: TextIO) -> int:
+        if args.format == "trace":
+            return export_trace(
+                settings.trace_database_url,
+                main_database_url=settings.database_url,
+                with_feedback=args.with_feedback,
+                out=stream,
+                session_id=args.session,
+                run_id=args.run_id,
+            )
+        return export(
             settings.database_url,
             fmt=args.format,
             with_context=args.with_context,
-            out=sys.stdout,
+            out=stream,
             session_id=args.session,
         )
+
+    if args.out == "-":
+        n = _run(sys.stdout)
     else:
         with Path(args.out).open("w", encoding="utf-8") as stream:
-            n = export(
-                settings.database_url,
-                fmt=args.format,
-                with_context=args.with_context,
-                out=stream,
-                session_id=args.session,
-            )
+            n = _run(stream)
     print(f"Exported {n} record(s) as {args.format}.", file=sys.stderr)
