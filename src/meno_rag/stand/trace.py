@@ -85,7 +85,7 @@ def build_pipeline_trace(
     merged_by_id = {int(cid): float(score) for cid, score in reranked_chunks}
     rank_by_id = {int(cid): rank for rank, (cid, _) in enumerate(reranked_chunks)}
 
-    candidates = []
+    candidates: list[dict[str, Any]] = []
     for cid, rerank_score in candidate_scores.items():
         cid = int(cid)
         candidates.append(
