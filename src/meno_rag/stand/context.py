@@ -123,7 +123,7 @@ def prepare_context(
     documents: list[dict[str, Any]],
     chunk_mapping: dict[str, dict[str, int]],
     min_document_quality: float,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[dict[str, Any]]]:
     selected_documents = prepare_relevant_documents(
         indices_of_relevant_chunks,
         scores_of_relevant_chunks,
@@ -134,13 +134,12 @@ def prepare_context(
     if len(selected_documents) == 0:
         return [], []
     descriptions_of_selected_documents: list[str] = []
-    descriptions_of_urls: list[str] = []
+    sources_of_selected_documents: list[dict[str, Any]] = []
     ordered_indices_of_selected_documents = sorted(
         selected_documents.keys(),
         key=lambda idx: selected_documents[idx]["relevance"],
     )
-    max_number_width = len(f"{len(ordered_indices_of_selected_documents)}. ")
-    for counter, document_index in enumerate(ordered_indices_of_selected_documents):
+    for document_index in ordered_indices_of_selected_documents:
         descriptions_of_selected_documents.append(
             document_to_text(
                 document_index=document_index,
@@ -148,29 +147,27 @@ def prepare_context(
                 documents=documents,
             )
         )
-        number = f"{counter + 1}. "
-        while len(number) < max_number_width:
-            number += " "
-        doc_url = documents[document_index]["url"]
-        doc_title = documents[document_index]["doc_title"]
-        if len(doc_title) > 0:
-            new_reference = number + doc_title + "\n"
-            new_reference += "".join([" " for _ in range(max_number_width)])
-            new_reference += doc_url
+        sources_of_selected_documents.append(
+            {
+                "document_title": documents[document_index]["doc_title"],
+                "source_urls": normalize_urls(documents[document_index].get("url")),
+            }
+        )
+    return descriptions_of_selected_documents, sources_of_selected_documents
+
+
+def flatten_sources(sources_per_document: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Expand each document's structured source into the API/DB contract: one
+    ``{document_title, source_url}`` row per URL. A document with multiple URLs
+    (multi-source summaries) yields several rows sharing the title; a document
+    with no URL yields a single row with an empty ``source_url``."""
+    flattened: list[dict[str, str]] = []
+    for source in sources_per_document:
+        title = source.get("document_title", "") or ""
+        urls = source.get("source_urls", []) or []
+        if urls:
+            for url in urls:
+                flattened.append({"document_title": title, "source_url": url})
         else:
-            new_reference = number + doc_url
-        descriptions_of_urls.append(new_reference)
-    return descriptions_of_selected_documents, descriptions_of_urls
-
-
-def references_to_sources(references: list[str]) -> list[dict[str, str]]:
-    sources: list[dict[str, str]] = []
-    for reference in references:
-        lines = [line.rstrip() for line in reference.splitlines() if line.strip()]
-        if not lines:
-            continue
-        first_line = lines[0].strip()
-        title = first_line.split(". ", 1)[1].strip() if ". " in first_line else first_line
-        url = lines[-1].strip()
-        sources.append({"document_title": title, "source_url": url})
-    return sources
+            flattened.append({"document_title": title, "source_url": ""})
+    return flattened

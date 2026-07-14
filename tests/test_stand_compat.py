@@ -72,11 +72,11 @@ def test_prepare_context_defaults_missing_quality_score_to_one():
     ]
     mapping = {"0": {"doc_index": 0, "local_chunk_index": 0}}
 
-    context, refs = prepare_context([0], [0.9], documents, mapping, min_document_quality=0.0)
+    context, sources = prepare_context([0], [0.9], documents, mapping, min_document_quality=0.0)
 
     assert len(context) == 1
     assert "Документ НГУ" in context[0]
-    assert "https://example.test" in refs[0]
+    assert sources == [{"document_title": "Документ НГУ", "source_urls": ["https://example.test"]}]
 
 
 def test_rerank_merge_score_preserves_zero_filtering():

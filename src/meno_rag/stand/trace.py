@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from meno_rag.stand.context import global_chunk_index_to_text
+from meno_rag.stand.context import global_chunk_index_to_text, normalize_urls
 
 
 def _rank_entries(pairs: list[tuple[int, float]], score_key: str) -> list[dict[str, Any]]:
@@ -39,7 +39,8 @@ def _chunk_meta(
         if doc_index is not None and 0 <= doc_index < len(documents):
             doc = documents[doc_index]
             title = doc.get("doc_title", "") or ""
-            url = doc.get("url", "") or ""
+            urls = normalize_urls(doc.get("url"))
+            url = urls[0] if urls else ""
     try:
         text = global_chunk_index_to_text(chunk_id, documents, chunk_mapping)
     except Exception:

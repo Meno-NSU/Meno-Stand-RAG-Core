@@ -125,6 +125,31 @@ def test_retrieval_score_none_when_scored_but_not_fused():
     assert cand["kept"] is False
 
 
+def test_chunk_meta_list_url_uses_first_url():
+    docs = [
+        {
+            "doc_title": "Summary",
+            "url": ["http://first", "http://second"],
+            "doc_annotation": "",
+            "doc_full_text": "AAABBB",
+            "chunks": [{"start_char": 0, "end_char": 3}],
+        }
+    ]
+    mapping = {"0": {"doc_index": 0, "local_chunk_index": 0}}
+    t = build_pipeline_trace(
+        question="Q?",
+        search_queries=["q1"],
+        retrieval_batches=[{"query": "q1", "dense": [(0, 0.9)], "lexical": []}],
+        fused_batches=[{"query": "q1", "candidates": [(0, 0.9)]}],
+        candidate_scores={0: 1.0},
+        reranked_chunks=[(0, 0.9)],
+        qa_messages=[],
+        documents=docs,
+        chunk_mapping=mapping,
+    )
+    assert t["chunks"]["0"] == {"title": "Summary", "url": "http://first", "text": "AAA"}
+
+
 def test_rerank_output_carries_candidate_scores():
     from meno_rag.stand.pipeline import _RerankOutput
 

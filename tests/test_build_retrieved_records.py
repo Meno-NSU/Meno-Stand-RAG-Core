@@ -24,3 +24,12 @@ def test_unknown_chunk_yields_empty_source():
     assert build_retrieved_records([(99, 0.5)], {}, []) == [
         {"chunk_id": 99, "ordinal": 0, "merged_score": 0.5, "title": "", "url": ""}
     ]
+
+
+def test_list_url_uses_first_url():
+    reranked = [(0, 0.9)]
+    chunk_mapping = {"0": {"doc_index": 0, "local_chunk_index": 0}}
+    documents = [{"doc_title": "Summary", "url": ["http://first", "http://second"]}]
+    assert build_retrieved_records(reranked, chunk_mapping, documents) == [
+        {"chunk_id": 0, "ordinal": 0, "merged_score": 0.9, "title": "Summary", "url": "http://first"}
+    ]

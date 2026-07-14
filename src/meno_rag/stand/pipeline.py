@@ -16,7 +16,7 @@ from meno_rag.api.events import StageEvent, StageName, StageStatus
 from meno_rag.config import Settings
 from meno_rag.llm.think_detector import has_thinking
 from meno_rag.schemas import ChatMessage, PipelineOutcome
-from meno_rag.stand.context import prepare_context, references_to_sources
+from meno_rag.stand.context import flatten_sources, normalize_urls, prepare_context
 from meno_rag.stand.dialogue_history import prepare_dialogue_history
 from meno_rag.stand.qa import prepare_prompt_for_question_answering, system_prompt_with_datetime
 from meno_rag.stand.rerank import (
@@ -562,7 +562,7 @@ class StandRagPipeline:
     ) -> tuple[str, list[dict[str, str]]]:
         if not chunks:
             return "", []
-        prepared_context, prepared_references = prepare_context(
+        prepared_context, prepared_sources = prepare_context(
             indices_of_relevant_chunks=[item[0] for item in chunks],
             scores_of_relevant_chunks=[item[1] for item in chunks],
             documents=self.resources.documents,
@@ -576,10 +576,10 @@ class StandRagPipeline:
         # combined QA prompt stays within `max_qa_prompt_chars`.
         budget = self.settings.max_qa_prompt_chars if budget_override is None else budget_override
         kept_context: list[str] = []
-        kept_references: list[str] = []
+        kept_sources: list[dict[str, Any]] = []
         total = 0
         sep_chars = len("\n\n")
-        for idx, (doc_text, ref) in enumerate(zip(prepared_context, prepared_references, strict=False)):
+        for idx, (doc_text, source) in enumerate(zip(prepared_context, prepared_sources, strict=False)):
             piece = f"==========\nDOCUMENT {idx + 1}\n==========\n\n{doc_text.strip()}"
             extra = len(piece) + (sep_chars if kept_context else 0)
             if kept_context and total + extra > budget:
@@ -592,10 +592,10 @@ class StandRagPipeline:
                 )
                 break
             kept_context.append(piece)
-            kept_references.append(ref)
+            kept_sources.append(source)
             total += extra
         context = "\n\n".join(kept_context)
-        sources = references_to_sources(kept_references)
+        sources = flatten_sources(kept_sources)
         return context, sources
 
     def _stage_detail(self, stage_name: str, result: Any) -> dict[str, Any]:
@@ -726,7 +726,8 @@ def build_retrieved_records(
             if doc_index is not None and 0 <= doc_index < len(documents):
                 doc = documents[doc_index]
                 title = doc.get("doc_title", "") or ""
-                url = doc.get("url", "") or ""
+                urls = normalize_urls(doc.get("url"))
+                url = urls[0] if urls else ""
         records.append(
             {
                 "chunk_id": int(chunk_id),
