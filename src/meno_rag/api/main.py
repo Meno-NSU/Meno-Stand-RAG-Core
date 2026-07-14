@@ -411,6 +411,16 @@ async def healthz(request: Request):
     }
 
 
+@app.get("/v1/status")
+async def service_status(request: Request):
+    # Lightweight load signal for the frontend's overload UX. Read-only, no DB,
+    # no auth: just the live admission counters.
+    admission = getattr(request.app.state, "admission", None)
+    if admission is None:
+        return {"active_requests": 0, "limit": 0}
+    return {"active_requests": admission.active, "limit": admission.max_concurrent}
+
+
 @app.get("/v1/models")
 async def list_models(request: Request):
     from meno_rag.api.runtime_resolver import resolve_core_model_id_sync
