@@ -1,5 +1,26 @@
+from __future__ import annotations
+
 import json
 from typing import Any
+
+
+def normalize_urls(value: str | list[str] | None) -> list[str]:
+    """Accept a document ``url`` as a string, a list of strings, or ``None`` and
+    return a clean, de-duplicated, order-preserving list of non-empty URLs."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, (list, tuple)):
+        result: list[str] = []
+        for item in value:
+            stripped = item.strip() if isinstance(item, str) else str(item).strip()
+            if stripped and stripped not in result:
+                result.append(stripped)
+        return result
+    stripped = str(value).strip()
+    return [stripped] if stripped else []
 
 
 def global_chunk_index_to_local(
