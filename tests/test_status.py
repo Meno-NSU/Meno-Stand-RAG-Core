@@ -24,3 +24,15 @@ def test_status_degrades_when_admission_missing():
 
     assert r.status_code == 200
     assert r.json() == {"active_requests": 0, "limit": 0}
+
+
+def test_overloaded_response_includes_load():
+    import json
+
+    from meno_rag.api.main import _overloaded_response
+
+    resp = _overloaded_response(active=256, limit=256)
+    body = json.loads(bytes(resp.body))
+    assert body["error"]["code"] == "overloaded"
+    assert body["error"]["active_requests"] == 256
+    assert body["error"]["limit"] == 256

@@ -627,7 +627,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     admission: AdmissionController = request.app.state.admission
     if not admission.try_acquire():
         metrics_mod.record_error("overloaded")
-        return _overloaded_response()
+        return _overloaded_response(active=admission.active, limit=admission.max_concurrent)
 
     # The slot is released here for every synchronous outcome (errors and the
     # non-stream success path). For streaming we hand the release to the
@@ -1219,7 +1219,9 @@ def _classified_error_response(classified: ClassifiedError, *, retry_id: str, st
     )
 
 
-def _overloaded_response(retry_after_sec: int = 5) -> JSONResponse:
+def _overloaded_response(
+    retry_after_sec: int = 5, *, active: int | None = None, limit: int | None = None
+) -> JSONResponse:
     return JSONResponse(
         status_code=503,
         headers={"Retry-After": str(retry_after_sec)},
@@ -1229,6 +1231,8 @@ def _overloaded_response(retry_after_sec: int = 5) -> JSONResponse:
                 "type": "server_error",
                 "code": "overloaded",
                 "retry_after_sec": retry_after_sec,
+                "active_requests": active,
+                "limit": limit,
             }
         },
     )
