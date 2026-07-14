@@ -105,9 +105,13 @@ Download the stand resources from Yandex Disk before starting the API:
 python3 scripts/download_knowledge.py
 ```
 
-The script uses the public Yandex Disk API directly, so no third-party downloader is required. It resolves
-`https://disk.yandex.ru/d/eklv6Scj9OpbmQ`, downloads the full shared folder as a zip archive, extracts it into
-`resources/stand_nsu/`, and verifies the expected corpus, mapping, abbreviation, FAISS, and BM25 files.
+The script uses the public Yandex Disk API directly, so no third-party downloader is required. Each artifact is a
+separate published resource (see `RESOURCES` in the script): the corpus, chunk mapping, and FAISS index are fetched
+as single files; the `bm25` folder is fetched as a zip and extracted into `knowledge/bm25/`. The corpus is published
+as `chunked_texts_about_nsu_with_metadata_and_scores.jsonl` and saved under the name the backend loads
+(`chunked_texts_about_nsu_with_metadata.jsonl`). `abbreviations.json` has not been regenerated yet, so it is still
+pulled as a single small file from the legacy archive — update its entry in `RESOURCES` once a dedicated link exists.
+Existing files are skipped unless `--force` is passed, and the run fails if any expected file is missing.
 
 In a Jupyter notebook container, run it from the repository root:
 
@@ -115,13 +119,20 @@ In a Jupyter notebook container, run it from the repository root:
 !python3 scripts/download_knowledge.py
 ```
 
-The download needs about 5.5 GB of free space while it is running: the full temporary zip archive is about 1.8 GB,
-and the extracted folder is about 3.5 GB. The temporary archive is removed after a successful extract.
+The resources need about 1 GB of free space (FAISS ~720 MiB, corpus ~134 MiB, BM25 ~57 MiB, mapping ~9 MiB). Files are
+written directly to their final location; only the `bm25` folder uses a small temporary zip (~30 MiB), removed after
+extraction.
 
-To print the temporary direct download URL without downloading the archive:
+To print the temporary direct download URLs without downloading anything:
 
 ```bash
 python3 scripts/download_knowledge.py --resolve-only
+```
+
+To (re-)fetch only specific artifacts, e.g. after an index rebuild:
+
+```bash
+python3 scripts/download_knowledge.py --only faiss_index,bm25 --force
 ```
 
 ## Production setup (50–200 concurrent users)

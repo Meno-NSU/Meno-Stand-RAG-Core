@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+"""Download the Meno RAG stand resources from Yandex Disk.
+
+The knowledge base is published as several independent public resources (a mix
+of single files and one folder). Each is fetched to its final location under the
+output directory; the corpus is saved under the name the backend expects
+(``chunked_texts_about_nsu_with_metadata.jsonl``) even though it is published as
+``..._and_scores.jsonl``.
+
+``abbreviations.json`` has not been regenerated yet, so it is still pulled (as a
+single small file) from the legacy combined archive. Replace its entry in
+``RESOURCES`` with a dedicated link once the updated dictionary is published.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -7,61 +20,115 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_PUBLIC_URL = "https://disk.yandex.ru/d/eklv6Scj9OpbmQ"
 DOWNLOAD_API_URL = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
-EXPECTED_FILES = (
-    "chunk_mapping_to_texts.json",
-    "chunked_texts_about_nsu_with_metadata.jsonl",
-    "abbreviations.json",
-    "knowledge/faiss_frida.index",
-    "knowledge/bm25/data.csc.index.npy",
-    "knowledge/bm25/indices.csc.index.npy",
-    "knowledge/bm25/indptr.csc.index.npy",
-    "knowledge/bm25/params.index.json",
-    "knowledge/bm25/vocab.index.json",
+
+# Legacy combined archive, kept only as the (temporary) source of the unchanged
+# abbreviations dictionary until a dedicated link exists.
+LEGACY_ARCHIVE_URL = "https://disk.yandex.ru/d/eklv6Scj9OpbmQ"
+
+BM25_FILES = (
+    "data.csc.index.npy",
+    "indices.csc.index.npy",
+    "indptr.csc.index.npy",
+    "params.index.json",
+    "vocab.index.json",
+)
+
+
+@dataclass(frozen=True)
+class Resource:
+    label: str  # stable name for --only and logs
+    public_url: str  # Yandex Disk public link
+    path: str | None  # sub-path inside a public folder, or None for a directly published resource
+    target: str  # destination path relative to the output directory
+    kind: str  # "file" (raw download) or "archive" (folder published as a zip -> extract)
+
+
+# Order matters only for readability; each resource is fetched independently.
+RESOURCES: tuple[Resource, ...] = (
+    Resource(
+        label="corpus",
+        public_url="https://disk.yandex.ru/d/4HUd56_sqwsoYA",
+        path=None,
+        # Published as ..._and_scores.jsonl; saved under the name the backend loads.
+        target="chunked_texts_about_nsu_with_metadata.jsonl",
+        kind="file",
+    ),
+    Resource(
+        label="chunk_mapping",
+        public_url="https://disk.yandex.ru/i/hRePe7eF8R66fQ",
+        path=None,
+        target="chunk_mapping_to_texts.json",
+        kind="file",
+    ),
+    Resource(
+        label="faiss_index",
+        public_url="https://disk.yandex.ru/d/z6TaXeiflR7RtQ",
+        path=None,
+        target="knowledge/faiss_frida.index",
+        kind="file",
+    ),
+    Resource(
+        label="bm25",
+        public_url="https://disk.yandex.ru/d/C7U5Hot_ktuWRw",
+        path=None,
+        target="knowledge/bm25",
+        kind="archive",
+    ),
+    Resource(
+        label="abbreviations",
+        # TEMPORARY: pulled from the legacy archive until an updated file is published.
+        public_url=LEGACY_ARCHIVE_URL,
+        path="/knowledge/abbreviations.json",
+        target="abbreviations.json",
+        kind="file",
+    ),
 )
 
 
 def parse_args() -> argparse.Namespace:
+    labels = ", ".join(r.label for r in RESOURCES)
     parser = argparse.ArgumentParser(description="Download the Meno RAG stand resources from Yandex Disk.")
-    parser.add_argument(
-        "--url",
-        default=DEFAULT_PUBLIC_URL,
-        help=f"Yandex Disk public URL to the full resources folder. Defaults to {DEFAULT_PUBLIC_URL!r}.",
-    )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("resources/stand_nsu"),
-        help="Directory that should contain the extracted knowledge/ folder.",
+        help="Directory that should contain the corpus, mapping, abbreviations, and knowledge/ folder.",
+    )
+    parser.add_argument(
+        "--only",
+        default=None,
+        help=f"Comma-separated subset of resources to fetch. Valid labels: {labels}.",
     )
     parser.add_argument(
         "--archive",
         type=Path,
         default=None,
-        help="Temporary zip archive path. Defaults to <output-dir>/meno-rag-data.zip.",
+        help="Temporary zip path for folder resources (bm25). Defaults to <output-dir>/meno-rag-bm25.zip.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Download and extract even if the expected knowledge files already exist.",
+        help="Re-download resources even if their target files already exist.",
     )
     parser.add_argument(
         "--keep-archive",
         action="store_true",
-        help="Keep the downloaded zip archive after successful extraction.",
+        help="Keep the temporary zip archive(s) after successful extraction.",
     )
     parser.add_argument(
         "--resolve-only",
         action="store_true",
-        help="Only resolve and print the temporary Yandex Disk download URL.",
+        help="Only resolve and print the temporary Yandex Disk download URLs.",
     )
     return parser.parse_args()
 
@@ -87,11 +154,12 @@ def split_public_url(public_url: str) -> tuple[str, str | None]:
     return public_key, "/" + "/".join(resource_parts)
 
 
-def resolve_download_url(public_url: str) -> str:
-    public_key, resource_path = split_public_url(public_url)
+def resolve_download_url(public_url: str, path: str | None = None) -> str:
+    public_key, url_path = split_public_url(public_url)
+    effective_path = path or url_path
     query = {"public_key": public_key}
-    if resource_path:
-        query["path"] = resource_path
+    if effective_path:
+        query["path"] = effective_path
     request_url = f"{DOWNLOAD_API_URL}?{urllib.parse.urlencode(query)}"
     request = urllib.request.Request(request_url, headers={"User-Agent": "meno-rag-downloader/1.0"})
 
@@ -114,17 +182,23 @@ def resolve_download_url(public_url: str) -> str:
     return str(href)
 
 
-def expected_files_exist(output_dir: Path) -> bool:
-    return all((output_dir / relative_path).is_file() for relative_path in EXPECTED_FILES)
+def resource_expected_files(resource: Resource) -> list[str]:
+    if resource.kind == "archive":
+        return [f"{resource.target}/{name}" for name in BM25_FILES]
+    return [resource.target]
 
 
-def download_file(url: str, archive_path: Path) -> None:
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
+def resource_satisfied(resource: Resource, output_dir: Path) -> bool:
+    return all((output_dir / rel).is_file() for rel in resource_expected_files(resource))
+
+
+def download_file(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "meno-rag-downloader/1.0"})
     try:
         with (
             urllib.request.urlopen(request, timeout=60, context=ssl_context()) as response,
-            archive_path.open("wb") as archive,
+            dest.open("wb") as sink,
         ):
             total = int(response.headers.get("Content-Length") or 0)
             downloaded = 0
@@ -133,7 +207,7 @@ def download_file(url: str, archive_path: Path) -> None:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
-                archive.write(chunk)
+                sink.write(chunk)
                 downloaded += len(chunk)
                 now = time.monotonic()
                 if now - last_report >= 5:
@@ -146,7 +220,46 @@ def download_file(url: str, archive_path: Path) -> None:
         raise RuntimeError(f"Download failed with HTTP {exc.code}: {body}") from exc
     except urllib.error.URLError as exc:
         print(f"Python download failed ({exc}); retrying with curl.", file=sys.stderr)
-        curl_download(url, archive_path)
+        curl_download(url, dest)
+
+
+def download_resource(resource: Resource, output_dir: Path, archive_path: Path) -> None:
+    href = resolve_download_url(resource.public_url, resource.path)
+    if resource.kind == "file":
+        target = output_dir / resource.target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(target.name + ".part")
+        download_file(href, partial)
+        partial.replace(target)
+        return
+    if resource.kind == "archive":
+        download_file(href, archive_path)
+        extract_bm25(archive_path, output_dir / resource.target)
+        return
+    raise RuntimeError(f"Unknown resource kind {resource.kind!r} for {resource.label!r}.")
+
+
+def extract_bm25(archive_path: Path, target_dir: Path) -> None:
+    """Extract the bm25 folder zip and place its files at ``target_dir``.
+
+    The archive layout can vary (files at the root or under a ``bm25/`` folder),
+    so we locate the directory that holds the bm25s marker file and move it into
+    place, replacing any previous index.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        safe_extract(archive_path, tmp_dir)
+        marker = next(tmp_dir.rglob("params.index.json"), None)
+        if marker is None:
+            raise RuntimeError(f"bm25 archive is missing params.index.json: {archive_path}")
+        source_dir = marker.parent
+        missing = [name for name in BM25_FILES if not (source_dir / name).is_file()]
+        if missing:
+            raise RuntimeError(f"bm25 archive is incomplete; missing: {missing}")
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source_dir), str(target_dir))
 
 
 def ssl_context() -> ssl.SSLContext:
@@ -205,81 +318,48 @@ def safe_extract(archive_path: Path, output_dir: Path) -> None:
         archive.extractall(output_root)
 
 
-def normalize_extracted_layout(output_dir: Path) -> None:
-    data_dir = output_dir / "data"
-    if not (output_dir / "knowledge").is_dir() and (data_dir / "knowledge").is_dir():
-        move_children(data_dir, output_dir)
-
-    if (output_dir / "knowledge").is_dir():
-        copy_abbreviations_to_root(output_dir)
-        return
-
-    root_faiss = output_dir / "faiss_frida.index"
-    root_bm25 = output_dir / "bm25"
-    if not root_faiss.is_file() or not root_bm25.is_dir():
-        return
-
-    knowledge_dir = output_dir / "knowledge"
-    knowledge_dir.mkdir()
-    shutil.move(str(root_faiss), knowledge_dir / root_faiss.name)
-    shutil.move(str(root_bm25), knowledge_dir / root_bm25.name)
-    copy_abbreviations_to_root(output_dir)
-
-
-def move_children(source_dir: Path, target_dir: Path) -> None:
-    for child in source_dir.iterdir():
-        target = target_dir / child.name
-        if target.exists():
-            continue
-        shutil.move(str(child), target)
-    try:
-        source_dir.rmdir()
-    except OSError:
-        pass
-
-
-def copy_abbreviations_to_root(output_dir: Path) -> None:
-    root_abbreviations = output_dir / "abbreviations.json"
-    nested_abbreviations = output_dir / "knowledge" / "abbreviations.json"
-    if not root_abbreviations.exists() and nested_abbreviations.is_file():
-        shutil.copy2(nested_abbreviations, root_abbreviations)
-
-
-def validate_output(output_dir: Path) -> None:
-    missing = [relative_path for relative_path in EXPECTED_FILES if not (output_dir / relative_path).is_file()]
+def validate_output(output_dir: Path, resources: tuple[Resource, ...]) -> None:
+    missing = [rel for res in resources for rel in resource_expected_files(res) if not (output_dir / rel).is_file()]
     if missing:
         formatted = "\n".join(f"- {path}" for path in missing)
         raise RuntimeError(f"Downloaded knowledge directory is incomplete. Missing files:\n{formatted}")
 
 
+def select_resources(only: str | None) -> tuple[Resource, ...]:
+    if not only:
+        return RESOURCES
+    wanted = {token.strip() for token in only.split(",") if token.strip()}
+    known = {res.label for res in RESOURCES}
+    unknown = wanted - known
+    if unknown:
+        raise SystemExit(f"error: unknown --only labels {sorted(unknown)}; valid: {sorted(known)}")
+    return tuple(res for res in RESOURCES if res.label in wanted)
+
+
 def main() -> int:
     args = parse_args()
     output_dir = args.output_dir.resolve()
-    archive_path = (args.archive or output_dir / "meno-rag-data.zip").resolve()
+    archive_path = (args.archive or output_dir / "meno-rag-bm25.zip").resolve()
+    resources = select_resources(args.only)
 
-    if expected_files_exist(output_dir) and not args.force and not args.resolve_only:
-        print(f"Stand resources already exist in {output_dir}", flush=True)
-        return 0
-
-    print(f"Resolving Yandex Disk download URL for {args.url}", flush=True)
-    download_url = resolve_download_url(args.url)
     if args.resolve_only:
-        print(download_url, flush=True)
+        for res in resources:
+            print(f"{res.label}: {resolve_download_url(res.public_url, res.path)}", flush=True)
         return 0
 
-    print(f"Downloading archive to {archive_path}", flush=True)
-    download_file(download_url, archive_path)
+    for res in resources:
+        if resource_satisfied(res, output_dir) and not args.force:
+            print(f"[skip] {res.label}: already present", flush=True)
+            continue
+        print(f"[get ] {res.label} -> {res.target}", flush=True)
+        download_resource(res, output_dir, archive_path)
 
-    print(f"Extracting archive into {output_dir}", flush=True)
-    safe_extract(archive_path, output_dir)
-    normalize_extracted_layout(output_dir)
-    validate_output(output_dir)
-
-    if args.keep_archive:
-        print(f"Archive kept at {archive_path}", flush=True)
-    else:
+    if not args.keep_archive:
         archive_path.unlink(missing_ok=True)
+    elif archive_path.is_file():
+        print(f"Archive kept at {archive_path}", flush=True)
 
+    validate_output(output_dir, resources)
     print(f"Stand resources are ready in {output_dir}", flush=True)
     return 0
 
