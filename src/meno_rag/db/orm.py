@@ -189,3 +189,13 @@ class User(Base):
 
 Index("ix_messages_conversation_created", Message.conversation_id, Message.created_at)
 Index("ix_pipeline_stage_run", PipelineStageRun.run_id, PipelineStageRun.stage)
+
+
+class GuestSession(Base):
+    __tablename__ = "guest_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uuid_hex)
+    secret_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

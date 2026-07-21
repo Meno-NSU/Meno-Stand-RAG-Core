@@ -143,6 +143,7 @@ class Settings(BaseSettings):
 
     auth_jwt_secret: str = Field(default="", validation_alias="AUTH_JWT_SECRET")
     auth_token_ttl_hours: int = Field(default=720, validation_alias="AUTH_TOKEN_TTL_HOURS")
+    guest_session_ttl_days: int = Field(default=365, validation_alias="GUEST_SESSION_TTL_DAYS")
 
     httpx_max_connections: int = Field(default=200, validation_alias="HTTPX_MAX_CONNECTIONS")
     httpx_max_keepalive: int = Field(default=100, validation_alias="HTTPX_MAX_KEEPALIVE")
