@@ -476,7 +476,7 @@ async def current_consent_state(
     session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None
 ) -> dict[str, bool]:
     """Resolve the latest granted/revoked action per purpose (append-only log)."""
-    state = {purpose: False for purpose in CONSENT_PURPOSES}
+    state = dict.fromkeys(CONSENT_PURPOSES, False)
     if user_id is not None:
         clause = ConsentEvent.user_id == user_id
     elif guest_session_id is not None:
