@@ -52,6 +52,6 @@ def test_resolver_accepts_valid_rejects_absent_and_invalid(client):
     assert ok.json()["guest_session_id"]  # valid → resolves
 
     assert client.get("/v1/guest/_whoami").json()["guest_session_id"] is None  # absent → None
-    assert client.get(
-        "/v1/guest/_whoami", headers={"X-Guest-Token": "bogus"}
-    ).json()["guest_session_id"] is None  # invalid → None
+    assert (
+        client.get("/v1/guest/_whoami", headers={"X-Guest-Token": "bogus"}).json()["guest_session_id"] is None
+    )  # invalid → None
