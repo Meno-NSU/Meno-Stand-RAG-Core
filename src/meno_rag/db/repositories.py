@@ -23,15 +23,21 @@ from meno_rag.db.orm import (
 
 
 async def ensure_conversation(
-    session: AsyncSession, conversation_id: str, *, user_id: str | None = None
+    session: AsyncSession,
+    conversation_id: str,
+    *,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
 ) -> Conversation:
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
-        conversation = Conversation(id=conversation_id, user_id=user_id)
+        conversation = Conversation(id=conversation_id, user_id=user_id, guest_session_id=guest_session_id)
         session.add(conversation)
         await session.flush()
     if user_id is not None:
         conversation.user_id = user_id
+    if guest_session_id is not None:
+        conversation.guest_session_id = guest_session_id
     conversation.updated_at = datetime.now(UTC)
     return conversation
 
@@ -59,8 +65,40 @@ async def append_message(
     )
 
 
-async def clear_conversation(session: AsyncSession, conversation_id: str) -> None:
+async def delete_conversation_cascade(session: AsyncSession, conversation_id: str) -> None:
+    """Delete a conversation and every record linked to it (one transaction; caller commits).
+
+    Only ``messages`` has a real FK to ``conversations`` (ON DELETE CASCADE). The
+    pipeline_runs subtree, feedback, surveys, and arena votes are joined by the plain
+    ``session_id`` string, so we delete them explicitly. Deleting a pipeline_run cascades
+    to its stage runs / sources / generation record via their ``run_id`` FK.
+    """
+    await session.execute(delete(ArenaVote).where(ArenaVote.session_id == conversation_id))
+    await session.execute(delete(MessageFeedback).where(MessageFeedback.session_id == conversation_id))
+    await session.execute(delete(SessionSurvey).where(SessionSurvey.session_id == conversation_id))
+    await session.execute(delete(PipelineRun).where(PipelineRun.session_id == conversation_id))
     await session.execute(delete(Conversation).where(Conversation.id == conversation_id))
+
+
+async def clear_conversation(session: AsyncSession, conversation_id: str) -> None:
+    """Deprecated alias — delegates to the full cascade deletion service."""
+    await delete_conversation_cascade(session, conversation_id)
+
+
+def conversation_owner_matches(
+    conversation: Conversation, *, user_id: str | None, guest_session_id: str | None
+) -> bool:
+    """True if the caller may act on this conversation.
+
+    User-owned → requires matching ``user_id``. Guest-owned → requires matching
+    ``guest_session_id``. Untagged (legacy / pre-frontend-token) → allowed (transition
+    policy; see the Stage 1b plan scope note).
+    """
+    if conversation.user_id is not None:
+        return user_id is not None and conversation.user_id == user_id
+    if conversation.guest_session_id is not None:
+        return guest_session_id is not None and conversation.guest_session_id == guest_session_id
+    return True
 
 
 async def create_pipeline_run(

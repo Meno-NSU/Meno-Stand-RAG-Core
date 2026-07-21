@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import text
 
-from meno_rag.api import arena, auth, feedback, guest, leaderboard
+from meno_rag.api import arena, auth, feedback, guest, history, leaderboard
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
@@ -49,7 +49,7 @@ from meno_rag.llm.openrouter_registry import OpenRouterRegistry
 from meno_rag.llm.router import LLMRouter
 from meno_rag.llm.status import InMemoryModelStatusStore, ModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
-from meno_rag.schemas import ChatCompletionRequest, ClearHistoryRequest, ClearHistoryResponse
+from meno_rag.schemas import ChatCompletionRequest
 from meno_rag.stand.pipeline import PipelineRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
 from meno_rag.stand.search import vectorize_search_query
@@ -299,6 +299,7 @@ def create_app() -> FastAPI:
     app.include_router(arena.router)
     app.include_router(auth.router)
     app.include_router(guest.router)
+    app.include_router(history.router)
     app.include_router(feedback.router)
     app.include_router(leaderboard.router)
     return app
@@ -607,15 +608,6 @@ async def list_knowledge_bases(request: Request):
         ],
         "default_selection": {"knowledge_base_id": KB_ID, "rag_engine_id": RAG_ENGINE_ID},
     }
-
-
-@app.post("/v1/chat/completions/clear_history", response_model=ClearHistoryResponse)
-async def clear_history(payload: ClearHistoryRequest, request: Request):
-    database: Database = request.app.state.database
-    async with database.sessionmaker() as session:
-        await repositories.clear_conversation(session, payload.chat_id)
-        await session.commit()
-    return ClearHistoryResponse(chat_id=payload.chat_id, status="ok")
 
 
 @app.post("/v1/chat/completions")
