@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -11,6 +11,7 @@ from meno_rag.db.orm import (
     ArenaVote,
     Conversation,
     GenerationRecord,
+    GuestSession,
     Message,
     MessageFeedback,
     PipelineRun,
@@ -358,6 +359,35 @@ async def update_user_nickname(session: AsyncSession, *, user_id: str, nickname:
     user.nickname = nickname
     user.updated_at = datetime.now(UTC)
     return user
+
+
+async def create_guest_session(
+    session: AsyncSession, *, secret_hash: str, ttl_days: int, now: datetime | None = None
+) -> GuestSession:
+    moment = now if now is not None else datetime.now(UTC)
+    guest = GuestSession(
+        secret_hash=secret_hash,
+        created_at=moment,
+        last_seen_at=moment,
+        expires_at=moment + timedelta(days=ttl_days),
+    )
+    session.add(guest)
+    await session.flush()
+    return guest
+
+
+async def get_guest_session_by_secret_hash(session: AsyncSession, secret_hash: str) -> GuestSession | None:
+    result = await session.execute(select(GuestSession).where(GuestSession.secret_hash == secret_hash))
+    return result.scalar_one_or_none()
+
+
+async def touch_guest_session(
+    session: AsyncSession, guest: GuestSession, *, ttl_days: int, now: datetime | None = None
+) -> GuestSession:
+    moment = now if now is not None else datetime.now(UTC)
+    guest.last_seen_at = moment
+    guest.expires_at = moment + timedelta(days=ttl_days)
+    return guest
 
 
 async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, Any]]:
