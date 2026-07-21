@@ -40,6 +40,7 @@ from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings
 from meno_rag.db import repositories
 from meno_rag.db.backup import backup_scheduler
+from meno_rag.db.orm import Conversation
 from meno_rag.db.session import Database
 from meno_rag.db.trace_store import TraceStore
 from meno_rag.db.trace_writer import TraceWriter
@@ -652,6 +653,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                 403, "This model requires signing in. Register or log in to use OpenRouter models.", "auth_required"
             )
         user_id = current_user.id if current_user is not None else None
+        guest_session = await guest.resolve_guest_session(request)
+        guest_session_id = guest_session.id if guest_session is not None else None
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created_ts = int(time.time())
@@ -685,6 +688,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     max_tokens=max_tokens,
                     temperature=temperature,
                     user_id=user_id,
+                    guest_session_id=guest_session_id,
                     on_finish=admission.release,
                     capture_trace=capture_trace,
                 ),
@@ -702,6 +706,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             max_tokens=max_tokens,
             temperature=temperature,
             user_id=user_id,
+            guest_session_id=guest_session_id,
             capture_trace=capture_trace,
         )
     finally:
@@ -734,6 +739,7 @@ async def _non_stream_response(
     max_tokens: int,
     temperature: float | None,
     user_id: str | None = None,
+    guest_session_id: str | None = None,
     capture_trace: bool = False,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
@@ -768,6 +774,7 @@ async def _non_stream_response(
             temperature=temperature,
             max_tokens=max_tokens,
             user_id=user_id,
+            guest_session_id=guest_session_id,
             trace_writer=request.app.state.trace_writer,
         )
     except Exception as exc:
@@ -843,6 +850,7 @@ async def _stream_response(
     max_tokens: int,
     temperature: float | None,
     user_id: str | None = None,
+    guest_session_id: str | None = None,
     on_finish: Callable[[], None] | None = None,
     capture_trace: bool = False,
 ):
@@ -939,6 +947,7 @@ async def _stream_response(
             temperature=temperature,
             max_tokens=max_tokens,
             user_id=user_id,
+            guest_session_id=guest_session_id,
             trace_writer=request.app.state.trace_writer,
         )
         metrics_mod.record_chat_request(
@@ -1044,6 +1053,7 @@ async def _persist_success(
     temperature: float | None,
     max_tokens: int,
     user_id: str | None = None,
+    guest_session_id: str | None = None,
     trace_writer: TraceWriter | None = None,
 ) -> None:
     trace = getattr(outcome, "trace", None)
@@ -1051,7 +1061,17 @@ async def _persist_success(
         trace_writer.enqueue(run_id=run_id, session_id=session_id, trace={**trace, "answer": answer})
     try:
         async with database.sessionmaker() as session:
-            await repositories.ensure_conversation(session, session_id, user_id=user_id)
+            existing = await session.get(Conversation, session_id)
+            if existing is not None and not repositories.conversation_owner_matches(
+                existing, user_id=user_id, guest_session_id=guest_session_id
+            ):
+                # Someone else's session_id (e.g. a spoofed payload.user) — do not
+                # write this turn into a conversation the caller doesn't own.
+                logger.warning("persist_ownership_conflict", request_id=run_id)
+                return
+            await repositories.ensure_conversation(
+                session, session_id, user_id=user_id, guest_session_id=guest_session_id
+            )
             await repositories.append_message(
                 session,
                 conversation_id=session_id,
