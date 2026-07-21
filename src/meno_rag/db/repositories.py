@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meno_rag.db.orm import (
     ArenaRating,
     ArenaVote,
+    ConsentEvent,
     Conversation,
     GenerationRecord,
     GuestSession,
@@ -426,6 +427,73 @@ async def touch_guest_session(
     guest.last_seen_at = moment
     guest.expires_at = moment + timedelta(days=ttl_days)
     return guest
+
+
+CONSENT_PURPOSES = ("SERVICE_AND_HISTORY", "ACCOUNT_REGISTRATION", "MENO_IMPROVEMENT")
+CONSENT_ACTIONS = ("granted", "revoked")
+
+
+async def record_consent_event(
+    session: AsyncSession,
+    *,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
+    purpose: str,
+    action: str,
+    document_kind: str,
+    document_version: str,
+    document_sha256: str,
+    source: str,
+) -> ConsentEvent:
+    """Append a consent event. Exactly one of user_id/guest_session_id at creation.
+
+    Owner columns are plain (no FK) and app-validated here — consistent with the
+    initiative's deletion-service approach; the deletion service handles consent
+    events on subject deletion.
+    """
+    if (user_id is None) == (guest_session_id is None):
+        raise ValueError("Exactly one of user_id / guest_session_id must be set.")
+    if purpose not in CONSENT_PURPOSES:
+        raise ValueError(f"Unknown consent purpose: {purpose!r}")
+    if action not in CONSENT_ACTIONS:
+        raise ValueError(f"Unknown consent action: {action!r}")
+    event = ConsentEvent(
+        user_id=user_id,
+        guest_session_id=guest_session_id,
+        purpose=purpose,
+        action=action,
+        document_kind=document_kind,
+        document_version=document_version,
+        document_sha256=document_sha256,
+        source=source,
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def current_consent_state(
+    session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None
+) -> dict[str, bool]:
+    """Resolve the latest granted/revoked action per purpose (append-only log)."""
+    state = {purpose: False for purpose in CONSENT_PURPOSES}
+    if user_id is not None:
+        clause = ConsentEvent.user_id == user_id
+    elif guest_session_id is not None:
+        clause = ConsentEvent.guest_session_id == guest_session_id
+    else:
+        return state
+    rows = (
+        await session.execute(
+            select(ConsentEvent.purpose, ConsentEvent.action)
+            .where(clause)
+            .order_by(ConsentEvent.created_at, ConsentEvent.id)
+        )
+    ).all()
+    for purpose, action in rows:
+        if purpose in state:
+            state[purpose] = action == "granted"
+    return state
 
 
 async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, Any]]:
