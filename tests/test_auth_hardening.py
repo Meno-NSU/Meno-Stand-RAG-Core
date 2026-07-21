@@ -25,17 +25,20 @@ def test_long_password_hashes_and_verifies():
     assert verify_password("p" * 72 + "EXTRA", h)
 
 
-def test_register_and_login_long_password(tmp_path):
+def test_register_rejects_password_over_72_bytes(tmp_path):
     db_path = tmp_path / "lp.sqlite3"
     assert run_bootstrap(f"sqlite:///{db_path}") == 0
     app = FastAPI()
     app.state.database = Database(f"sqlite+aiosqlite:///{db_path}")
     app.state.settings = Settings(AUTH_JWT_SECRET="x" * 32)
     app.include_router(router)
-    pw = "x" * 100
     with TestClient(app) as c:
-        assert c.post("/v1/auth/register", json={"email": "long@x.y", "password": pw}).status_code == 201
-        assert c.post("/v1/auth/login", json={"email": "long@x.y", "password": pw}).status_code == 200
+        # >72 bytes is rejected with a clear 422, not silently truncated (ТЗ §5.9)
+        assert c.post("/v1/auth/register", json={"email": "long@x.y", "password": "x" * 100}).status_code == 422
+        # a 72-byte password (the maximum) registers and can log back in
+        pw = "x" * 72
+        assert c.post("/v1/auth/register", json={"email": "ok@x.y", "password": pw}).status_code == 201
+        assert c.post("/v1/auth/login", json={"email": "ok@x.y", "password": pw}).status_code == 200
 
 
 # --- I1: AUTH_JWT_SECRET strength guard in check_runtime_safety ---
