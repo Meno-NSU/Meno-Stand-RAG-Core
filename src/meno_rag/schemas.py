@@ -92,6 +92,13 @@ class NicknameRequest(BaseModel):
     nickname: str = Field(..., min_length=1, max_length=64)
 
 
+class PrivacySettingsPatch(BaseModel):
+    document_version: str
+    service_and_history: bool
+    meno_improvement: bool
+    source: str | None = None
+
+
 class PipelineOutcome(BaseModel):
     question: str
     prepared_dialogue_history: str

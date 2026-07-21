@@ -200,3 +200,18 @@ class GuestSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ConsentEvent(Base):
+    __tablename__ = "consent_events"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uuid_hex)
+    user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    document_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    document_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
