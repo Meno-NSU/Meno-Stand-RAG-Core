@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class ChatMessage(BaseModel):
@@ -69,8 +69,18 @@ class SurveyRequest(BaseModel):
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(..., min_length=8, max_length=128)
+    password: str = Field(..., min_length=8)
     nickname: str | None = Field(default=None, max_length=64)
+
+    @field_validator("password")
+    @classmethod
+    def _password_within_bcrypt_limit(cls, value: str) -> str:
+        # bcrypt only uses the first 72 bytes; reject longer input with a clear
+        # error instead of silently truncating it (ТЗ §5.9). Byte length, not
+        # characters — a 36-char Cyrillic password is already 72 bytes.
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 bytes.")
+        return value
 
 
 class LoginRequest(BaseModel):
