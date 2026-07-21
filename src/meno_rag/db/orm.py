@@ -27,6 +27,7 @@ class Conversation(Base):
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

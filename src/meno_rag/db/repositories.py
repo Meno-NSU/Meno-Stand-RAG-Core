@@ -23,15 +23,21 @@ from meno_rag.db.orm import (
 
 
 async def ensure_conversation(
-    session: AsyncSession, conversation_id: str, *, user_id: str | None = None
+    session: AsyncSession,
+    conversation_id: str,
+    *,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
 ) -> Conversation:
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
-        conversation = Conversation(id=conversation_id, user_id=user_id)
+        conversation = Conversation(id=conversation_id, user_id=user_id, guest_session_id=guest_session_id)
         session.add(conversation)
         await session.flush()
     if user_id is not None:
         conversation.user_id = user_id
+    if guest_session_id is not None:
+        conversation.guest_session_id = guest_session_id
     conversation.updated_at = datetime.now(UTC)
     return conversation
 
