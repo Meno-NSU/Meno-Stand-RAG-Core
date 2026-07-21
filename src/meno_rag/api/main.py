@@ -1058,11 +1058,22 @@ async def _persist_success(
     guest_session_id: str | None = None,
     trace_writer: TraceWriter | None = None,
 ) -> None:
-    trace = getattr(outcome, "trace", None)
-    if trace_writer is not None and trace is not None:
-        trace_writer.enqueue(run_id=run_id, session_id=session_id, trace={**trace, "answer": answer})
     try:
         async with database.sessionmaker() as session:
+            # Consent gate (Stage 3): what we store depends only on the subject's
+            # recorded consent, never on whether they are registered.
+            #   service     → store the chat (conversation + messages)
+            #   improvement → additionally store the RAG pipeline detail + trace,
+            #                 and mark the conversation analysis_allowed
+            state = await repositories.current_consent_state(
+                session, user_id=user_id, guest_session_id=guest_session_id
+            )
+            service = state["SERVICE_AND_HISTORY"]
+            improvement = state["MENO_IMPROVEMENT"]
+            if not service:
+                # No consent to store the chat — nothing is written server-side.
+                return
+
             existing = await session.get(Conversation, session_id)
             if existing is not None and not repositories.conversation_owner_matches(
                 existing, user_id=user_id, guest_session_id=guest_session_id
@@ -1072,7 +1083,11 @@ async def _persist_success(
                 logger.warning("persist_ownership_conflict", request_id=run_id)
                 return
             await repositories.ensure_conversation(
-                session, session_id, user_id=user_id, guest_session_id=guest_session_id
+                session,
+                session_id,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                analysis_allowed=improvement,
             )
             await repositories.append_message(
                 session,
@@ -1092,57 +1107,64 @@ async def _persist_success(
                 knowledge_base_id=KB_ID,
                 request_id=run_id,
             )
-            await repositories.create_pipeline_run(
-                session,
-                run_id=run_id,
-                session_id=session_id,
-                model=model,
-                generation_model=generation_model,
-                core_model=core_model,
-                endpoint=endpoint,
-                knowledge_base_id=KB_ID,
-                user_question=question,
-                search_queries=outcome.search_queries,
-                total_ms=total_ms,
-                response_len=len(answer),
-                stream=stream,
-            )
-            await session.flush()  # ensure pipeline_run id is visible for generation_record FK
-            for stage, duration_ms in outcome.stage_durations_ms.items():
+
+            # Extended RAG pipeline records + the JSONL trace are analysis detail —
+            # stored only with the improvement opt-in.
+            if improvement:
+                trace = getattr(outcome, "trace", None)
+                if trace_writer is not None and trace is not None:
+                    trace_writer.enqueue(run_id=run_id, session_id=session_id, trace={**trace, "answer": answer})
+                await repositories.create_pipeline_run(
+                    session,
+                    run_id=run_id,
+                    session_id=session_id,
+                    model=model,
+                    generation_model=generation_model,
+                    core_model=core_model,
+                    endpoint=endpoint,
+                    knowledge_base_id=KB_ID,
+                    user_question=question,
+                    search_queries=outcome.search_queries,
+                    total_ms=total_ms,
+                    response_len=len(answer),
+                    stream=stream,
+                )
+                await session.flush()  # ensure pipeline_run id is visible for generation_record FK
+                for stage, duration_ms in outcome.stage_durations_ms.items():
+                    await repositories.add_pipeline_stage(
+                        session,
+                        run_id=run_id,
+                        stage=stage,
+                        status=StageStatus.COMPLETED,
+                        duration_ms=duration_ms,
+                        detail=outcome.stage_details.get(stage),
+                    )
                 await repositories.add_pipeline_stage(
                     session,
                     run_id=run_id,
-                    stage=stage,
+                    stage=StageName.GENERATION,
                     status=StageStatus.COMPLETED,
-                    duration_ms=duration_ms,
-                    detail=outcome.stage_details.get(stage),
+                    duration_ms=generation_ms,
+                    detail=None,
                 )
-            await repositories.add_pipeline_stage(
-                session,
-                run_id=run_id,
-                stage=StageName.GENERATION,
-                status=StageStatus.COMPLETED,
-                duration_ms=generation_ms,
-                detail=None,
-            )
-            await repositories.add_sources(session, run_id=run_id, sources=outcome.sources)
-            system_prompt, user_prompt = _extract_prompts(outcome.qa_messages)
-            await repositories.create_generation_record(
-                session,
-                run_id=run_id,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                dialogue_history=outcome.prepared_dialogue_history,
-                raw_completion=answer,
-                retrieved=outcome.retrieved,
-                fewshots=outcome.fewshots,
-                generation_params={
-                    "generation_model": generation_model,
-                    "core_model": core_model,
-                    "temperature": temperature,
-                    "max_output_tokens": max_tokens,
-                },
-            )
+                await repositories.add_sources(session, run_id=run_id, sources=outcome.sources)
+                system_prompt, user_prompt = _extract_prompts(outcome.qa_messages)
+                await repositories.create_generation_record(
+                    session,
+                    run_id=run_id,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    dialogue_history=outcome.prepared_dialogue_history,
+                    raw_completion=answer,
+                    retrieved=outcome.retrieved,
+                    fewshots=outcome.fewshots,
+                    generation_params={
+                        "generation_model": generation_model,
+                        "core_model": core_model,
+                        "temperature": temperature,
+                        "max_output_tokens": max_tokens,
+                    },
+                )
             await session.commit()
     except Exception as exc:
         # Persistence is best-effort: a successful answer was already produced/

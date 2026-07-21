@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from meno_rag.db import repositories
 from meno_rag.db.session import Database
 from meno_rag.schemas import PipelineOutcome
 
@@ -22,7 +23,26 @@ def _outcome() -> PipelineOutcome:
     )
 
 
-async def _persist(db, outcome):
+async def _grant(db, *, user_id=None, guest_session_id=None, service=True, improvement=True):
+    """Seed recorded consent so _persist_success actually stores the turn (Stage 3)."""
+    async with db.sessionmaker() as s:
+        for granted, purpose in ((service, "SERVICE_AND_HISTORY"), (improvement, "MENO_IMPROVEMENT")):
+            if granted:
+                await repositories.record_consent_event(
+                    s,
+                    user_id=user_id,
+                    guest_session_id=guest_session_id,
+                    purpose=purpose,
+                    action="granted",
+                    document_kind="personal_data_consent",
+                    document_version="1.0",
+                    document_sha256="x",
+                    source="test",
+                )
+        await s.commit()
+
+
+async def _persist(db, outcome, *, user_id=None, guest_session_id="g1", trace_writer=None):
     from meno_rag.api.main import _persist_success
 
     await _persist_success(
@@ -41,6 +61,9 @@ async def _persist(db, outcome):
         stream=False,
         temperature=0.1,
         max_tokens=4096,
+        user_id=user_id,
+        guest_session_id=guest_session_id,
+        trace_writer=trace_writer,
     )
 
 
@@ -51,6 +74,7 @@ async def test_persist_success_writes_generation_record(tmp_path):
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'p.sqlite3'}")
     await db.init_models()
     try:
+        await _grant(db, guest_session_id="g1")
         await _persist(db, _outcome())
         async with db.sessionmaker() as s:
             rec = await s.get(GenerationRecord, "r1")
@@ -75,26 +99,8 @@ async def test_persist_success_sets_conversation_user_id(tmp_path):
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'uid.sqlite3'}")
     await db.init_models()
     try:
-        from meno_rag.api.main import _persist_success
-
-        await _persist_success(
-            database=db,
-            run_id="r1",
-            session_id="sess",
-            model="m",
-            generation_model="m",
-            core_model="c",
-            endpoint="http://x/v1",
-            question=_outcome().question,
-            answer="A",
-            outcome=_outcome(),
-            generation_ms=1.0,
-            total_ms=2.0,
-            stream=False,
-            temperature=0.1,
-            max_tokens=4096,
-            user_id="u1",
-        )
+        await _grant(db, user_id="u1")
+        await _persist(db, _outcome(), user_id="u1", guest_session_id=None)
         async with db.sessionmaker() as s:
             uid = (await s.execute(text("SELECT user_id FROM conversations WHERE id='sess'"))).scalar_one()
         assert uid == "u1"
@@ -106,11 +112,10 @@ async def test_persist_success_sets_conversation_user_id(tmp_path):
 async def test_persist_success_is_non_fatal(tmp_path, monkeypatch):
     from sqlalchemy import text
 
-    from meno_rag.db import repositories
-
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'p2.sqlite3'}")
     await db.init_models()
     try:
+        await _grant(db, guest_session_id="g1")
 
         async def boom(*a, **k):
             raise RuntimeError("db down")
@@ -134,32 +139,14 @@ class _SpyWriter:
 
 @pytest.mark.asyncio
 async def test_persist_success_enqueues_trace_with_answer(tmp_path):
-    from meno_rag.api.main import _persist_success
-
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'tr.sqlite3'}")
     await db.init_models()
     writer = _SpyWriter()
     outcome = _outcome()
     outcome.trace = {"question": "Q?", "rerank": {"scored_candidates": 1}}
     try:
-        await _persist_success(
-            database=db,
-            run_id="r1",
-            session_id="sess",
-            model="m",
-            generation_model="m",
-            core_model="c",
-            endpoint="http://x/v1",
-            question=outcome.question,
-            answer="THE ANSWER",
-            outcome=outcome,
-            generation_ms=1.0,
-            total_ms=2.0,
-            stream=False,
-            temperature=0.1,
-            max_tokens=4096,
-            trace_writer=writer,
-        )
+        await _grant(db, guest_session_id="g1")
+        await _persist(db, outcome, trace_writer=writer)
     finally:
         await db.close()
     assert len(writer.calls) == 1
@@ -170,30 +157,12 @@ async def test_persist_success_enqueues_trace_with_answer(tmp_path):
 
 @pytest.mark.asyncio
 async def test_persist_success_no_enqueue_without_trace(tmp_path):
-    from meno_rag.api.main import _persist_success
-
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'tr2.sqlite3'}")
     await db.init_models()
     writer = _SpyWriter()
     try:
-        await _persist_success(
-            database=db,
-            run_id="r1",
-            session_id="sess",
-            model="m",
-            generation_model="m",
-            core_model="c",
-            endpoint="http://x/v1",
-            question="Q?",
-            answer="A",
-            outcome=_outcome(),
-            generation_ms=1.0,
-            total_ms=2.0,
-            stream=False,
-            temperature=0.1,
-            max_tokens=4096,
-            trace_writer=writer,
-        )
+        await _grant(db, guest_session_id="g1")
+        await _persist(db, _outcome(), trace_writer=writer)
     finally:
         await db.close()
     assert writer.calls == []  # _outcome() has trace=None

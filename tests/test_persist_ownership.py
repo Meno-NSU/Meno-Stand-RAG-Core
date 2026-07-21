@@ -22,6 +22,24 @@ def _outcome() -> PipelineOutcome:
     )
 
 
+async def _grant(db, *, user_id=None, guest_session_id=None):
+    """Seed service + improvement consent so _persist_success stores the turn (Stage 3)."""
+    async with db.sessionmaker() as s:
+        for purpose in ("SERVICE_AND_HISTORY", "MENO_IMPROVEMENT"):
+            await repositories.record_consent_event(
+                s,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                purpose=purpose,
+                action="granted",
+                document_kind="personal_data_consent",
+                document_version="1.0",
+                document_sha256="x",
+                source="test",
+            )
+        await s.commit()
+
+
 async def _persist(db, *, session_id, user_id=None, guest_session_id=None):
     from meno_rag.api.main import _persist_success
 
@@ -50,6 +68,7 @@ async def test_persist_tags_guest_session_id(tmp_path):
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'g.sqlite3'}")
     await db.init_models()
     try:
+        await _grant(db, guest_session_id="g1")
         await _persist(db, session_id="sess", guest_session_id="g1")
         async with db.sessionmaker() as s:
             gid = (await s.execute(text("SELECT guest_session_id FROM conversations WHERE id='sess'"))).scalar_one()
@@ -66,7 +85,9 @@ async def test_persist_skips_on_owner_conflict(tmp_path):
         async with db.sessionmaker() as s:
             await repositories.ensure_conversation(s, "sess", user_id="victim")
             await s.commit()
-        # attacker replays the victim's session_id (spoofed payload.user)
+        # attacker HAS consent but replays the victim's session_id (spoofed payload.user) —
+        # the ownership check (not the consent gate) must stop this.
+        await _grant(db, user_id="attacker")
         await _persist(db, session_id="sess", user_id="attacker")
         async with db.sessionmaker() as s:
             owner = (await s.execute(text("SELECT user_id FROM conversations WHERE id='sess'"))).scalar_one()

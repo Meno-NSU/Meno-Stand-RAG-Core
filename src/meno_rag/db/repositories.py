@@ -29,16 +29,26 @@ async def ensure_conversation(
     *,
     user_id: str | None = None,
     guest_session_id: str | None = None,
+    analysis_allowed: bool | None = None,
 ) -> Conversation:
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None:
-        conversation = Conversation(id=conversation_id, user_id=user_id, guest_session_id=guest_session_id)
+        conversation = Conversation(
+            id=conversation_id,
+            user_id=user_id,
+            guest_session_id=guest_session_id,
+            analysis_allowed=bool(analysis_allowed),
+        )
         session.add(conversation)
         await session.flush()
     if user_id is not None:
         conversation.user_id = user_id
     if guest_session_id is not None:
         conversation.guest_session_id = guest_session_id
+    # Only touch analysis_allowed when explicitly provided, so append_message's
+    # bare ensure_conversation call doesn't reset the flag the caller just set.
+    if analysis_allowed is not None:
+        conversation.analysis_allowed = analysis_allowed
     conversation.updated_at = datetime.now(UTC)
     return conversation
 
