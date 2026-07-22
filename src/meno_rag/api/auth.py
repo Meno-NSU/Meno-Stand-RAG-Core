@@ -85,15 +85,32 @@ def requires_auth_for_model(provider: str, *, auth_enabled: bool, authenticated:
     return auth_enabled and provider == "openrouter" and not authenticated
 
 
+def _auth_token(request: Request) -> str | None:
+    """The app's JWT, preferring ``X-Auth-Token`` over ``Authorization: Bearer``.
+
+    The public edge gates the whole site with HTTP Basic Auth, which occupies the
+    Authorization header. A browser putting the JWT there would replace the gate
+    credentials and get 401-stormed by nginx, so the frontend sends X-Auth-Token.
+    Bearer stays supported for API clients and existing callers.
+    """
+    token = request.headers.get("x-auth-token", "").strip()
+    if token:
+        return token
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip() or None
+    return None
+
+
 async def resolve_optional_user(request: Request) -> User | None:
-    """Return the authenticated User from a Bearer token, or None. Never raises."""
+    """Return the authenticated User from the app's auth token, or None. Never raises."""
     settings = request.app.state.settings
     if not settings.auth_enabled:
         return None
-    header = request.headers.get("authorization", "")
-    if not header.lower().startswith("bearer "):
+    token = _auth_token(request)
+    if token is None:
         return None
-    user_id = decode_access_token(header[7:].strip(), secret=settings.auth_jwt_secret)
+    user_id = decode_access_token(token, secret=settings.auth_jwt_secret)
     if user_id is None:
         return None
     async with request.app.state.database.sessionmaker() as session:
