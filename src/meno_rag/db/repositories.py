@@ -160,15 +160,10 @@ async def list_subject_conversations(
 
 
 async def get_conversation_messages(session: AsyncSession, conversation_id: str) -> list[Message]:
-    return (
-        (
-            await session.execute(
-                select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)
-            )
-        )
-        .scalars()
-        .all()
+    result = await session.execute(
+        select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)
     )
+    return list(result.scalars().all())
 
 
 def conversation_owner_matches(
