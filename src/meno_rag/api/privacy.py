@@ -86,6 +86,14 @@ async def patch_settings(payload: PrivacySettingsPatch, request: Request):
                 document_sha256=sha256,
                 source=source,
             )
+            # Retroactive consent: bring the subject's already-stored dialogues in or out
+            # of analysis eligibility to match the new choice (symmetric on withdrawal).
+            await repositories.set_subject_conversations_analysis_allowed(
+                session,
+                user_id=user_id,
+                guest_session_id=guest_id,
+                allowed=payload.meno_improvement,
+            )
         await session.commit()
         new_state = await repositories.current_consent_state(session, user_id=user_id, guest_session_id=guest_id)
     return _public_state(new_state)

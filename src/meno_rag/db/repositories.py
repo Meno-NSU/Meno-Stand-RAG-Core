@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meno_rag.db.orm import (
@@ -157,6 +157,23 @@ async def list_subject_conversations(
         ).scalar_one_or_none()
         items.append({"id": conversation.id, "updated_at": conversation.updated_at, "preview": (preview or "")[:80]})
     return items
+
+
+async def set_subject_conversations_analysis_allowed(
+    session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None, allowed: bool
+) -> int:
+    """Flip ``analysis_allowed`` on all of a subject's existing conversations; returns the
+    count updated. Backs retroactive consent: granting MENO_IMPROVEMENT makes already-stored
+    dialogues analysis-eligible, revoking it takes them back out (symmetric). Exactly one id."""
+    if (user_id is None) == (guest_session_id is None):
+        raise ValueError("Exactly one of user_id / guest_session_id must be set.")
+    clause = (
+        Conversation.user_id == user_id if user_id is not None else Conversation.guest_session_id == guest_session_id
+    )
+    ids = list((await session.execute(select(Conversation.id).where(clause))).scalars().all())
+    if ids:
+        await session.execute(update(Conversation).where(clause).values(analysis_allowed=allowed))
+    return len(ids)
 
 
 async def get_conversation_messages(session: AsyncSession, conversation_id: str) -> list[Message]:
