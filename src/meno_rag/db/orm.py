@@ -47,6 +47,11 @@ class Message(Base):
     model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     knowledge_base_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    # The sources shown to the user under this answer, in display order. Part of the
+    # answer itself, so it is stored whenever the conversation is — unlike the `sources`
+    # table, which hangs off `pipeline_runs` and therefore only exists with the
+    # improvement opt-in.
+    sources: Mapped[list | dict | None] = mapped_column(JsonCompat, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")

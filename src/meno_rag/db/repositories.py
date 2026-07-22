@@ -62,6 +62,7 @@ async def append_message(
     model: str | None = None,
     knowledge_base_id: str | None = None,
     request_id: str | None = None,
+    sources: list[dict[str, str]] | None = None,
 ) -> None:
     await ensure_conversation(session, conversation_id)
     session.add(
@@ -72,6 +73,7 @@ async def append_message(
             model=model,
             knowledge_base_id=knowledge_base_id,
             request_id=request_id,
+            sources=sources,
         )
     )
 
