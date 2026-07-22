@@ -295,94 +295,112 @@ git commit -m "feat(history): store the sources shown under an answer on the mes
 
 Append to `tests/test_message_sources.py`:
 
+Drive `_persist_success` the way `tests/test_persist_consent.py` already does — a real
+`PipelineOutcome` and consent recorded through `record_consent_event`. Not a `SimpleNamespace`
+with a monkeypatched consent state: pydantic is what catches a regression to the pre-
+`flatten_sources` shape (`source_urls`, plural and a list), and a faked consent state means a
+change in how consent resolves cannot fail this test.
+
 ```python
-from types import SimpleNamespace
-
-from meno_rag.api.main import _persist_success
-
-
-async def _persist(db, *, improvement: bool, monkeypatch):
-    """Drive _persist_success with a fixed consent state and a minimal outcome."""
-    from meno_rag.db import repositories as repos
-
-    async def fake_state(session, *, user_id=None, guest_session_id=None):
-        return {"SERVICE_AND_HISTORY": True, "MENO_IMPROVEMENT": improvement}
-
-    monkeypatch.setattr(repos, "current_consent_state", fake_state)
-
-    outcome = SimpleNamespace(
+def _outcome() -> PipelineOutcome:
+    return PipelineOutcome(
         question="q",
+        prepared_dialogue_history="HIST",
+        search_queries=["q"],
+        context="CTX",
         sources=[{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}],
-        search_queries=[],
-        stage_durations_ms={},
-        stage_details={},
-        qa_messages=[],
-        prepared_dialogue_history=None,
-        retrieved=[],
-        fewshots=[],
-        trace=None,
+        qa_messages=[{"role": "system", "content": "SYS"}, {"role": "user", "content": "PROMPT"}],
     )
+
+
+async def _grant(db, *, guest_session_id: str, improvement: bool) -> None:
+    async with db.sessionmaker() as s:
+        for granted, purpose in ((True, "SERVICE_AND_HISTORY"), (improvement, "MENO_IMPROVEMENT")):
+            if granted:
+                await repositories.record_consent_event(
+                    s,
+                    guest_session_id=guest_session_id,
+                    purpose=purpose,
+                    action="granted",
+                    document_kind="personal_data_consent",
+                    document_version="1.0",
+                    document_sha256="x",
+                    source="test",
+                )
+        await s.commit()
+
+
+async def _persist(db, *, guest_session_id: str = "g1", session_id: str = "c1") -> None:
     await _persist_success(
         database=db,
         run_id="run-1",
-        session_id="c1",
+        session_id=session_id,
         model="m",
         generation_model="m",
         core_model="m",
         endpoint="http://x",
         question="q",
         answer="a",
-        outcome=outcome,
+        outcome=_outcome(),
         generation_ms=1.0,
         total_ms=2.0,
         stream=False,
         temperature=None,
         max_tokens=10,
+        guest_session_id=guest_session_id,
     )
 
 
 @pytest.mark.parametrize("improvement", [False, True])
 @pytest.mark.asyncio
-async def test_shown_sources_persist_regardless_of_the_improvement_optin(
-    tmp_path, monkeypatch, improvement
-):
+async def test_shown_sources_persist_regardless_of_the_improvement_optin(tmp_path, improvement):
     """The whole point of this column: declining the improvement opt-in must not erase
     what the user was shown. Before this change the only copy hung off pipeline_runs,
     which is created only inside `if improvement:`."""
     db = Database(f"sqlite+aiosqlite:///{tmp_path / f'p{improvement}.sqlite3'}")
     await db.init_models()
     try:
-        await _persist(db, improvement=improvement, monkeypatch=monkeypatch)
+        await _grant(db, guest_session_id="g1", improvement=improvement)
+        await _persist(db)
 
         async with db.sessionmaker() as s:
             messages = await repositories.get_conversation_messages(s, "c1")
         assistant = [m for m in messages if m.role == "assistant"]
         assert len(assistant) == 1
-        assert assistant[0].sources == [
-            {"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}
-        ]
+        assert assistant[0].sources == [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
     finally:
         await db.close()
 
 
 @pytest.mark.asyncio
-async def test_only_the_shown_title_and_link_are_stored_on_the_message(tmp_path, monkeypatch):
-    """The message copy survives withdrawal of the improvement consent, so it must not carry
-    retrieval content — chunk text, scores — that Цель 3 gates."""
-    from meno_rag.api.main import _shown_sources
+async def test_only_the_shown_title_and_link_are_stored_on_the_message(tmp_path):
+    """The message copy is written under the service consent alone (Цель 1), so it must not
+    carry retrieval content — chunk text, relevance scores — that Цель 3 gates."""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'proj.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            await repositories.append_message(
+                s,
+                conversation_id="c1",
+                role="assistant",
+                content="ans",
+                sources=[
+                    {
+                        "document_title": "Устав НГУ",
+                        "source_url": "https://nsu.ru/ustav",
+                        "chunk": "полный текст фрагмента",
+                        "score": "0.93",
+                    }
+                ],
+            )
+            await s.commit()
 
-    assert _shown_sources(
-        [
-            {
-                "document_title": "Устав НГУ",
-                "source_url": "https://nsu.ru/ustav",
-                "chunk": "полный текст фрагмента",
-                "score": "0.93",
-            }
-        ]
-    ) == [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
-    assert _shown_sources(None) == []
-    assert _shown_sources([{}]) == [{"document_title": "", "source_url": ""}]
+        async with db.sessionmaker() as s:
+            messages = await repositories.get_conversation_messages(s, "c1")
+        assert messages[0].sources == [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
+    finally:
+        await db.close()
 ```
 
 - [ ] **Step 2: Run the test and watch it fail**
@@ -394,27 +412,39 @@ uv run --frozen pytest tests/test_message_sources.py -v -k improvement_optin
 Expected: FAIL — `assert None == [{'document_title': ...}]` for both parameters. Sources
 are never written to the message today.
 
-- [ ] **Step 3: Pass the sources through, projected to what was shown**
+- [ ] **Step 3: Project stored sources at the storage boundary, then pass them through**
 
-In `src/meno_rag/api/main.py`, add a helper next to `_extract_prompts` (above
-`_persist_success`):
+The projection belongs in the repository layer, not at the call site: Task 8 writes
+`Message(...)` directly for arena turns and would otherwise walk straight around it.
+
+In `src/meno_rag/db/repositories.py`, near `append_message`:
 
 ```python
-def _shown_sources(sources: list[dict[str, str]] | None) -> list[dict[str, str]]:
-    """Just the title and link the user saw, mirroring what `add_sources` keeps.
+def shown_source_refs(sources: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Only the title and the link — the fields Цель 1 (сервисная обработка) covers.
 
-    The message copy outlives the analytics copy — it survives withdrawal of the improvement
-    consent — so it must never accumulate retrieval content such as chunk text or scores,
-    which Цель 3 gates. Projecting here keeps that structural instead of conventional.
+    Durable conversation records are written under the service consent alone, so they must
+    never accumulate retrieval content such as chunk text or relevance scores, which Цель 3
+    gates. Applied at the storage boundary so no caller can bypass it.
     """
     return [
         {
             "document_title": source.get("document_title") or "",
             "source_url": source.get("source_url") or "",
         }
-        for source in (sources or [])
+        for source in sources
     ]
 ```
+
+In `append_message`, project what you are handed while preserving the `None`/`[]` distinction
+— `None` means "not recorded", `[]` means "answered, nothing retrieved":
+
+```python
+            sources=None if sources is None else shown_source_refs(sources),
+```
+
+Have `add_sources` use the same helper instead of re-deriving the same coercion inline; its
+stored rows must come out identical to before — verify, don't assume.
 
 Then in the assistant-message call inside `_persist_success` (currently lines 1102-1110), add
 the `sources` argument:
@@ -430,7 +460,7 @@ the `sources` argument:
                 request_id=run_id,
                 # Outside the `if improvement:` block below on purpose: these are the
                 # sources the user was shown, part of the answer, not analytics.
-                sources=_shown_sources(outcome.sources),
+                sources=outcome.sources,
             )
 ```
 
@@ -1379,13 +1409,16 @@ async def append_arena_turn(
         analysis_allowed=analysis_allowed,
     )
     await append_message(session, conversation_id=conversation_id, role="user", content=question)
+    # Same allow-list as an ordinary answer: this row is written under the service consent,
+    # so a side's sources may carry only the title and the link (Цель 1).
+    stored = [{**side, "sources": shown_source_refs(side.get("sources") or [])} for side in sides]
     session.add(
         Message(
             conversation_id=conversation_id,
             role="assistant",
-            content=sides[0]["content"],
+            content=stored[0]["content"],
             turn_kind="arena",
-            arena={"turn_index": turn_index, "winner": None, "sides": sides},
+            arena={"turn_index": turn_index, "winner": None, "sides": stored},
         )
     )
 ```
