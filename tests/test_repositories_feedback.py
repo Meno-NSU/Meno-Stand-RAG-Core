@@ -77,3 +77,46 @@ async def test_upsert_survey_inserts_then_updates(tmp_path):
         assert rows[0].answer == "yes"
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_get_conversation_feedback_is_scoped_to_the_caller(tmp_path):
+    """Feedback is keyed by (run_id, session_id) with no ownership check on write, so the
+    read must not hand one subject another subject's rating on the same run."""
+    from meno_rag.db import repositories
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'fb.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            await repositories.upsert_message_feedback(
+                s, run_id="run-1", session_id="c1", value="up", comment="Полезно", user_id="u1"
+            )
+            await repositories.upsert_message_feedback(
+                s, run_id="run-2", session_id="c1", value="down", user_id="u2"
+            )
+            await s.commit()
+
+        async with db.sessionmaker() as s:
+            mine = await repositories.get_conversation_feedback(s, conversation_id="c1", user_id="u1")
+        assert mine == {"run-1": {"rating": "up", "comment": "Полезно"}}
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_get_conversation_feedback_for_a_guest_reads_untagged_rows(tmp_path):
+    from meno_rag.db import repositories
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'fb2.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            await repositories.upsert_message_feedback(s, run_id="run-1", session_id="c1", value="up")
+            await s.commit()
+
+        async with db.sessionmaker() as s:
+            got = await repositories.get_conversation_feedback(s, conversation_id="c1", user_id=None)
+        assert got == {"run-1": {"rating": "up", "comment": None}}
+    finally:
+        await db.close()

@@ -346,6 +346,33 @@ async def clear_message_feedback(session: AsyncSession, *, run_id: str, session_
     return result.rowcount or 0  # type: ignore[attr-defined]
 
 
+async def get_conversation_feedback(
+    session: AsyncSession, *, conversation_id: str, user_id: str | None = None
+) -> dict[str, dict[str, str | None]]:
+    """The caller's ratings in this conversation, keyed by run_id.
+
+    `session_id` alone is not a sufficient filter: the feedback write path does not check
+    conversation ownership, so a third party can leave a row under someone else's
+    session_id. An authenticated caller sees only rows tagged with their user_id; a guest
+    sees only untagged rows (guests are never tagged on write).
+    """
+    clause = MessageFeedback.user_id == user_id if user_id is not None else MessageFeedback.user_id.is_(None)
+    rows = (
+        (await session.execute(select(MessageFeedback).where(MessageFeedback.session_id == conversation_id, clause)))
+        .scalars()
+        .all()
+    )
+    return {row.run_id: {"rating": row.value, "comment": row.comment} for row in rows}
+
+
+async def get_session_survey(session: AsyncSession, *, conversation_id: str) -> dict[str, str] | None:
+    """The end-of-session survey answer for this conversation, or None if unanswered."""
+    survey = (
+        await session.execute(select(SessionSurvey).where(SessionSurvey.session_id == conversation_id))
+    ).scalar_one_or_none()
+    return None if survey is None else {"answer": survey.answer}
+
+
 async def upsert_session_survey(
     session: AsyncSession,
     *,
