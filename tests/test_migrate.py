@@ -86,7 +86,7 @@ def test_run_bootstrap_tracked_db_advances_to_head(tmp_path):
         engine.dispose()
     assert "generation_model" in cols_after
     assert "core_model" in cols_after
-    assert rev == "0012_conversations_analysis_allowed"
+    assert rev == "0012_conv_analysis_allowed"
 
 
 def test_run_bootstrap_untracked_db_fails_with_diagnostic(tmp_path, capsys):
@@ -189,3 +189,30 @@ def test_main_reads_database_url_env_and_runs_bootstrap(tmp_path, monkeypatch):
         engine.dispose()
     assert "alembic_version" in tables
     assert "conversations" in tables
+
+
+# alembic_version.version_num is VARCHAR(32) by default. PostgreSQL enforces that;
+# SQLite does not — so an over-long revision id passes the whole test suite and only
+# blows up on a real deploy (StringDataRightTruncation while stamping the version).
+ALEMBIC_VERSION_NUM_LIMIT = 32
+
+
+def _declared_revision_id(path: Path) -> str | None:
+    """The `revision = "..."` value declared in a migration module (not down_revision)."""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("revision") and "=" in stripped:
+            return stripped.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def test_revision_ids_fit_the_alembic_version_column():
+    too_long = {}
+    for path in sorted((REPO_ROOT / "alembic" / "versions").glob("*.py")):
+        revision_id = _declared_revision_id(path)
+        if revision_id and len(revision_id) > ALEMBIC_VERSION_NUM_LIMIT:
+            too_long[path.name] = f"{revision_id} ({len(revision_id)} chars)"
+    assert not too_long, (
+        f"revision ids exceed alembic_version.version_num VARCHAR({ALEMBIC_VERSION_NUM_LIMIT}) "
+        f"and will fail on PostgreSQL: {too_long}"
+    )

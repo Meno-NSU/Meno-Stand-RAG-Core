@@ -1,6 +1,6 @@
 """conversations.analysis_allowed
 
-Revision ID: 0012_conversations_analysis_allowed
+Revision ID: 0012_conv_analysis_allowed
 Revises: 0011_consent_events
 Create Date: 2026-07-22
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0012_conversations_analysis_allowed"
+revision = "0012_conv_analysis_allowed"
 down_revision = "0011_consent_events"
 branch_labels = None
 depends_on = None
