@@ -106,13 +106,22 @@ JSON on the message rather than a second table: sources are only ever read back 
 with their message and nothing queries across them, so a table would add a join and a
 second write path for no benefit.
 
-**The analytics `sources` table stays, for now.** It holds the same list, so the message
-copy makes it redundant on content — but not on lifecycle: it cascades away with its
-`pipeline_run` when the improvement consent is withdrawn or retention expires, which is
-right for an analytics record and wrong for conversation history. Rendering a conversation
-out of it would make the conversation's appearance depend on a consent the user can revoke.
-Whether to drop it afterwards is a separate question — `generation_records.retrieved`
-already holds the fuller retrieval set that analysis actually needs. See follow-ups.
+**The analytics `sources` table stays, for now.** It holds the same list, so the message copy
+makes it redundant on content.
+
+What separates the two copies is the **write gate, not the lifetime**. The analytics copy is
+only ever written under the improvement consent, so a conversation rendered out of it has no
+sources at all for anyone who declined — the bug this spec exists to fix. Deletion does not
+separate them: withdrawing the improvement consent deletes nothing (it records a `revoked`
+event and flips `conversations.analysis_allowed`), and retention and erasure both run
+`delete_conversation_cascade`, which removes the messages and the `pipeline_runs` subtree in
+the same transaction. Neither copy outlives the other.
+
+The message copy therefore carries only what Цель 1 (сервисная обработка) covers —
+«показанные источники», the title and the link. It must not accumulate retrieval content such
+as chunk text or relevance scores, which Цель 3 gates; the write path projects to those two
+fields for that reason. Whether to drop the analytics table afterwards is a separate question
+— `generation_records.retrieved` already holds the fuller retrieval set analysis needs.
 
 **Arena turns** — `messages` gains `turn_kind` (`'answer' | 'arena'`, defaulting to
 `'answer'`) and a nullable `arena` JSON column holding both sides and the winner. One
@@ -187,7 +196,9 @@ covers the remainder):
   visible it is.
 - Retrieval-set storage (Цель 3) is unchanged and stays improvement-gated.
 - Guest conversations are not adopted into an account on sign-in (decided 2026-07-23).
-- **Dropping the analytics `sources` table.** Once messages carry the shown sources it
-  holds nothing unique — the same list on the conversation side, the fuller retrieval set
-  in `generation_records.retrieved`. Removing it means checking the JSONL export and any
-  analytics queries that read it, so it is its own change, not a rider on phase 1.
+- **Dropping the analytics `sources` table.** Once messages carry the shown sources it holds
+  nothing unique — the same list on the conversation side, the fuller retrieval set in
+  `generation_records.retrieved` — and code review during phase 1 found it has no readers at
+  all: `SourceRecord` is referenced only by its own declaration, the `PipelineRun.sources`
+  relationship, and `add_sources`. The JSONL export does not touch it. That makes removal
+  smaller than first assumed, but it is still its own change, not a rider on phase 1.
