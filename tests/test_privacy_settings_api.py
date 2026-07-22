@@ -93,3 +93,22 @@ def test_revoking_service_requires_deletion(client):
 
 def test_no_subject_is_401(client):
     assert client.get("/v1/privacy/settings").status_code == 401
+
+
+def test_delete_data_erases_guest(client):
+    h = _guest_headers(client)
+    client.patch(
+        "/v1/privacy/settings",
+        headers=h,
+        json={"document_version": "1.0", "service_and_history": True, "meno_improvement": True},
+    )
+    assert client.get("/v1/privacy/settings", headers=h).json()["service_and_history"] is True
+
+    r = client.delete("/v1/privacy/data", headers=h)
+    assert r.status_code == 200
+    # the guest session row is gone → the token no longer resolves to a subject
+    assert client.get("/v1/privacy/settings", headers=h).status_code == 401
+
+
+def test_delete_data_requires_subject(client):
+    assert client.delete("/v1/privacy/data").status_code == 401
