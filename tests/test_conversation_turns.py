@@ -106,3 +106,31 @@ def test_turns_carry_content_model_request_id_and_sources(client, db_path):
     assert answer["model"] == "qwen"
     assert answer["request_id"] == "run-1"
     assert answer["sources"] == SOURCES
+
+
+def test_feedback_and_survey_come_back_on_restore(client, db_path):
+    headers = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
+
+    client.post(
+        "/v1/feedback",
+        json={"completion_id": "run-1", "session_id": "c1", "value": "up", "comment": "Полезно"},
+        headers=headers,
+    )
+    client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "yes"}, headers=headers)
+
+    body = client.get("/v1/conversations/c1", headers=headers).json()
+
+    assert body["survey"] == {"answer": "yes"}
+    assert body["turns"][1]["feedback"] == {"rating": "up", "comment": "Полезно"}
+    assert body["turns"][0].get("feedback") is None  # user turns carry no rating
+
+
+def test_unrated_answer_and_unanswered_survey_are_null(client, db_path):
+    headers = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
+
+    body = client.get("/v1/conversations/c1", headers=headers).json()
+
+    assert body["survey"] is None
+    assert body["turns"][1]["feedback"] is None

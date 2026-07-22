@@ -26,8 +26,9 @@ async def _resolve_subject(request: Request) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _serialize_turn(message: Message) -> dict:
-    """One rendered turn. `sources` is always a list so clients never branch on null."""
+def _serialize_turn(message: Message, feedback: dict[str, dict]) -> dict:
+    """One rendered turn. `sources` is always a list so clients never branch on null;
+    `feedback` is nullable because an unrated answer is genuinely unrated."""
     if message.role == "user":
         return {
             "kind": "user",
@@ -41,6 +42,7 @@ def _serialize_turn(message: Message) -> dict:
         "model": message.model,
         "request_id": message.request_id,
         "sources": message.sources or [],
+        "feedback": feedback.get(message.request_id) if message.request_id else None,
         "created_at": message.created_at.isoformat(),
     }
 
@@ -89,7 +91,12 @@ async def get_conversation(conversation_id: str, request: Request):
         ):
             raise HTTPException(status_code=404, detail="Conversation not found.")
         messages = await repositories.get_conversation_messages(session, conversation_id)
+        feedback = await repositories.get_conversation_feedback(
+            session, conversation_id=conversation_id, user_id=user_id
+        )
+        survey = await repositories.get_session_survey(session, conversation_id=conversation_id)
     return {
         "id": conversation_id,
-        "turns": [_serialize_turn(m) for m in messages],
+        "survey": survey,
+        "turns": [_serialize_turn(m, feedback) for m in messages],
     }
