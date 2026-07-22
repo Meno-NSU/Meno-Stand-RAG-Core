@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     max_concurrent_chats: int = Field(default=256, validation_alias="MAX_CONCURRENT_CHATS")
     # Retention window in days for the retention CLI; <= 0 disables it (no data deleted).
     retention_days: int = Field(default=0, validation_alias="RETENTION_DAYS")
+    # Allowed browser origins for CORS (comma-separated); empty → permissive "*". Prod sets
+    # this to the real origin(s) to lock the API down.
+    cors_allow_origins: str = Field(default="", validation_alias="CORS_ALLOW_ORIGINS")
 
     rewrite_concurrency: int = Field(default=32, validation_alias="REWRITE_CONCURRENCY")
     rerank_concurrency: int = Field(default=64, validation_alias="RERANK_CONCURRENCY")
@@ -250,3 +253,10 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def parse_cors_origins(raw: str) -> list[str]:
+    """Comma-separated CORS origins → list; empty → ["*"] (permissive default). Prod sets
+    CORS_ALLOW_ORIGINS to the real origin(s) to lock the API's browser callers down."""
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or ["*"]
