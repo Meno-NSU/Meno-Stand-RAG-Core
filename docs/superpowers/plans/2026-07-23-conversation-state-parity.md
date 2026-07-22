@@ -47,6 +47,21 @@ ORM (`JsonCompat = JSON().with_variant(JSONB, "postgresql")`, defined at
 `src/meno_rag/db/orm.py:22`). Copy that pattern — `pipeline_runs.search_queries` does the
 same thing.
 
+Two inherited properties of `JsonCompat` worth knowing before you rely on them:
+
+- It uses the default `none_as_null=False`, so a Python `None` is stored as the JSON scalar
+  `null`, not SQL NULL. Reads are unaffected — both come back as `None` — but a SQL-level
+  `WHERE … IS NULL` will not find those rows. Changing that means changing `JsonCompat`
+  repo-wide, which is its own decision, not part of this plan.
+- On PostgreSQL the ORM says `JSONB` while the migration says `JSON`, so the live column is
+  `json`. Do not write queries that use `jsonb` operators against it. This is why Task 9
+  matches arena turns in Python instead of querying inside the column.
+
+**Tests that only use `Database.init_models()` do not exercise Alembic at all** — they build
+tables straight from `Base.metadata`. Every task here that adds a column must also assert the
+column exists after `run_bootstrap`, or a wrong migration passes the whole suite and the
+column is missing in production. `tests/test_generation_records_schema.py:12` is the pattern.
+
 **Consent vocabulary** (`_persist_success`, `src/meno_rag/api/main.py:1061`):
 
 - `service` = `SERVICE_AND_HISTORY` — may we store the chat at all. If false, nothing is
@@ -348,6 +363,26 @@ async def test_shown_sources_persist_regardless_of_the_improvement_optin(
         ]
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_only_the_shown_title_and_link_are_stored_on_the_message(tmp_path, monkeypatch):
+    """The message copy survives withdrawal of the improvement consent, so it must not carry
+    retrieval content — chunk text, scores — that Цель 3 gates."""
+    from meno_rag.api.main import _shown_sources
+
+    assert _shown_sources(
+        [
+            {
+                "document_title": "Устав НГУ",
+                "source_url": "https://nsu.ru/ustav",
+                "chunk": "полный текст фрагмента",
+                "score": "0.93",
+            }
+        ]
+    ) == [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
+    assert _shown_sources(None) == []
+    assert _shown_sources([{}]) == [{"document_title": "", "source_url": ""}]
 ```
 
 - [ ] **Step 2: Run the test and watch it fail**
@@ -359,10 +394,30 @@ uv run --frozen pytest tests/test_message_sources.py -v -k improvement_optin
 Expected: FAIL — `assert None == [{'document_title': ...}]` for both parameters. Sources
 are never written to the message today.
 
-- [ ] **Step 3: Pass the sources through**
+- [ ] **Step 3: Pass the sources through, projected to what was shown**
 
-In `src/meno_rag/api/main.py`, in the assistant-message call inside `_persist_success`
-(currently lines 1102-1110), add the `sources` argument:
+In `src/meno_rag/api/main.py`, add a helper next to `_extract_prompts` (above
+`_persist_success`):
+
+```python
+def _shown_sources(sources: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    """Just the title and link the user saw, mirroring what `add_sources` keeps.
+
+    The message copy outlives the analytics copy — it survives withdrawal of the improvement
+    consent — so it must never accumulate retrieval content such as chunk text or scores,
+    which Цель 3 gates. Projecting here keeps that structural instead of conventional.
+    """
+    return [
+        {
+            "document_title": source.get("document_title") or "",
+            "source_url": source.get("source_url") or "",
+        }
+        for source in (sources or [])
+    ]
+```
+
+Then in the assistant-message call inside `_persist_success` (currently lines 1102-1110), add
+the `sources` argument:
 
 ```python
             await repositories.append_message(
@@ -375,7 +430,7 @@ In `src/meno_rag/api/main.py`, in the assistant-message call inside `_persist_su
                 request_id=run_id,
                 # Outside the `if improvement:` block below on purpose: these are the
                 # sources the user was shown, part of the answer, not analytics.
-                sources=outcome.sources,
+                sources=_shown_sources(outcome.sources),
             )
 ```
 
@@ -389,7 +444,7 @@ analytics copy has its own lifecycle (it cascades away with its `pipeline_run`).
 uv run --frozen pytest tests/test_message_sources.py -v
 ```
 
-Expected: 4 passed.
+Expected: all pass.
 
 - [ ] **Step 5: Check nothing else regressed**
 
