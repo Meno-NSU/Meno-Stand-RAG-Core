@@ -1,0 +1,108 @@
+# tests/test_conversation_turns.py
+"""GET /v1/conversations/{id} returns a conversation's full renderable state."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from meno_rag.api import auth, feedback, guest, history
+from meno_rag.config import Settings
+from meno_rag.db import repositories
+from meno_rag.db.migrate import run_bootstrap
+from meno_rag.db.orm import GuestSession
+from meno_rag.db.session import Database
+
+SOURCES = [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
+
+
+def _app(db_path):
+    assert run_bootstrap(f"sqlite:///{db_path}") == 0
+    app = FastAPI()
+    app.state.database = Database(f"sqlite+aiosqlite:///{db_path}")
+    app.state.settings = Settings(AUTH_JWT_SECRET="test-secret")
+    app.include_router(auth.router)
+    app.include_router(guest.router)
+    app.include_router(history.router)
+    app.include_router(feedback.router)
+    return app
+
+
+@pytest.fixture
+def db_path(tmp_path):
+    return tmp_path / "turns.sqlite3"
+
+
+@pytest.fixture
+def client(db_path):
+    with TestClient(_app(db_path)) as c:
+        yield c
+
+
+def _guest_headers(client):
+    return {"X-Guest-Token": client.post("/v1/guest/session").json()["guest_token"]}
+
+
+def _with_db(db_path, coro_factory):
+    """Run one DB coroutine on its own engine and event loop.
+
+    TestClient drives the app in a loop of its own, so these tests stay synchronous and
+    open a second connection to the same sqlite file instead of mixing the two loops.
+    """
+
+    async def _run():
+        db = Database(f"sqlite+aiosqlite:///{db_path}")
+        try:
+            async with db.sessionmaker() as session:
+                result = await coro_factory(session)
+                await session.commit()
+                return result
+        finally:
+            await db.close()
+
+    return asyncio.run(_run())
+
+
+def _guest_session_id(db_path):
+    async def _read(session):
+        return (await session.execute(select(GuestSession))).scalars().first().id
+
+    return _with_db(db_path, _read)
+
+
+def _seed_answer_turn(db_path, *, conv_id, guest_session_id, run_id="run-1"):
+    async def _write(session):
+        await repositories.ensure_conversation(session, conv_id, guest_session_id=guest_session_id)
+        await repositories.append_message(session, conversation_id=conv_id, role="user", content="Вопрос?")
+        await repositories.append_message(
+            session,
+            conversation_id=conv_id,
+            role="assistant",
+            content="Ответ.",
+            model="qwen",
+            request_id=run_id,
+            sources=SOURCES,
+        )
+
+    _with_db(db_path, _write)
+
+
+def test_turns_carry_content_model_request_id_and_sources(client, db_path):
+    headers = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
+
+    body = client.get("/v1/conversations/c1", headers=headers).json()
+
+    assert body["id"] == "c1"
+    assert [t["kind"] for t in body["turns"]] == ["user", "answer"]
+    assert body["turns"][0]["content"] == "Вопрос?"
+    assert body["turns"][0]["sources"] == []
+    answer = body["turns"][1]
+    assert answer["content"] == "Ответ."
+    assert answer["model"] == "qwen"
+    assert answer["request_id"] == "run-1"
+    assert answer["sources"] == SOURCES

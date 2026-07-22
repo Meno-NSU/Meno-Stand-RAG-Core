@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from meno_rag.api import auth, guest
 from meno_rag.db import repositories
-from meno_rag.db.orm import Conversation
+from meno_rag.db.orm import Conversation, Message
 from meno_rag.db.session import Database
 from meno_rag.schemas import ClearHistoryRequest, ClearHistoryResponse
 
@@ -24,6 +24,25 @@ async def _resolve_subject(request: Request) -> tuple[str | None, str | None]:
     if guest_session is not None:
         return None, guest_session.id
     return None, None
+
+
+def _serialize_turn(message: Message) -> dict:
+    """One rendered turn. `sources` is always a list so clients never branch on null."""
+    if message.role == "user":
+        return {
+            "kind": "user",
+            "content": message.content,
+            "sources": [],
+            "created_at": message.created_at.isoformat(),
+        }
+    return {
+        "kind": "answer",
+        "content": message.content,
+        "model": message.model,
+        "request_id": message.request_id,
+        "sources": message.sources or [],
+        "created_at": message.created_at.isoformat(),
+    }
 
 
 @router.post("/v1/chat/completions/clear_history", response_model=ClearHistoryResponse)
@@ -72,5 +91,5 @@ async def get_conversation(conversation_id: str, request: Request):
         messages = await repositories.get_conversation_messages(session, conversation_id)
     return {
         "id": conversation_id,
-        "messages": [{"role": m.role, "content": m.content, "created_at": m.created_at.isoformat()} for m in messages],
+        "turns": [_serialize_turn(m) for m in messages],
     }
