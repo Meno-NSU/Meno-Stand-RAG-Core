@@ -13,6 +13,7 @@ LOG_FILE="${LOG_FILE:-$ROOT_DIR/logs/meno-rag-api.log}"
 API_BIN="${API_BIN:-$ROOT_DIR/.venv/bin/meno-rag-api}"
 MIGRATE_BIN="${MIGRATE_BIN:-$ROOT_DIR/.venv/bin/meno-rag-migrate}"
 RESET_BIN="${RESET_BIN:-$ROOT_DIR/.venv/bin/meno-rag-reset}"
+RETENTION_BIN="${RETENTION_BIN:-$ROOT_DIR/.venv/bin/meno-rag-retention}"
 
 # --fresh: wipe the application schema before bootstrap. Parsed once here so
 # every subcommand can see it without per-command argparse plumbing.
@@ -73,7 +74,7 @@ ensure_venv() {
     # Self-heal: if the tooling is missing (fresh clone, after a pull that
     # adds new entry points, partial sync), run uv sync once. This keeps
     # `./scripts/run_backend.sh start` working as the single entry point.
-    if [[ -x "$MIGRATE_BIN" && -x "$RESET_BIN" && -x "$API_BIN" ]]; then
+    if [[ -x "$MIGRATE_BIN" && -x "$RESET_BIN" && -x "$API_BIN" && -x "$RETENTION_BIN" ]]; then
         return 0
     fi
     echo "Backend tooling is missing in .venv; running uv sync --all-groups --frozen..."
@@ -82,11 +83,12 @@ ensure_venv() {
         return 1
     fi
     (cd "$ROOT_DIR" && uv sync --all-groups --frozen)
-    if [[ ! -x "$MIGRATE_BIN" || ! -x "$RESET_BIN" || ! -x "$API_BIN" ]]; then
+    if [[ ! -x "$MIGRATE_BIN" || ! -x "$RESET_BIN" || ! -x "$API_BIN" || ! -x "$RETENTION_BIN" ]]; then
         echo "uv sync finished but one of the expected binaries is still missing:"
-        [[ -x "$MIGRATE_BIN" ]] || echo "  - $MIGRATE_BIN"
-        [[ -x "$RESET_BIN"   ]] || echo "  - $RESET_BIN"
-        [[ -x "$API_BIN"     ]] || echo "  - $API_BIN"
+        [[ -x "$MIGRATE_BIN"   ]] || echo "  - $MIGRATE_BIN"
+        [[ -x "$RESET_BIN"     ]] || echo "  - $RESET_BIN"
+        [[ -x "$API_BIN"       ]] || echo "  - $API_BIN"
+        [[ -x "$RETENTION_BIN" ]] || echo "  - $RETENTION_BIN"
         return 1
     fi
 }
