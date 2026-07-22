@@ -74,9 +74,11 @@ def _guest_session_id(db_path):
     return _with_db(db_path, _read)
 
 
-def _seed_answer_turn(db_path, *, conv_id, guest_session_id, run_id="run-1"):
+def _seed_answer_turn(db_path, *, conv_id, guest_session_id=None, user_id=None, run_id="run-1"):
     async def _write(session):
-        await repositories.ensure_conversation(session, conv_id, guest_session_id=guest_session_id)
+        await repositories.ensure_conversation(
+            session, conv_id, guest_session_id=guest_session_id, user_id=user_id
+        )
         await repositories.append_message(session, conversation_id=conv_id, role="user", content="Вопрос?")
         await repositories.append_message(
             session,
@@ -100,7 +102,7 @@ def test_turns_carry_content_model_request_id_and_sources(client, db_path):
     assert body["id"] == "c1"
     assert [t["kind"] for t in body["turns"]] == ["user", "answer"]
     assert body["turns"][0]["content"] == "Вопрос?"
-    assert body["turns"][0]["sources"] == []
+    assert "sources" not in body["turns"][0]
     answer = body["turns"][1]
     assert answer["content"] == "Ответ."
     assert answer["model"] == "qwen"
@@ -112,18 +114,46 @@ def test_feedback_and_survey_come_back_on_restore(client, db_path):
     headers = _guest_headers(client)
     _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
 
-    client.post(
+    feedback_resp = client.post(
         "/v1/feedback",
         json={"completion_id": "run-1", "session_id": "c1", "value": "up", "comment": "Полезно"},
         headers=headers,
     )
-    client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "yes"}, headers=headers)
+    survey_resp = client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "yes"}, headers=headers)
+    assert feedback_resp.status_code == 200
+    assert survey_resp.status_code == 200
 
     body = client.get("/v1/conversations/c1", headers=headers).json()
 
     assert body["survey"] == {"answer": "yes"}
     assert body["turns"][1]["feedback"] == {"rating": "up", "comment": "Полезно"}
     assert body["turns"][0].get("feedback") is None  # user turns carry no rating
+
+
+def test_feedback_scoped_to_authenticated_user_comes_back_on_restore(client, db_path):
+    """Every other test in this file is guest-only, so the authenticated branch of
+    get_conversation_feedback — the one where user_id actually changes the query, per
+    Fix 1's docstring — is never exercised through the endpoint. If get_conversation
+    passed guest_id instead of user_id here, this would still pass through guest-only
+    coverage; it must fail under this one."""
+    register = client.post("/v1/auth/register", json={"email": "turns@example.com", "password": "secret123"})
+    assert register.status_code == 201
+    token = register.json()["token"]
+    user_id = register.json()["user"]["id"]
+    headers = {"X-Auth-Token": token}
+
+    _seed_answer_turn(db_path, conv_id="c1", user_id=user_id)
+
+    feedback_resp = client.post(
+        "/v1/feedback",
+        json={"completion_id": "run-1", "session_id": "c1", "value": "up", "comment": "Полезно"},
+        headers=headers,
+    )
+    assert feedback_resp.status_code == 200
+
+    body = client.get("/v1/conversations/c1", headers=headers).json()
+
+    assert body["turns"][1]["feedback"] == {"rating": "up", "comment": "Полезно"}
 
 
 def test_unrated_answer_and_unanswered_survey_are_null(client, db_path):

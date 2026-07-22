@@ -351,9 +351,17 @@ async def get_conversation_feedback(
 ) -> dict[str, dict[str, str | None]]:
     """The caller's ratings in this conversation, keyed by run_id.
 
-    `session_id` alone is not a sufficient filter: the feedback write path does not check
-    conversation ownership, so a third party can leave a row under someone else's
-    session_id. An authenticated caller sees only rows tagged with their user_id; a guest
+    This filter is a partial mitigation, not an ownership boundary. `MessageFeedback`
+    carries `UniqueConstraint("run_id", "session_id")` (see db/orm.py), so there is exactly
+    one row per (run_id, session_id) — never a competing row per subject. The write path
+    (`/v1/feedback`) resolves no guest session and performs no ownership check, so a third
+    party who knows a run_id/session_id does not leave a second row alongside the rightful
+    owner's; they overwrite the single existing row and retag its user_id to themselves.
+    That is silent data loss this filter cannot undo — the rating is gone before this query
+    ever runs — and the durable fix belongs on the write path, not here.
+
+    What this filter does still guarantee: a signed-in caller is never shown a row that was
+    retagged to somebody else — they see only rows tagged with their own user_id; a guest
     sees only untagged rows (guests are never tagged on write).
     """
     clause = MessageFeedback.user_id == user_id if user_id is not None else MessageFeedback.user_id.is_(None)
@@ -366,7 +374,14 @@ async def get_conversation_feedback(
 
 
 async def get_session_survey(session: AsyncSession, *, conversation_id: str) -> dict[str, str] | None:
-    """The end-of-session survey answer for this conversation, or None if unanswered."""
+    """The end-of-session survey answer for this conversation, or None if unanswered.
+
+    Unlike get_conversation_feedback, this takes no user_id and applies no per-subject
+    scoping — deliberately, not an oversight. `SessionSurvey` carries
+    `UniqueConstraint("session_id")`, so the answer is a property of the conversation
+    itself, not of a subject, and the only caller (`get_conversation`) has already passed
+    the conversation ownership check before this runs.
+    """
     survey = (
         await session.execute(select(SessionSurvey).where(SessionSurvey.session_id == conversation_id))
     ).scalar_one_or_none()

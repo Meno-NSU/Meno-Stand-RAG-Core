@@ -26,25 +26,32 @@ async def _resolve_subject(request: Request) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _serialize_turn(message: Message, feedback: dict[str, dict]) -> dict:
-    """One rendered turn. `sources` is always a list so clients never branch on null;
-    `feedback` is nullable because an unrated answer is genuinely unrated."""
-    if message.role == "user":
-        return {
-            "kind": "user",
-            "content": message.content,
-            "sources": [],
-            "created_at": message.created_at.isoformat(),
-        }
-    return {
-        "kind": "answer",
+def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> dict:
+    """One rendered turn: each kind carries exactly its own fields, so a client switches on
+    `kind` rather than reaching for a key that belongs to another kind (a user turn has no
+    `sources`; an answer turn's `feedback` is nullable because an unrated answer is
+    genuinely unrated).
+
+    `messages.turn_kind` does not exist yet, so the kind is resolved from `role` alone:
+    `"user"` for a user message, `"answer"` for everything else. A later task adds a third
+    kind ("arena") discriminated on that column — this dispatches per kind and ends with an
+    explicit raise precisely so that addition is another branch, not a rewrite.
+    """
+    kind = "user" if message.role == "user" else "answer"
+    turn: dict = {
+        "kind": kind,
         "content": message.content,
-        "model": message.model,
-        "request_id": message.request_id,
-        "sources": message.sources or [],
-        "feedback": feedback.get(message.request_id) if message.request_id else None,
         "created_at": message.created_at.isoformat(),
     }
+    if kind == "user":
+        return turn
+    if kind == "answer":
+        turn["model"] = message.model
+        turn["request_id"] = message.request_id
+        turn["sources"] = message.sources or []
+        turn["feedback"] = feedback.get(message.request_id) if message.request_id else None
+        return turn
+    raise ValueError(f"Unrecognised turn kind: {kind!r}")
 
 
 @router.post("/v1/chat/completions/clear_history", response_model=ClearHistoryResponse)
@@ -98,5 +105,5 @@ async def get_conversation(conversation_id: str, request: Request):
     return {
         "id": conversation_id,
         "survey": survey,
-        "turns": [_serialize_turn(m, feedback) for m in messages],
+        "turns": [_serialize_turn(m, feedback=feedback) for m in messages],
     }

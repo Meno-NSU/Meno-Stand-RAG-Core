@@ -81,8 +81,16 @@ async def test_upsert_survey_inserts_then_updates(tmp_path):
 
 @pytest.mark.asyncio
 async def test_get_conversation_feedback_is_scoped_to_the_caller(tmp_path):
-    """Feedback is keyed by (run_id, session_id) with no ownership check on write, so the
-    read must not hand one subject another subject's rating on the same run."""
+    """Feedback is keyed by (run_id, session_id) with no ownership check on write. This
+    seeds two *different* runs (run-1, run-2) in the same conversation, tagged to two
+    different users, and checks that reading as one user surfaces only their own run's
+    rating — not the other user's rating on the conversation's other run.
+
+    It does not show, and under `UniqueConstraint("run_id", "session_id")` cannot show,
+    two subjects both holding a rating on the *same* run: there is only ever one row per
+    run, so a second write to it overwrites the first (see
+    test_upsert_feedback_inserts_then_updates above) rather than competing with it.
+    """
     from meno_rag.db import repositories
 
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'fb.sqlite3'}")
