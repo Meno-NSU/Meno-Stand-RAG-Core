@@ -96,6 +96,39 @@ async def clear_conversation(session: AsyncSession, conversation_id: str) -> Non
     await delete_conversation_cascade(session, conversation_id)
 
 
+async def delete_subject_data(
+    session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None
+) -> None:
+    """Erase everything tied to a subject (152-ФЗ right to erasure). Exactly one id.
+
+    Deletes every conversation the subject owns (each via delete_conversation_cascade),
+    their consent events, and the subject row itself — the account for a registered user
+    (their JWT then resolves to no user) or the guest_session for a guest. For a registered
+    user we also drop any feedback / surveys / arena votes tagged with their user_id that a
+    per-conversation cascade would not reach. Aggregate Elo (arena_ratings) is anonymous and stays.
+    """
+    if (user_id is None) == (guest_session_id is None):
+        raise ValueError("Exactly one of user_id / guest_session_id must be set.")
+
+    if user_id is not None:
+        conv_clause = Conversation.user_id == user_id
+    else:
+        conv_clause = Conversation.guest_session_id == guest_session_id
+    conversation_ids = (await session.execute(select(Conversation.id).where(conv_clause))).scalars().all()
+    for conversation_id in conversation_ids:
+        await delete_conversation_cascade(session, conversation_id)
+
+    if user_id is not None:
+        await session.execute(delete(ArenaVote).where(ArenaVote.user_id == user_id))
+        await session.execute(delete(MessageFeedback).where(MessageFeedback.user_id == user_id))
+        await session.execute(delete(SessionSurvey).where(SessionSurvey.user_id == user_id))
+        await session.execute(delete(ConsentEvent).where(ConsentEvent.user_id == user_id))
+        await session.execute(delete(User).where(User.id == user_id))
+    else:
+        await session.execute(delete(ConsentEvent).where(ConsentEvent.guest_session_id == guest_session_id))
+        await session.execute(delete(GuestSession).where(GuestSession.id == guest_session_id))
+
+
 def conversation_owner_matches(
     conversation: Conversation, *, user_id: str | None, guest_session_id: str | None
 ) -> bool:

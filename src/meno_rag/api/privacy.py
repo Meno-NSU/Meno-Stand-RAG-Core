@@ -89,3 +89,18 @@ async def patch_settings(payload: PrivacySettingsPatch, request: Request):
         await session.commit()
         new_state = await repositories.current_consent_state(session, user_id=user_id, guest_session_id=guest_id)
     return _public_state(new_state)
+
+
+@router.delete("/data")
+async def delete_data(request: Request):
+    """Right to erasure: delete everything tied to the calling subject. For a registered
+    user this removes the account too (their JWT then resolves to no user); for a guest it
+    removes the guest session. Acts only on the caller's own data."""
+    user_id, guest_id = await _resolve_subject(request)
+    if user_id is None and guest_id is None:
+        raise HTTPException(status_code=401, detail="A JWT or X-Guest-Token is required.")
+    database: Database = request.app.state.database
+    async with database.sessionmaker() as session:
+        await repositories.delete_subject_data(session, user_id=user_id, guest_session_id=guest_id)
+        await session.commit()
+    return {"status": "deleted"}
