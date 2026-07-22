@@ -1,0 +1,187 @@
+# Design: conversation state parity across devices (backend)
+
+Part A of the cross-device history work. Part B (frontend: identity-scoped chat list,
+server-backed history, guest notice) depends on this contract and gets its own spec.
+
+## Goal
+
+A conversation opened on another device is **indistinguishable** from the device it was
+written on: same questions and answers, the sources the user was shown, the model labels,
+the ratings and comments they left, the end-of-session survey answer, and arena
+comparisons with both answers and the chosen side. Signing in again must not change what a
+conversation looks like.
+
+## Current behavior / gaps
+
+`GET /v1/conversations/{id}` returns only `role`, `content` and `created_at` per message.
+It has **no consumers yet** — the frontend never called it — so the response shape is free
+to change without a compatibility story.
+
+1. **Sources.** The shown sources (`outcome.sources` — the same list sent to the client in
+   the chat response and the SSE `sources` event) are persisted only inside
+   `_persist_success`'s `if improvement:` branch, into the analytics subtree (`sources`
+   table, FK to `pipeline_runs`). Anyone who declines the improvement opt-in has no stored
+   sources at all, though those sources were shown to them as part of the answer. That is
+   also stricter than the published consent text: Цель 1 (сервисная обработка) lists
+   «показанные источники»; Цель 3 (улучшение) covers «извлечённые фрагменты базы знаний»,
+   the retrieval set.
+2. **Model / request_id.** Already stored on `messages`, simply not returned. `request_id`
+   is what the feedback controls key off.
+3. **Ratings.** `/v1/feedback` is write-only (`POST`, `POST /clear`, `POST /survey`). With
+   no read path a restored conversation shows blank controls, and the same answer can be
+   rated twice.
+4. **Survey.** The answer is stored in `session_surveys` but never returned, so the survey
+   re-prompts on another device.
+5. **Arena — an existing data bug, not just a missing feature.** Both sides post to
+   `/v1/chat/completions` with the *same* `session_id`, and `_persist_success` appends both
+   the user question and the assistant answer on every call. One arena turn therefore
+   persists as:
+
+   ```
+   user: question        ← from side A
+   assistant: answer A
+   user: question        ← duplicate, from side B
+   assistant: answer B
+   ```
+
+   Duplicated question, two separate assistant messages, nondeterministic order (the
+   requests run in parallel). This violates the strict user/assistant alternation the
+   backend requires, so replaying such a history in a later request would 500. Arena turns
+   are also recorded in `arena_votes` (question, `response_a`/`response_b`, both models,
+   `winner`, `session_id`, `turn_index`) — but **only when the user votes**, so an unvoted
+   comparison is stored nowhere usable.
+
+## Target contract
+
+`GET /v1/conversations/{id}` returns conversation-level state plus an ordered list of
+turns. Designed in full up front, because all three phases below feed the same response:
+
+```json
+{
+  "id": "…",
+  "survey": { "answer": "…" },
+  "turns": [
+    { "kind": "user", "content": "…", "created_at": "…" },
+    {
+      "kind": "answer",
+      "content": "…", "model": "…", "request_id": "…",
+      "sources": [ { "document_title": "…", "source_url": "…" } ],
+      "feedback": { "rating": "up", "comment": "…" },
+      "created_at": "…"
+    },
+    {
+      "kind": "arena",
+      "created_at": "…",
+      "winner": "a",
+      "sides": [
+        { "key": "a", "model": "…", "knowledge_base_id": "…", "content": "…", "sources": [] },
+        { "key": "b", "model": "…", "knowledge_base_id": "…", "content": "…", "sources": [] }
+      ]
+    }
+  ]
+}
+```
+
+Shape rules, so clients never branch on absence:
+
+- `sources` and `sides` are **always lists** — empty, never `null`.
+- `survey`, `feedback` and `winner` are **nullable**: absent state is genuinely absent (no
+  survey answered, no rating given, comparison not voted on).
+- `model`, `knowledge_base_id` and `request_id` stay nullable, matching their columns.
+- `kind` is derived, not stored twice: `"user"` when `messages.role = 'user'`, otherwise
+  the row's `turn_kind` (`"answer"` or `"arena"`).
+- `winner` takes the values `arena_votes.winner` already uses — `"a"`, `"b"` or `"tie"` —
+  or `null` when the comparison was never voted on.
+
+## Storage design
+
+**Shown sources** — nullable `sources` column of type `sa.JSON` on `messages`, holding the
+shown sources of an assistant message in display order, entries keeping the
+`{"document_title": …, "source_url": …}` shape already used end to end. Migration
+`0013_message_sources`.
+
+JSON on the message rather than a second table: sources are only ever read back together
+with their message and nothing queries across them, so a table would add a join and a
+second write path for no benefit.
+
+**The analytics `sources` table stays.** The message copy belongs to the conversation and
+lives under service consent — it is what the user saw. The analytics copy is part of the
+improvement-gated pipeline snapshot. Coupling user-facing history to the analytics
+lifecycle would make a conversation's rendering depend on a consent the user may revoke.
+The duplication costs a few title/url pairs per answer.
+
+**Arena turns** — `messages` gains `turn_kind` (`'answer' | 'arena'`, defaulting to
+`'answer'`) and a nullable `arena` JSON column holding both sides and the winner. One
+assistant row per arena turn, so alternation holds. Migration `0014_message_arena`.
+
+Both revision ids stay well under the `alembic_version.version_num` `VARCHAR(32)` limit
+that broke a prod deploy on 2026-07-22.
+
+## Write path
+
+**Sources.** `repositories.append_message` gains an optional `sources` parameter, and
+`_persist_success` passes `outcome.sources` when appending the assistant message —
+**outside** the `if improvement:` block, so sources persist whenever the conversation does.
+
+**Arena.** Chat requests belonging to an arena comparison must stop persisting themselves;
+that self-persistence is what produces the duplicate question. The frontend marks them with
+an explicit flag on the chat-completions payload (`arena: true`), the backend skips
+`_persist_success` for any request carrying it, and the completed turn is posted
+once to a dedicated endpoint carrying the question, both sides and their sources. The
+existing vote endpoint then sets `winner` on that turn. This mirrors how voting already
+works — the client already submits `question`, `response_a` and `response_b` to
+`/v1/arena/vote` — and it stores unvoted comparisons too, because the turn is posted when
+both sides finish rather than when a vote happens.
+
+**Ratings and survey** need no write changes; they are already persisted, only unread.
+
+## Read path
+
+`GET /v1/conversations/{id}` assembles the response above: messages ordered by
+`created_at`; each answer turn joined to its feedback by (`run_id` = `messages.request_id`,
+`session_id` = conversation id) **scoped to the calling subject**; the conversation's
+survey answer attached at the top level. Ownership checks are unchanged.
+
+## Phases
+
+Each phase is independently shippable and testable; the contract above is the target of all
+three.
+
+1. **Message fidelity** — `messages.sources`, written outside the improvement gate; the
+   endpoint returns `turns` with `content`, `model`, `request_id`, `sources`.
+2. **Interaction state** — `feedback` per answer turn, `survey` at conversation level.
+3. **Arena** — stop double-persisting sides, store a turn as one row, post completed turns,
+   return them with `winner`.
+
+## Test plan
+
+pytest, model-free subset (the full suite segfaults on macOS via torch/faiss — Linux CI
+covers the remainder):
+
+- `append_message` persists sources; they round-trip in display order.
+- `_persist_success` stores shown sources **with the improvement opt-in OFF** — the
+  behaviour phase 1 exists for — and still stores them when it is ON.
+- A message with no sources round-trips as `[]`, never `null`.
+- Feedback left by the caller comes back on the matching turn; another subject's feedback
+  on the same run never leaks.
+- A conversation with no survey answer returns `survey: null`.
+- An arena turn persists as **one** assistant row: the question appears exactly once and
+  alternation holds.
+- An unvoted arena turn restores with `winner: null`; voting sets it.
+- Migration head pins move to `0014_message_arena`; the revision-id length guard added on
+  2026-07-22 keeps covering the new ids.
+
+## Out of scope / follow-ups
+
+- **Part B (frontend)** — identity-scoped chat list, loading `GET /v1/conversations` on
+  sign-in, lazy per-conversation loading, rendering restored arena turns, and the notice
+  telling guests their chats live only in this browser. Separate spec.
+- **Existing malformed arena history.** Conversations that already used arena carry
+  duplicated questions and split answers. Phase 3 stops producing them but does not clean
+  up what is already stored, so those conversations will restore looking odd. A cleanup
+  pass needs a reliable way to recognise the pattern — worth deciding once Part B shows how
+  visible it is.
+- Retrieval-set storage (Цель 3) is unchanged and stays improvement-gated.
+- Guest conversations are not adopted into an account on sign-in (decided 2026-07-23).
+- Whether the analytics `sources` copy is worth keeping long term — revisit once Part B is
+  in and the read patterns are clear.
