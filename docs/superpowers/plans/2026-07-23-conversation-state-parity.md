@@ -34,6 +34,9 @@ everything on push.
 Both must be changed together. A column added only to the ORM passes many tests and then
 does not exist in production.
 
+**The head revision is pinned in two test files**, `tests/test_migrate.py:89` and
+`tests/test_reset.py:102`. Every migration this plan adds must move both.
+
 **Revision ids must be ≤32 characters.** `alembic_version.version_num` is `VARCHAR(32)`.
 PostgreSQL enforces it, SQLite does not, so an over-long id passes locally and fails on
 deploy — this happened on 2026-07-22. `tests/test_migrate.py::test_revision_ids_fit_the_alembic_version_column`
@@ -234,24 +237,26 @@ def downgrade() -> None:
     op.drop_column("messages", "sources")
 ```
 
-- [ ] **Step 7: Move the head-revision pin**
+- [ ] **Step 7: Move BOTH head-revision pins**
 
-In `tests/test_migrate.py:89`, replace:
+Two test files assert the current head. Miss either and the suite goes red.
+
+In `tests/test_migrate.py:89` and in `tests/test_reset.py:102`, replace:
 
 ```python
-    assert rev == "0012_conv_analysis_allowed"
+"0012_conv_analysis_allowed"
 ```
 
 with:
 
 ```python
-    assert rev == "0013_message_sources"
+"0013_message_sources"
 ```
 
 - [ ] **Step 8: Run the migration tests**
 
 ```bash
-uv run --frozen pytest tests/test_migrate.py -v
+uv run --frozen pytest tests/test_migrate.py tests/test_reset.py -v
 ```
 
 Expected: all pass, including `test_revision_ids_fit_the_alembic_version_column`.
@@ -259,7 +264,7 @@ Expected: all pass, including `test_revision_ids_fit_the_alembic_version_column`
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/meno_rag/db/orm.py src/meno_rag/db/repositories.py alembic/versions/0013_message_sources.py tests/test_migrate.py tests/test_message_sources.py
+git add src/meno_rag/db/orm.py src/meno_rag/db/repositories.py alembic/versions/0013_message_sources.py tests/test_migrate.py tests/test_reset.py tests/test_message_sources.py
 git commit -m "feat(history): store the sources shown under an answer on the message"
 ```
 
@@ -956,14 +961,16 @@ def downgrade() -> None:
     op.drop_column("messages", "turn_kind")
 ```
 
-- [ ] **Step 6: Move the head-revision pin**
+- [ ] **Step 6: Move BOTH head-revision pins**
 
-In `tests/test_migrate.py:89`, replace `"0013_message_sources"` with `"0014_message_arena"`.
+In `tests/test_migrate.py:89` and `tests/test_reset.py:102`, replace
+`"0013_message_sources"` with `"0014_message_arena"`. Both files assert the head; missing
+either turns the suite red.
 
 - [ ] **Step 7: Run the migration tests**
 
 ```bash
-uv run --frozen pytest tests/test_migrate.py -v
+uv run --frozen pytest tests/test_migrate.py tests/test_reset.py -v
 ```
 
 Expected: all pass.
@@ -971,7 +978,7 @@ Expected: all pass.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/meno_rag/db/orm.py alembic/versions/0014_message_arena.py tests/test_migrate.py tests/test_arena_turn_persistence.py
+git add src/meno_rag/db/orm.py alembic/versions/0014_message_arena.py tests/test_migrate.py tests/test_reset.py tests/test_arena_turn_persistence.py
 git commit -m "feat(arena): columns for storing a comparison as a single turn"
 ```
 
