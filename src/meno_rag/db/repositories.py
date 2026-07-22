@@ -129,6 +129,48 @@ async def delete_subject_data(
         await session.execute(delete(GuestSession).where(GuestSession.id == guest_session_id))
 
 
+async def list_subject_conversations(
+    session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None
+) -> list[dict]:
+    """The subject's conversations, newest first, each with a short preview (its first user
+    message) so a client can render the chat list without loading every message."""
+    if user_id is not None:
+        clause = Conversation.user_id == user_id
+    elif guest_session_id is not None:
+        clause = Conversation.guest_session_id == guest_session_id
+    else:
+        return []
+    conversations = (
+        (await session.execute(select(Conversation).where(clause).order_by(Conversation.updated_at.desc())))
+        .scalars()
+        .all()
+    )
+    items: list[dict] = []
+    for conversation in conversations:
+        preview = (
+            await session.execute(
+                select(Message.content)
+                .where(Message.conversation_id == conversation.id, Message.role == "user")
+                .order_by(Message.created_at)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        items.append({"id": conversation.id, "updated_at": conversation.updated_at, "preview": (preview or "")[:80]})
+    return items
+
+
+async def get_conversation_messages(session: AsyncSession, conversation_id: str) -> list[Message]:
+    return (
+        (
+            await session.execute(
+                select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
 def conversation_owner_matches(
     conversation: Conversation, *, user_id: str | None, guest_session_id: str | None
 ) -> bool:
