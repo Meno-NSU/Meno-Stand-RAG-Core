@@ -166,6 +166,15 @@ async def get_conversation_messages(session: AsyncSession, conversation_id: str)
     return list(result.scalars().all())
 
 
+async def delete_conversations_older_than(session: AsyncSession, *, cutoff: datetime) -> int:
+    """Delete conversations (and their cascade) not updated since ``cutoff``; returns the count.
+    Backs the retention CLI (152-ФЗ storage limitation)."""
+    ids = (await session.execute(select(Conversation.id).where(Conversation.updated_at < cutoff))).scalars().all()
+    for conversation_id in ids:
+        await delete_conversation_cascade(session, conversation_id)
+    return len(ids)
+
+
 def conversation_owner_matches(
     conversation: Conversation, *, user_id: str | None, guest_session_id: str | None
 ) -> bool:

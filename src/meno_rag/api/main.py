@@ -37,7 +37,7 @@ from meno_rag.api.runtime_resolver import (
     resolve_pipeline_runtime,
 )
 from meno_rag.cache.redis_client import ArenaLock, make_redis
-from meno_rag.config import Settings, get_settings
+from meno_rag.config import Settings, get_settings, parse_cors_origins
 from meno_rag.db import repositories
 from meno_rag.db.backup import backup_scheduler
 from meno_rag.db.orm import Conversation
@@ -292,7 +292,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Meno RAG Backend", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=parse_cors_origins(get_settings().cors_allow_origins),
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
