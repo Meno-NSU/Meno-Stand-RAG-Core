@@ -17,14 +17,16 @@ conversation looks like.
 It has **no consumers yet** — the frontend never called it — so the response shape is free
 to change without a compatibility story.
 
-1. **Sources.** The shown sources (`outcome.sources` — the same list sent to the client in
-   the chat response and the SSE `sources` event) are persisted only inside
-   `_persist_success`'s `if improvement:` branch, into the analytics subtree (`sources`
-   table, FK to `pipeline_runs`). Anyone who declines the improvement opt-in has no stored
-   sources at all, though those sources were shown to them as part of the answer. That is
-   also stricter than the published consent text: Цель 1 (сервисная обработка) lists
-   «показанные источники»; Цель 3 (улучшение) covers «извлечённые фрагменты базы знаний»,
-   the retrieval set.
+1. **Sources are not stored as part of the conversation at all.** The only copy that exists
+   is a field of the analytics snapshot: `add_sources` writes `outcome.sources` — the same
+   list sent to the client in the chat response and the SSE `sources` event — into the
+   `sources` table, whose `run_id` is an FK to `pipeline_runs`, and `pipeline_runs` is
+   created only inside `_persist_success`'s `if improvement:` branch. So the improvement
+   opt-in does not gate the shown sources by decision; there is simply no parent row to
+   hang them off without it. The gating is fallout from the foreign key. Decline the opt-in
+   and what the user saw under the answer is written nowhere. That is also stricter than
+   the published consent text: Цель 1 (сервисная обработка) lists «показанные источники»;
+   Цель 3 (улучшение) covers «извлечённые фрагменты базы знаний», the retrieval set.
 2. **Model / request_id.** Already stored on `messages`, simply not returned. `request_id`
    is what the feedback controls key off.
 3. **Ratings.** `/v1/feedback` is write-only (`POST`, `POST /clear`, `POST /survey`). With
@@ -104,11 +106,13 @@ JSON on the message rather than a second table: sources are only ever read back 
 with their message and nothing queries across them, so a table would add a join and a
 second write path for no benefit.
 
-**The analytics `sources` table stays.** The message copy belongs to the conversation and
-lives under service consent — it is what the user saw. The analytics copy is part of the
-improvement-gated pipeline snapshot. Coupling user-facing history to the analytics
-lifecycle would make a conversation's rendering depend on a consent the user may revoke.
-The duplication costs a few title/url pairs per answer.
+**The analytics `sources` table stays, for now.** It holds the same list, so the message
+copy makes it redundant on content — but not on lifecycle: it cascades away with its
+`pipeline_run` when the improvement consent is withdrawn or retention expires, which is
+right for an analytics record and wrong for conversation history. Rendering a conversation
+out of it would make the conversation's appearance depend on a consent the user can revoke.
+Whether to drop it afterwards is a separate question — `generation_records.retrieved`
+already holds the fuller retrieval set that analysis actually needs. See follow-ups.
 
 **Arena turns** — `messages` gains `turn_kind` (`'answer' | 'arena'`, defaulting to
 `'answer'`) and a nullable `arena` JSON column holding both sides and the winner. One
@@ -183,5 +187,7 @@ covers the remainder):
   visible it is.
 - Retrieval-set storage (Цель 3) is unchanged and stays improvement-gated.
 - Guest conversations are not adopted into an account on sign-in (decided 2026-07-23).
-- Whether the analytics `sources` copy is worth keeping long term — revisit once Part B is
-  in and the read patterns are clear.
+- **Dropping the analytics `sources` table.** Once messages carry the shown sources it
+  holds nothing unique — the same list on the conversation side, the fuller retrieval set
+  in `generation_records.retrieved`. Removing it means checking the JSONL export and any
+  analytics queries that read it, so it is its own change, not a rider on phase 1.
