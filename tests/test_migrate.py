@@ -86,7 +86,7 @@ def test_run_bootstrap_tracked_db_advances_to_head(tmp_path):
         engine.dispose()
     assert "generation_model" in cols_after
     assert "core_model" in cols_after
-    assert rev == "0011_consent_events"
+    assert rev == "0012_conversations_analysis_allowed"
 
 
 def test_run_bootstrap_untracked_db_fails_with_diagnostic(tmp_path, capsys):

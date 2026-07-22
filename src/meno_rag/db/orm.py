@@ -28,6 +28,9 @@ class Conversation(Base):
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # Whether this conversation's content may be used for improvement/analysis —
+    # set from the subject's MENO_IMPROVEMENT consent at persist time (Stage 3).
+    analysis_allowed: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
