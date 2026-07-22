@@ -92,8 +92,8 @@ Shape rules, so clients never branch on absence:
 - `model`, `knowledge_base_id` and `request_id` stay nullable, matching their columns.
 - `kind` is derived, not stored twice: `"user"` when `messages.role = 'user'`, otherwise
   the row's `turn_kind` (`"answer"` or `"arena"`).
-- `winner` takes the values `arena_votes.winner` already uses — `"a"`, `"b"` or `"tie"` —
-  or `null` when the comparison was never voted on.
+- `winner` takes the values `VoteRequest.winner` already accepts — `"a"`, `"b"`, `"tie"` or
+  `"both_bad"` — or `null` when the comparison was never voted on.
 
 ## Storage design
 
