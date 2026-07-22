@@ -1037,6 +1037,22 @@ def _extract_prompts(qa_messages: list[dict[str, str]]) -> tuple[str, str]:
     return system_prompt, user_prompt
 
 
+def _shown_sources(sources: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    """Just the title and link the user saw, mirroring what `add_sources` keeps.
+
+    The message copy outlives the analytics copy — it survives withdrawal of the improvement
+    consent — so it must never accumulate retrieval content such as chunk text or scores,
+    which Цель 3 gates. Projecting here keeps that structural instead of conventional.
+    """
+    return [
+        {
+            "document_title": source.get("document_title") or "",
+            "source_url": source.get("source_url") or "",
+        }
+        for source in (sources or [])
+    ]
+
+
 async def _persist_success(
     *,
     database: Database,
@@ -1106,6 +1122,9 @@ async def _persist_success(
                 model=model,
                 knowledge_base_id=KB_ID,
                 request_id=run_id,
+                # Outside the `if improvement:` block below on purpose: these are the
+                # sources the user was shown, part of the answer, not analytics.
+                sources=_shown_sources(outcome.sources),
             )
 
             # Extended RAG pipeline records + the JSONL trace are analysis detail —
