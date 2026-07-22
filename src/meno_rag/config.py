@@ -96,6 +96,8 @@ class Settings(BaseSettings):
     # legitimate load is never rejected, while a runaway flood is capped. 0
     # disables the limit (legacy unbounded behavior).
     max_concurrent_chats: int = Field(default=256, validation_alias="MAX_CONCURRENT_CHATS")
+    # Retention window in days for the retention CLI; <= 0 disables it (no data deleted).
+    retention_days: int = Field(default=0, validation_alias="RETENTION_DAYS")
 
     rewrite_concurrency: int = Field(default=32, validation_alias="REWRITE_CONCURRENCY")
     rerank_concurrency: int = Field(default=64, validation_alias="RERANK_CONCURRENCY")
