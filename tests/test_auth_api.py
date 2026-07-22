@@ -59,6 +59,21 @@ def test_auth_disabled_returns_503(tmp_path):
         assert c.patch("/v1/auth/me", json={"nickname": "x"}).status_code == 401
 
 
+def test_token_accepted_from_x_auth_token_and_bearer(client):
+    """The public edge gates the whole site with HTTP Basic Auth, which occupies the
+    Authorization header — a browser sending the app's JWT there would replace the gate
+    credentials and get 401-stormed. So the JWT travels in X-Auth-Token; Authorization:
+    Bearer stays supported for API clients and existing callers."""
+    token = client.post(
+        "/v1/auth/register",
+        json={"email": "hdr@b.com", "password": "secret123", "nickname": "Hdr"},
+    ).json()["token"]
+
+    assert client.get("/v1/auth/me", headers={"X-Auth-Token": token}).json()["user"]["nickname"] == "Hdr"
+    assert client.get("/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).json()["user"]["nickname"] == "Hdr"
+    assert client.get("/v1/auth/me", headers={"X-Auth-Token": "garbage"}).status_code == 401
+
+
 def test_register_race_returns_409(client, monkeypatch):
     # Force the duplicate pre-check to always miss, so the second insert hits the
     # unique-email constraint and must be translated to a clean 409 (not a 500).
