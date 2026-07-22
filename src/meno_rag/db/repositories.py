@@ -53,6 +53,22 @@ async def ensure_conversation(
     return conversation
 
 
+def shown_source_refs(sources: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Only the title and the link — the fields Цель 1 (сервисная обработка) covers.
+
+    Durable conversation records are written under the service consent alone, so they must
+    never accumulate retrieval content such as chunk text or relevance scores, which Цель 3
+    gates. Applied at the storage boundary so no caller can bypass it.
+    """
+    return [
+        {
+            "document_title": source.get("document_title") or "",
+            "source_url": source.get("source_url") or "",
+        }
+        for source in sources
+    ]
+
+
 async def append_message(
     session: AsyncSession,
     *,
@@ -73,7 +89,7 @@ async def append_message(
             model=model,
             knowledge_base_id=knowledge_base_id,
             request_id=request_id,
-            sources=sources,
+            sources=None if sources is None else shown_source_refs(sources),
         )
     )
 
@@ -273,12 +289,12 @@ async def add_pipeline_stage(
 
 
 async def add_sources(session: AsyncSession, *, run_id: str, sources: list[dict[str, str]]) -> None:
-    for idx, source in enumerate(sources):
+    for idx, source in enumerate(shown_source_refs(sources)):
         session.add(
             SourceRecord(
                 run_id=run_id,
-                document_title=source.get("document_title") or "",
-                source_url=source.get("source_url") or "",
+                document_title=source["document_title"],
+                source_url=source["source_url"],
                 ordinal=idx,
             )
         )

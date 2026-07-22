@@ -3,15 +3,14 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 from sqlalchemy import create_engine, inspect
 
-from meno_rag.api.main import _persist_success, _shown_sources
+from meno_rag.api.main import _persist_success
 from meno_rag.db import repositories
 from meno_rag.db.migrate import run_bootstrap
 from meno_rag.db.session import Database
+from meno_rag.schemas import PipelineOutcome
 
 
 def test_migration_adds_the_sources_column(tmp_path):
@@ -96,55 +95,66 @@ async def test_message_without_sources_reads_back_as_none(tmp_path):
         await db.close()
 
 
-async def _persist(db, *, improvement: bool, monkeypatch):
-    """Drive _persist_success with a fixed consent state and a minimal outcome."""
-
-    async def fake_state(session, *, user_id=None, guest_session_id=None):
-        return {"SERVICE_AND_HISTORY": True, "MENO_IMPROVEMENT": improvement}
-
-    monkeypatch.setattr(repositories, "current_consent_state", fake_state)
-
-    outcome = SimpleNamespace(
+def _outcome() -> PipelineOutcome:
+    return PipelineOutcome(
         question="q",
+        prepared_dialogue_history="HIST",
+        search_queries=["q"],
+        context="CTX",
         sources=[{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}],
-        search_queries=[],
-        stage_durations_ms={},
-        stage_details={},
-        qa_messages=[],
-        prepared_dialogue_history=None,
-        retrieved=[],
-        fewshots=[],
-        trace=None,
+        qa_messages=[{"role": "system", "content": "SYS"}, {"role": "user", "content": "PROMPT"}],
     )
+
+
+async def _grant(db, *, guest_session_id: str, improvement: bool) -> None:
+    async with db.sessionmaker() as s:
+        for granted, purpose in ((True, "SERVICE_AND_HISTORY"), (improvement, "MENO_IMPROVEMENT")):
+            if granted:
+                await repositories.record_consent_event(
+                    s,
+                    guest_session_id=guest_session_id,
+                    purpose=purpose,
+                    action="granted",
+                    document_kind="personal_data_consent",
+                    document_version="1.0",
+                    document_sha256="x",
+                    source="test",
+                )
+        await s.commit()
+
+
+async def _persist(db, *, guest_session_id: str = "g1", session_id: str = "c1") -> None:
     await _persist_success(
         database=db,
         run_id="run-1",
-        session_id="c1",
+        session_id=session_id,
         model="m",
         generation_model="m",
         core_model="m",
         endpoint="http://x",
         question="q",
         answer="a",
-        outcome=outcome,
+        outcome=_outcome(),
         generation_ms=1.0,
         total_ms=2.0,
         stream=False,
         temperature=None,
         max_tokens=10,
+        guest_session_id=guest_session_id,
     )
 
 
 @pytest.mark.parametrize("improvement", [False, True])
 @pytest.mark.asyncio
-async def test_shown_sources_persist_regardless_of_the_improvement_optin(tmp_path, monkeypatch, improvement):
+async def test_shown_sources_persist_regardless_of_the_improvement_optin(tmp_path, improvement):
     """The whole point of this column: declining the improvement opt-in must not erase
     what the user was shown. Before this change the only copy hung off pipeline_runs,
     which is created only inside `if improvement:`."""
     db = Database(f"sqlite+aiosqlite:///{tmp_path / f'p{improvement}.sqlite3'}")
     await db.init_models()
     try:
-        await _persist(db, improvement=improvement, monkeypatch=monkeypatch)
+        await _grant(db, guest_session_id="g1", improvement=improvement)
+        await _persist(db)
 
         async with db.sessionmaker() as s:
             messages = await repositories.get_conversation_messages(s, "c1")
@@ -156,18 +166,31 @@ async def test_shown_sources_persist_regardless_of_the_improvement_optin(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_only_the_shown_title_and_link_are_stored_on_the_message(tmp_path, monkeypatch):
-    """The message copy survives withdrawal of the improvement consent, so it must not carry
-    retrieval content — chunk text, scores — that Цель 3 gates."""
-    assert _shown_sources(
-        [
-            {
-                "document_title": "Устав НГУ",
-                "source_url": "https://nsu.ru/ustav",
-                "chunk": "полный текст фрагмента",
-                "score": "0.93",
-            }
-        ]
-    ) == [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
-    assert _shown_sources(None) == []
-    assert _shown_sources([{}]) == [{"document_title": "", "source_url": ""}]
+async def test_only_the_shown_title_and_link_are_stored_on_the_message(tmp_path):
+    """The message copy is written under the service consent alone (Цель 1), so it must not
+    carry retrieval content — chunk text, relevance scores — that Цель 3 gates."""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'proj.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            await repositories.append_message(
+                s,
+                conversation_id="c1",
+                role="assistant",
+                content="ans",
+                sources=[
+                    {
+                        "document_title": "Устав НГУ",
+                        "source_url": "https://nsu.ru/ustav",
+                        "chunk": "полный текст фрагмента",
+                        "score": "0.93",
+                    }
+                ],
+            )
+            await s.commit()
+
+        async with db.sessionmaker() as s:
+            messages = await repositories.get_conversation_messages(s, "c1")
+        assert messages[0].sources == [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
+    finally:
+        await db.close()
