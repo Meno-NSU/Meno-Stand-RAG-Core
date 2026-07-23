@@ -245,6 +245,13 @@ covers the remainder):
   up what is already stored, so those conversations will restore looking odd. A cleanup
   pass needs a reliable way to recognise the pattern — worth deciding once Part B shows how
   visible it is.
+- **`/v1/arena/turn` takes no lock.** `append_arena_turn` is idempotent on
+  `(conversation_id, turn_index)` by select-then-branch, so two genuinely concurrent duplicate
+  posts could both find nothing and both write. `/v1/arena/vote` runs under `arena_lock`, but
+  that lock is keyed by model pair rather than by conversation, so it would not help here even
+  if taken. `submit_arena_vote` has the identical theoretical race today. Narrow, and a retry
+  seconds apart — the realistic case — is fully covered.
+
 - **The survey is not subject-scoped on read or write.** On an untagged (legacy) conversation,
   which anyone may read, one guest can see another's survey answer and overwrite it via
   `POST /v1/feedback/survey`. Closing it needs the same `guest_session_id` column
