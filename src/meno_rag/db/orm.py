@@ -52,6 +52,11 @@ class Message(Base):
     # table, which hangs off `pipeline_runs` and therefore only exists with the
     # improvement opt-in.
     sources: Mapped[list[dict[str, str]] | None] = mapped_column(JsonCompat, nullable=True)
+    # "answer" for an ordinary reply, "arena" for a side-by-side comparison. An arena turn
+    # is ONE assistant row — both answers live in `arena` — so the strict user/assistant
+    # alternation the backend requires still holds.
+    turn_kind: Mapped[str] = mapped_column(String(16), default="answer", server_default="answer", nullable=False)
+    arena: Mapped[dict | None] = mapped_column(JsonCompat, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
