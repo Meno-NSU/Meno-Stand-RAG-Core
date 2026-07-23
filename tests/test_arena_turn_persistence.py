@@ -145,6 +145,7 @@ def test_arena_turn_stores_one_user_row_and_one_assistant_row(client, db_path):
 
     turn = body["turns"][1]
     assert turn["winner"] is None  # not voted on yet
+    assert turn["turn_index"] == 0  # a client that restored on another device needs this to vote
     assert [s["key"] for s in turn["sides"]] == ["a", "b"]
     assert [s["content"] for s in turn["sides"]] == ["Ответ A", "Ответ B"]
     assert turn["sides"][0]["sources"] == []

@@ -59,6 +59,7 @@ def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> UserTurn 
             content=message.content,
             created_at=created_at,
             winner=stored.get("winner"),
+            turn_index=stored.get("turn_index"),
             sides=[
                 ArenaTurnSide(
                     key=side.get("key"),

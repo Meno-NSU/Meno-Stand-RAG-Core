@@ -81,6 +81,13 @@ class ArenaTurn(BaseModel):
     created_at: str
     winner: Literal["a", "b", "tie", "both_bad"] | None = None
     sides: list[ArenaTurnSide] = Field(default_factory=list)
+    # Required to vote on a comparison restored from another device: a client with no local
+    # state for this turn (that's the premise of restoring a conversation elsewhere) has no
+    # other way to supply the turn_index /v1/arena/vote matches on. Populated from the stored
+    # arena["turn_index"] (see append_arena_turn); None for the rare turn that was written
+    # without one, which — deliberately — can never be voted on (see
+    # append_arena_turn's turn_index=None handling).
+    turn_index: int | None = None
 
 
 ConversationTurn = Annotated[UserTurn | AnswerTurn | ArenaTurn, Field(discriminator="kind")]
