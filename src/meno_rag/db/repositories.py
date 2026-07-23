@@ -405,6 +405,45 @@ async def get_session_survey(session: AsyncSession, *, conversation_id: str) -> 
     return None if survey is None else {"answer": survey.answer}
 
 
+async def append_arena_turn(
+    session: AsyncSession,
+    *,
+    conversation_id: str,
+    question: str,
+    sides: list[dict],
+    turn_index: int | None = None,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
+    analysis_allowed: bool = False,
+) -> None:
+    """Store a comparison as one user row plus one assistant row.
+
+    `content` on the assistant row is side A's answer: the column is NOT NULL and previews and
+    exports need text, while `winner` may be "tie" or "both_bad", so "the winning answer" is not
+    always defined. Clients render from `arena["sides"]`.
+    """
+    await ensure_conversation(
+        session,
+        conversation_id,
+        user_id=user_id,
+        guest_session_id=guest_session_id,
+        analysis_allowed=analysis_allowed,
+    )
+    await append_message(session, conversation_id=conversation_id, role="user", content=question)
+    # Same allow-list as an ordinary answer: this row is written under the service consent,
+    # so a side's sources may carry only the title and the link (Цель 1).
+    stored = [{**side, "sources": shown_source_refs(side.get("sources") or [])} for side in sides]
+    session.add(
+        Message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=stored[0]["content"],
+            turn_kind="arena",
+            arena={"turn_index": turn_index, "winner": None, "sides": stored},
+        )
+    )
+
+
 async def upsert_session_survey(
     session: AsyncSession,
     *,

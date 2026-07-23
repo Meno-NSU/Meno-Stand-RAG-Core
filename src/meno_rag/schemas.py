@@ -63,7 +63,27 @@ class AnswerTurn(BaseModel):
     feedback: TurnFeedback | None = None
 
 
-ConversationTurn = Annotated[UserTurn | AnswerTurn, Field(discriminator="kind")]
+class ArenaTurnSide(BaseModel):
+    key: str
+    model: str | None = None
+    knowledge_base_id: str | None = None
+    content: str
+    sources: list[SourceRef] = Field(default_factory=list)
+
+
+class ArenaTurn(BaseModel):
+    kind: Literal["arena"] = "arena"
+    # Side A's answer, mirrored from the stored row's NOT NULL `content` column (see
+    # append_arena_turn) — a generic consumer that doesn't special-case "arena" turns still
+    # gets a sensible string here. The rendered comparison itself comes from `sides`; a
+    # client that understands arena turns renders from there, not from this field.
+    content: str
+    created_at: str
+    winner: Literal["a", "b", "tie", "both_bad"] | None = None
+    sides: list[ArenaTurnSide] = Field(default_factory=list)
+
+
+ConversationTurn = Annotated[UserTurn | AnswerTurn | ArenaTurn, Field(discriminator="kind")]
 
 
 class SurveyAnswer(BaseModel):
@@ -92,6 +112,24 @@ class VoteRequest(BaseModel):
     turn_index: int | None = Field(default=None, ge=0)
     history_len_a: int | None = Field(default=None, ge=0)
     history_len_b: int | None = Field(default=None, ge=0)
+
+
+class ArenaSide(BaseModel):
+    key: Literal["a", "b"]
+    model: str | None = None
+    knowledge_base_id: str | None = None
+    content: str
+    request_id: str | None = None
+    sources: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ArenaTurnRequest(BaseModel):
+    """A finished side-by-side comparison, posted once after both sides answer."""
+
+    session_id: str = Field(..., min_length=1)
+    question: str = Field(..., min_length=1)
+    turn_index: int | None = Field(default=None, ge=0)
+    sides: list[ArenaSide] = Field(..., min_length=2, max_length=2)
 
 
 class FeedbackRequest(BaseModel):

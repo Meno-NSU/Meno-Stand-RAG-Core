@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
-from meno_rag.api import auth
+from meno_rag.api import auth, guest
 from meno_rag.db import repositories
-from meno_rag.schemas import VoteRequest
+from meno_rag.db.orm import Conversation
+from meno_rag.schemas import ArenaTurnRequest, VoteRequest
 
 router = APIRouter(prefix="/v1/arena", tags=["arena"])
 
@@ -24,6 +25,54 @@ async def submit_vote(vote: VoteRequest, request: Request):
     # we silently no-op so a buggy/spamming client can't inflate the Elo store.
     # Status stays "ok" so the client doesn't surface a misleading error.
     return {"status": "ok", "duplicate": not recorded}
+
+
+async def _resolve_subject(request: Request) -> tuple[str | None, str | None]:
+    current_user = await auth.resolve_optional_user(request)
+    if current_user is not None:
+        return current_user.id, None
+    guest_session = await guest.resolve_guest_session(request)
+    if guest_session is not None:
+        return None, guest_session.id
+    return None, None
+
+
+@router.post("/turn")
+async def record_turn(payload: ArenaTurnRequest, request: Request):
+    """Store a finished comparison. Both sides posted to /v1/chat/completions with
+    `arena: true`, so nothing was written there — this is the only write."""
+    database = request.app.state.database
+    user_id, guest_id = await _resolve_subject(request)
+
+    async with database.sessionmaker() as session:
+        conversation = await session.get(Conversation, payload.session_id)
+        if conversation is not None and not repositories.conversation_owner_matches(
+            conversation, user_id=user_id, guest_session_id=guest_id
+        ):
+            # Do not reveal that someone else's conversation exists — same policy as
+            # clear_history and the feedback endpoints. It matters more here:
+            # ensure_conversation reassigns ownership to whatever id it is called with, so
+            # skipping this check would let a stranger's turn retag the conversation, not
+            # just misfile a row.
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+
+        state = await repositories.current_consent_state(session, user_id=user_id, guest_session_id=guest_id)
+        if not state["SERVICE_AND_HISTORY"]:
+            # Same gate as _persist_success: no consent to store the chat, nothing written.
+            return {"status": "ok", "stored": False}
+
+        await repositories.append_arena_turn(
+            session,
+            conversation_id=payload.session_id,
+            question=payload.question,
+            sides=[side.model_dump() for side in payload.sides],
+            turn_index=payload.turn_index,
+            user_id=user_id,
+            guest_session_id=guest_id,
+            analysis_allowed=state["MENO_IMPROVEMENT"],
+        )
+        await session.commit()
+    return {"status": "ok", "stored": True}
 
 
 @router.get("/leaderboard")

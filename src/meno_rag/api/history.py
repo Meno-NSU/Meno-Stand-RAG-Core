@@ -13,6 +13,8 @@ from meno_rag.db.orm import Conversation, Message
 from meno_rag.db.session import Database
 from meno_rag.schemas import (
     AnswerTurn,
+    ArenaTurn,
+    ArenaTurnSide,
     ClearHistoryRequest,
     ClearHistoryResponse,
     ConversationResponse,
@@ -35,21 +37,39 @@ async def _resolve_subject(request: Request) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> UserTurn | AnswerTurn:
+def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> UserTurn | AnswerTurn | ArenaTurn:
     """One rendered turn: each kind carries exactly its own fields, so a client switches on
     `kind` rather than reaching for a key that belongs to another kind (a user turn has no
     `sources`; an answer turn's `feedback` is nullable because an unrated answer is
     genuinely unrated).
 
-    `messages.turn_kind` does not exist yet, so the kind is resolved from `role` alone:
-    `"user"` for a user message, `"answer"` for everything else. A later task adds a third
-    kind ("arena") discriminated on that column — this dispatches per kind and ends with an
-    explicit raise precisely so that addition is another branch, not a rewrite.
+    The kind is `"user"` for a user message; otherwise it comes from `messages.turn_kind`
+    (falling back to `"answer"` for rows written before that column existed, though the
+    column is NOT NULL with a server default so this is a defensive fallback rather than an
+    expected case). This dispatches per kind and ends with an explicit raise so a future
+    kind is another branch, not a rewrite.
     """
-    kind = "user" if message.role == "user" else "answer"
+    kind = "user" if message.role == "user" else (message.turn_kind or "answer")
     created_at = message.created_at.isoformat()
     if kind == "user":
         return UserTurn(content=message.content, created_at=created_at)
+    if kind == "arena":
+        stored = message.arena or {}
+        return ArenaTurn(
+            content=message.content,
+            created_at=created_at,
+            winner=stored.get("winner"),
+            sides=[
+                ArenaTurnSide(
+                    key=side.get("key"),
+                    model=side.get("model"),
+                    knowledge_base_id=side.get("knowledge_base_id"),
+                    content=side.get("content", ""),
+                    sources=[SourceRef.model_validate(s) for s in (side.get("sources") or [])],
+                )
+                for side in stored.get("sides") or []
+            ],
+        )
     if kind == "answer":
         raw_feedback = feedback.get(message.request_id) if message.request_id else None
         return AnswerTurn(
