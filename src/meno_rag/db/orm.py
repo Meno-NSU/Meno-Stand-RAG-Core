@@ -166,6 +166,7 @@ class MessageFeedback(Base):
     run_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     value: Mapped[str] = mapped_column(String(8), nullable=False)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

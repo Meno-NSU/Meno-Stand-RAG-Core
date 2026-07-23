@@ -113,18 +113,28 @@ async def test_get_conversation_feedback_is_scoped_to_the_caller(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_conversation_feedback_for_a_guest_reads_untagged_rows(tmp_path):
+async def test_get_conversation_feedback_for_a_guest_reads_their_own_tagged_rows(tmp_path):
+    """A guest is identified by a real guest_session_id (Task 5a), not by the mere absence
+    of a user_id — that old fallback made every guest's untagged row visible to every other
+    guest, which is the bug this task fixes. With no identity at all (no user_id, no
+    guest_session_id) there is no subject to scope to, so the read returns nothing."""
     from meno_rag.db import repositories
 
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'fb2.sqlite3'}")
     await db.init_models()
     try:
         async with db.sessionmaker() as s:
-            await repositories.upsert_message_feedback(s, run_id="run-1", session_id="c1", value="up")
+            await repositories.upsert_message_feedback(
+                s, run_id="run-1", session_id="c1", value="up", guest_session_id="g1"
+            )
             await s.commit()
 
         async with db.sessionmaker() as s:
-            got = await repositories.get_conversation_feedback(s, conversation_id="c1", user_id=None)
+            got = await repositories.get_conversation_feedback(s, conversation_id="c1", guest_session_id="g1")
         assert got == {"run-1": {"rating": "up", "comment": None}}
+
+        async with db.sessionmaker() as s:
+            anonymous = await repositories.get_conversation_feedback(s, conversation_id="c1")
+        assert anonymous == {}
     finally:
         await db.close()

@@ -308,6 +308,7 @@ async def upsert_message_feedback(
     value: str,
     comment: str | None = None,
     user_id: str | None = None,
+    guest_session_id: str | None = None,
 ) -> None:
     result = await session.execute(
         select(MessageFeedback).where(
@@ -324,6 +325,7 @@ async def upsert_message_feedback(
                 value=value,
                 comment=comment,
                 user_id=user_id,
+                guest_session_id=guest_session_id,
             )
         )
     else:
@@ -331,6 +333,8 @@ async def upsert_message_feedback(
         feedback.comment = comment
         if user_id is not None:
             feedback.user_id = user_id
+        if guest_session_id is not None:
+            feedback.guest_session_id = guest_session_id
         feedback.updated_at = datetime.now(UTC)
 
 
@@ -347,24 +351,26 @@ async def clear_message_feedback(session: AsyncSession, *, run_id: str, session_
 
 
 async def get_conversation_feedback(
-    session: AsyncSession, *, conversation_id: str, user_id: str | None = None
+    session: AsyncSession, *, conversation_id: str, user_id: str | None = None, guest_session_id: str | None = None
 ) -> dict[str, dict[str, str | None]]:
     """The caller's ratings in this conversation, keyed by run_id.
 
-    This filter is a partial mitigation, not an ownership boundary. `MessageFeedback`
-    carries `UniqueConstraint("run_id", "session_id")` (see db/orm.py), so there is exactly
-    one row per (run_id, session_id) — never a competing row per subject. The write path
-    (`/v1/feedback`) resolves no guest session and performs no ownership check, so a third
-    party who knows a run_id/session_id does not leave a second row alongside the rightful
-    owner's; they overwrite the single existing row and retag its user_id to themselves.
-    That is silent data loss this filter cannot undo — the rating is gone before this query
-    ever runs — and the durable fix belongs on the write path, not here.
-
-    What this filter does still guarantee: a signed-in caller is never shown a row that was
-    retagged to somebody else — they see only rows tagged with their own user_id; a guest
-    sees only untagged rows (guests are never tagged on write).
+    The write path (`/v1/feedback`) now checks conversation ownership before every upsert
+    (see `conversation_owner_matches` and its callers in `api/feedback.py`), so a row tagged
+    with a given `user_id`/`guest_session_id` was in fact written by that subject — this is
+    no longer a partial mitigation standing in for a missing boundary, it is a real per-
+    subject scope. A signed-in caller sees only rows tagged with their own `user_id`; a
+    guest sees only rows tagged with their own `guest_session_id` — two different guests are
+    now distinguishable, unlike the old fallback to `user_id IS NULL`, which was every
+    guest's row at once. With neither id (no authenticated user, no guest session) there is
+    no subject to scope to, so nothing is returned.
     """
-    clause = MessageFeedback.user_id == user_id if user_id is not None else MessageFeedback.user_id.is_(None)
+    if user_id is not None:
+        clause = MessageFeedback.user_id == user_id
+    elif guest_session_id is not None:
+        clause = MessageFeedback.guest_session_id == guest_session_id
+    else:
+        return {}
     rows = (
         (await session.execute(select(MessageFeedback).where(MessageFeedback.session_id == conversation_id, clause)))
         .scalars()

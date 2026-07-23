@@ -99,7 +99,7 @@ async def get_conversation(conversation_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Conversation not found.")
         messages = await repositories.get_conversation_messages(session, conversation_id)
         feedback = await repositories.get_conversation_feedback(
-            session, conversation_id=conversation_id, user_id=user_id
+            session, conversation_id=conversation_id, user_id=user_id, guest_session_id=guest_id
         )
         survey = await repositories.get_session_survey(session, conversation_id=conversation_id)
     return {
