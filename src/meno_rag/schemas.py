@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -30,6 +30,45 @@ class ClearHistoryRequest(BaseModel):
 class ClearHistoryResponse(BaseModel):
     chat_id: str
     status: str
+
+
+class SourceRef(BaseModel):
+    document_title: str
+    source_url: str
+
+
+class TurnFeedback(BaseModel):
+    rating: Literal["up", "down"]
+    comment: str | None = None
+
+
+class UserTurn(BaseModel):
+    kind: Literal["user"] = "user"
+    content: str
+    created_at: str
+
+
+class AnswerTurn(BaseModel):
+    kind: Literal["answer"] = "answer"
+    content: str
+    created_at: str
+    model: str | None = None
+    request_id: str | None = None
+    sources: list[SourceRef] = Field(default_factory=list)
+    feedback: TurnFeedback | None = None
+
+
+ConversationTurn = Annotated[UserTurn | AnswerTurn, Field(discriminator="kind")]
+
+
+class SurveyAnswer(BaseModel):
+    answer: Literal["yes", "maybe", "no", "skipped"]
+
+
+class ConversationResponse(BaseModel):
+    id: str
+    survey: SurveyAnswer | None = None
+    turns: list[ConversationTurn]
 
 
 class VoteRequest(BaseModel):

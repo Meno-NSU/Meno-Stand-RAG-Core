@@ -11,7 +11,14 @@ from meno_rag.api import auth, guest
 from meno_rag.db import repositories
 from meno_rag.db.orm import Conversation, Message
 from meno_rag.db.session import Database
-from meno_rag.schemas import ClearHistoryRequest, ClearHistoryResponse
+from meno_rag.schemas import (
+    AnswerTurn,
+    ClearHistoryRequest,
+    ClearHistoryResponse,
+    ConversationResponse,
+    SurveyAnswer,
+    UserTurn,
+)
 
 router = APIRouter(tags=["history"])
 
@@ -26,7 +33,7 @@ async def _resolve_subject(request: Request) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> dict:
+def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> UserTurn | AnswerTurn:
     """One rendered turn: each kind carries exactly its own fields, so a client switches on
     `kind` rather than reaching for a key that belongs to another kind (a user turn has no
     `sources`; an answer turn's `feedback` is nullable because an unrated answer is
@@ -38,19 +45,24 @@ def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> dict:
     explicit raise precisely so that addition is another branch, not a rewrite.
     """
     kind = "user" if message.role == "user" else "answer"
-    turn: dict = {
-        "kind": kind,
-        "content": message.content,
-        "created_at": message.created_at.isoformat(),
-    }
+    created_at = message.created_at.isoformat()
     if kind == "user":
-        return turn
+        return UserTurn(content=message.content, created_at=created_at)
     if kind == "answer":
-        turn["model"] = message.model
-        turn["request_id"] = message.request_id
-        turn["sources"] = message.sources or []
-        turn["feedback"] = feedback.get(message.request_id) if message.request_id else None
-        return turn
+        # `message.sources` and `feedback.get(...)` are typed via the generic JSON-column and
+        # untyped-dict shapes upstream (orm.py's shared JsonCompat annotation on `sources`;
+        # repositories.get_conversation_feedback's `dict[str, dict]` return). The actual values
+        # are always {"document_title", "source_url"} / {"rating", "comment"} shaped, and
+        # AnswerTurn's own field validation enforces that at construction time, so mypy needs
+        # the hint here rather than a change to those shared upstream types.
+        return AnswerTurn(
+            content=message.content,
+            created_at=created_at,
+            model=message.model,
+            request_id=message.request_id,
+            sources=message.sources or [],  # type: ignore[arg-type]
+            feedback=feedback.get(message.request_id) if message.request_id else None,  # type: ignore[arg-type]
+        )
     raise ValueError(f"Unrecognised turn kind: {kind!r}")
 
 
@@ -85,8 +97,8 @@ async def list_conversations(request: Request):
     }
 
 
-@router.get("/v1/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, request: Request):
+@router.get("/v1/conversations/{conversation_id}", response_model=ConversationResponse)
+async def get_conversation(conversation_id: str, request: Request) -> ConversationResponse:
     user_id, guest_id = await _resolve_subject(request)
     if user_id is None and guest_id is None:
         raise HTTPException(status_code=401, detail="A JWT or X-Guest-Token is required.")
@@ -102,8 +114,8 @@ async def get_conversation(conversation_id: str, request: Request):
             session, conversation_id=conversation_id, user_id=user_id, guest_session_id=guest_id
         )
         survey = await repositories.get_session_survey(session, conversation_id=conversation_id)
-    return {
-        "id": conversation_id,
-        "survey": survey,
-        "turns": [_serialize_turn(m, feedback=feedback) for m in messages],
-    }
+    return ConversationResponse(
+        id=conversation_id,
+        survey=SurveyAnswer.model_validate(survey) if survey is not None else None,
+        turns=[_serialize_turn(m, feedback=feedback) for m in messages],
+    )

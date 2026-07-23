@@ -164,3 +164,9 @@ def test_unrated_answer_and_unanswered_survey_are_null(client, db_path):
 
     assert body["survey"] is None
     assert body["turns"][1]["feedback"] is None
+
+
+def test_openapi_publishes_the_turn_shapes(client):
+    schema = client.get("/openapi.json").json()
+    names = set(schema["components"]["schemas"])
+    assert {"UserTurn", "AnswerTurn", "ConversationResponse"} <= names
