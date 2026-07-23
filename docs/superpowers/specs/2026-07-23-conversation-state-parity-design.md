@@ -194,6 +194,16 @@ covers the remainder):
   up what is already stored, so those conversations will restore looking odd. A cleanup
   pass needs a reliable way to recognise the pattern — worth deciding once Part B shows how
   visible it is.
+- **Guest erasure is still incomplete for surveys and arena votes.** Adding
+  `message_feedback.guest_session_id` let `delete_subject_data`'s guest branch sweep a guest's
+  ratings, including those left on a conversation they do not own — an untagged legacy
+  conversation, which the write policy still permits anyone to rate. `SessionSurvey` and
+  `ArenaVote` have no guest owner column, so the same rows survive a guest's 152-ФЗ erasure
+  request. Closing it needs the same shape of change per table: a nullable `guest_session_id`,
+  a migration, population on write, and a matching sweep line. Narrow — it only affects rows on
+  conversations the subject does not own, since the per-conversation cascade catches the rest —
+  but it is a right-to-erasure path and should not stay open indefinitely.
+
 - Retrieval-set storage (Цель 3) is unchanged and stays improvement-gated.
 - Guest conversations are not adopted into an account on sign-in (decided 2026-07-23).
 - **Dropping the analytics `sources` table.** Once messages carry the shown sources it holds
