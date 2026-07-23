@@ -1054,9 +1054,20 @@ session), and before each of the three writes:
 Absent conversation is allowed on purpose — see the docstring in the second test. This mirrors
 `_persist_success`, which also only bails when the conversation exists and is owned by someone
 else. Factor the check so all three endpoints share it rather than repeating it three times.
+Cover `/v1/feedback/clear` too, or a stranger can still delete a rating they cannot overwrite.
 
-Pass `guest_session_id` through to `upsert_message_feedback` and `upsert_session_survey`, and
-have them store it the way they already store `user_id`.
+Pass `guest_session_id` through to `upsert_message_feedback` and have it store it the way it
+already stores `user_id`. **Not** to `upsert_session_survey`: `SessionSurvey` has no such
+column, this task adds none, and the survey answer is deliberately a property of the
+conversation rather than of a subject (step 6). The ownership check on `submit_survey` is what
+protects it.
+
+Also close the erasure gap this column makes fixable: `delete_subject_data`'s guest branch
+sweeps only `ConsentEvent` and `GuestSession`, while its user branch also deletes
+`MessageFeedback`, `SessionSurvey` and `ArenaVote` by `user_id`. With a guest owner column, the
+guest branch can now delete `MessageFeedback` by `guest_session_id` — a 152-ФЗ right-to-erasure
+path. `SessionSurvey` and `ArenaVote` still have no guest owner, so leave them and say so in the
+docstring.
 
 - [ ] **Step 6: Scope the read by the actual subject**
 
