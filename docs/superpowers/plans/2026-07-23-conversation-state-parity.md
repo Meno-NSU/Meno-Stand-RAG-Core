@@ -40,7 +40,8 @@ does not exist in production.
 **Revision ids must be ≤32 characters.** `alembic_version.version_num` is `VARCHAR(32)`.
 PostgreSQL enforces it, SQLite does not, so an over-long id passes locally and fails on
 deploy — this happened on 2026-07-22. `tests/test_migrate.py::test_revision_ids_fit_the_alembic_version_column`
-guards it now. `0013_message_sources` (20) and `0014_message_arena` (18) are both fine.
+guards it now. `0013_message_sources` (20), `0014_feedback_guest_owner` (24) and
+`0015_message_arena` (18) are all fine.
 
 **JSON columns follow an existing split:** `sa.JSON()` in the migration, `JsonCompat` in the
 ORM (`JsonCompat = JSON().with_variant(JSONB, "postgresql")`, defined at
@@ -85,7 +86,7 @@ the captured log.
 |---|---|---|
 | `src/meno_rag/db/orm.py` | `Message.sources`, `Message.turn_kind`, `Message.arena` | 1, 3 |
 | `alembic/versions/0013_message_sources.py` | add `messages.sources` (new) | 1 |
-| `alembic/versions/0014_message_arena.py` | add `messages.turn_kind`, `messages.arena` (new) | 3 |
+| `alembic/versions/0015_message_arena.py` | add `messages.turn_kind`, `messages.arena` (new) | 3 |
 | `src/meno_rag/db/repositories.py` | `append_message(sources=…)`, `get_conversation_feedback`, `get_session_survey`, `append_arena_turn`, `set_arena_turn_winner` | 1, 2, 3 |
 | `src/meno_rag/api/main.py` | pass `outcome.sources` to `append_message`; skip conversation writes for arena requests | 1, 3 |
 | `src/meno_rag/api/history.py` | build the `turns` response | 1, 2, 3 |
@@ -917,6 +918,295 @@ git commit -m "feat(history): restore ratings and the survey answer with the con
 
 ---
 
+## Task 5a: Give interaction state a real owner
+
+Added after a code review of phase 2. `POST /v1/feedback` resolves no guest session and checks
+no ownership — it is accepted with no credentials at all — and `message_feedback` carries
+`UniqueConstraint("run_id", "session_id")`, so there is exactly **one** row per (run,
+conversation). A third party who knows a conversation id does not create a competing row: they
+overwrite the owner's rating and retag `user_id` to themselves. Phase 2's read-side filter can
+only hide that row, never disambiguate it — it turned a leak into silent data loss. Phase 2
+also began returning `request_id`, which hands a reader the other half of the pair.
+
+Two consequences fixed here: third parties can no longer write into a conversation they do not
+own, and `user_id` stops doing double duty as both "who" and "was signed in" — a guest's rows
+get a real owner, so two guests can no longer see each other's ratings.
+
+**Files:**
+- Modify: `src/meno_rag/db/orm.py` (`MessageFeedback`)
+- Create: `alembic/versions/0014_feedback_guest_owner.py`
+- Modify: `src/meno_rag/api/feedback.py`
+- Modify: `src/meno_rag/db/repositories.py`
+- Modify: `src/meno_rag/api/history.py` (pass the guest id to the read)
+- Modify: `tests/test_migrate.py:89`, `tests/test_reset.py:102`
+- Create: `tests/test_feedback_ownership.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_feedback_ownership.py`. Build the app with the `auth`, `guest`, `history` and
+`feedback` routers, following `tests/test_conversation_turns.py`'s synchronous `_with_db` /
+`db_path` / `client` fixtures — copy that structure, do not invent a new one.
+
+```python
+def test_a_stranger_cannot_overwrite_another_subjects_rating(client, db_path):
+    owner = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
+    assert client.post(
+        "/v1/feedback",
+        json={"completion_id": "run-1", "session_id": "c1", "value": "up", "comment": "моя оценка"},
+        headers=owner,
+    ).status_code == 200
+
+    stranger = _guest_headers(client)  # a second, unrelated guest session
+    assert client.post(
+        "/v1/feedback",
+        json={"completion_id": "run-1", "session_id": "c1", "value": "down"},
+        headers=stranger,
+    ).status_code == 404
+
+    body = client.get("/v1/conversations/c1", headers=owner).json()
+    assert body["turns"][1]["feedback"] == {"rating": "up", "comment": "моя оценка"}
+
+
+def test_feedback_is_accepted_when_no_conversation_was_stored(client, db_path):
+    """Declining the history consent means no conversation row exists, but the answer was still
+    shown and may still be rated. Absent conversation → nothing to own → allow, mirroring
+    _persist_success, which only bails when the conversation exists and belongs to someone else."""
+    headers = _guest_headers(client)
+    assert client.post(
+        "/v1/feedback",
+        json={"completion_id": "run-x", "session_id": "never-stored", "value": "up"},
+        headers=headers,
+    ).status_code == 200
+
+
+def test_one_guest_does_not_see_another_guests_rating_on_an_untagged_conversation(client, db_path):
+    """`conversation_owner_matches` lets anyone read an untagged (legacy) conversation, so
+    before guest_session_id existed both guests' rows were indistinguishable `user_id IS NULL`."""
+    first = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=None)  # untagged
+    client.post(
+        "/v1/feedback",
+        json={"completion_id": "run-1", "session_id": "c1", "value": "up"},
+        headers=first,
+    )
+
+    second = _guest_headers(client)
+    body = client.get("/v1/conversations/c1", headers=second).json()
+    assert body["turns"][1]["feedback"] is None
+
+
+def test_migration_adds_the_guest_owner_column(tmp_path):
+    url = f"sqlite:///{tmp_path / 'm.sqlite3'}"
+    assert run_bootstrap(url) == 0
+    engine = create_engine(url)
+    try:
+        columns = {c["name"] for c in inspect(engine).get_columns("message_feedback")}
+    finally:
+        engine.dispose()
+    assert "guest_session_id" in columns
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+```bash
+uv run --frozen pytest tests/test_feedback_ownership.py -v
+```
+
+Expected: the stranger POST returns 200 instead of 404; the cross-guest read shows the other
+guest's rating; the migration column is missing.
+
+- [ ] **Step 3: Add the owner column**
+
+In `src/meno_rag/db/orm.py`, in `class MessageFeedback`, after `user_id`:
+
+```python
+    guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+```
+
+Create `alembic/versions/0014_feedback_guest_owner.py`, matching the style of
+`0013_message_sources.py`: `revision = "0014_feedback_guest_owner"`,
+`down_revision = "0013_message_sources"`, `op.add_column("message_feedback", sa.Column("guest_session_id", sa.String(length=32), nullable=True))`
+in `upgrade`, the matching `op.drop_column` in `downgrade`. Add the index the ORM declares with
+`op.create_index` / `op.drop_index`, following how `0010_conversation_guest_owner.py` did the
+same thing for `conversations` — read it and copy its approach rather than inventing one.
+
+- [ ] **Step 4: Move BOTH head-revision pins**
+
+`tests/test_migrate.py:89` and `tests/test_reset.py:102`: `"0013_message_sources"` →
+`"0014_feedback_guest_owner"`.
+
+- [ ] **Step 5: Resolve the subject and check ownership on every feedback write**
+
+`src/meno_rag/api/feedback.py` currently calls only `auth.resolve_optional_user`. Give it the
+same `_resolve_subject` shape `src/meno_rag/api/history.py` already has (user first, then guest
+session), and before each of the three writes:
+
+```python
+        conversation = await session.get(Conversation, payload.session_id)
+        if conversation is not None and not repositories.conversation_owner_matches(
+            conversation, user_id=user_id, guest_session_id=guest_id
+        ):
+            # Do not reveal that someone else's conversation exists.
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+```
+
+Absent conversation is allowed on purpose — see the docstring in the second test. This mirrors
+`_persist_success`, which also only bails when the conversation exists and is owned by someone
+else. Factor the check so all three endpoints share it rather than repeating it three times.
+
+Pass `guest_session_id` through to `upsert_message_feedback` and `upsert_session_survey`, and
+have them store it the way they already store `user_id`.
+
+- [ ] **Step 6: Scope the read by the actual subject**
+
+`get_conversation_feedback` currently takes only `user_id` and falls back to
+`MessageFeedback.user_id.is_(None)` for guests, which cannot tell two guests apart. Give it
+`guest_session_id` as well and scope on whichever identifies the caller:
+
+```python
+    if user_id is not None:
+        clause = MessageFeedback.user_id == user_id
+    elif guest_session_id is not None:
+        clause = MessageFeedback.guest_session_id == guest_session_id
+    else:
+        return {}
+```
+
+Update its docstring: the write path now checks ownership, so this is no longer a partial
+mitigation standing in for a missing boundary. Update the call in `history.get_conversation` to
+pass `guest_session_id=guest_id`.
+
+Leave `get_session_survey` unscoped — its `UniqueConstraint("session_id")` makes the answer a
+property of the conversation, and the caller has already passed the ownership check. The
+docstring already says so; make sure it still reads true.
+
+- [ ] **Step 7: Run everything this touches**
+
+```bash
+uv run --frozen pytest tests/test_feedback_ownership.py tests/test_feedback_api.py tests/test_repositories_feedback.py tests/test_conversation_turns.py tests/test_history.py tests/test_migrate.py tests/test_reset.py tests/test_export_feedback.py -v
+uv run --frozen mypy src/meno_rag && uv run --frozen ruff check src tests
+```
+
+`tests/test_feedback_api.py` posts feedback without seeding a conversation, so it should keep
+passing on the absent-conversation branch — if it does not, that is a real finding, not a test
+to paper over.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/meno_rag/db/orm.py alembic/versions/0014_feedback_guest_owner.py src/meno_rag/api/feedback.py src/meno_rag/db/repositories.py src/meno_rag/api/history.py tests/test_migrate.py tests/test_reset.py tests/test_feedback_ownership.py
+git commit -m "fix(feedback): require conversation ownership and give guest ratings an owner"
+```
+
+---
+
+## Task 5b: Publish the response shape as a schema
+
+`GET /v1/conversations/{id}` is the contract between this repository and Meno-Web, whose own
+spec is written against it — but it returns a plain `dict`, so it contributes an empty schema to
+OpenAPI and the only source of truth is a markdown file that will drift. Doing this before Task 8
+adds a third turn kind makes that task additive.
+
+**Files:**
+- Modify: `src/meno_rag/schemas.py`
+- Modify: `src/meno_rag/api/history.py`
+- Modify: `tests/test_conversation_turns.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `tests/test_conversation_turns.py`:
+
+```python
+def test_openapi_publishes_the_turn_shapes(client):
+    schema = client.get("/openapi.json").json()
+    names = set(schema["components"]["schemas"])
+    assert {"UserTurn", "AnswerTurn", "ConversationResponse"} <= names
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+```bash
+uv run --frozen pytest tests/test_conversation_turns.py -v -k openapi
+```
+
+Expected: FAIL — `KeyError: 'components'` or the names are absent; the endpoint declares no
+`response_model`.
+
+- [ ] **Step 3: Declare the models**
+
+In `src/meno_rag/schemas.py`:
+
+```python
+class SourceRef(BaseModel):
+    document_title: str
+    source_url: str
+
+
+class TurnFeedback(BaseModel):
+    rating: Literal["up", "down"]
+    comment: str | None = None
+
+
+class UserTurn(BaseModel):
+    kind: Literal["user"] = "user"
+    content: str
+    created_at: str
+
+
+class AnswerTurn(BaseModel):
+    kind: Literal["answer"] = "answer"
+    content: str
+    created_at: str
+    model: str | None = None
+    request_id: str | None = None
+    sources: list[SourceRef] = Field(default_factory=list)
+    feedback: TurnFeedback | None = None
+
+
+ConversationTurn = Annotated[UserTurn | AnswerTurn, Field(discriminator="kind")]
+
+
+class SurveyAnswer(BaseModel):
+    answer: Literal["yes", "maybe", "no", "skipped"]
+
+
+class ConversationResponse(BaseModel):
+    id: str
+    survey: SurveyAnswer | None = None
+    turns: list[ConversationTurn]
+```
+
+`created_at` stays a `str`: the endpoint already emits `.isoformat()` and changing it to a
+`datetime` would change the wire format for no gain here. `Annotated` comes from `typing`;
+`Literal` and `Field` are already imported in this module.
+
+- [ ] **Step 4: Return them**
+
+In `src/meno_rag/api/history.py`, have `_serialize_turn` return `UserTurn` / `AnswerTurn`
+instead of a `dict`, keeping the explicit per-kind dispatch and the final `raise`. Decorate the
+route with `response_model=ConversationResponse` and return a `ConversationResponse`.
+
+The wire format must not change — every existing assertion in `tests/test_conversation_turns.py`
+must still pass untouched. If one does not, stop and report it rather than editing the
+assertion: a changed response shape is a finding.
+
+- [ ] **Step 5: Run and check**
+
+```bash
+uv run --frozen pytest tests/test_conversation_turns.py tests/test_history.py tests/test_feedback_ownership.py -v
+uv run --frozen mypy src/meno_rag && uv run --frozen ruff check src tests
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/meno_rag/schemas.py src/meno_rag/api/history.py tests/test_conversation_turns.py
+git commit -m "feat(history): publish the conversation response as a discriminated union"
+```
+
+---
+
 # Phase 3 — Arena
 
 Read this before starting. Today both arena sides POST `/v1/chat/completions` with the
@@ -938,7 +1228,7 @@ user row plus one assistant row.
 
 **Files:**
 - Modify: `src/meno_rag/db/orm.py` (`class Message`)
-- Create: `alembic/versions/0014_message_arena.py`
+- Create: `alembic/versions/0015_message_arena.py`
 - Modify: `tests/test_migrate.py:89`
 - Create: `tests/test_arena_turn_persistence.py`
 
@@ -1011,13 +1301,13 @@ Expected: 1 passed.
 
 - [ ] **Step 5: Write the migration**
 
-Create `alembic/versions/0014_message_arena.py`:
+Create `alembic/versions/0015_message_arena.py`:
 
 ```python
 """messages.turn_kind + messages.arena — one row per arena comparison
 
-Revision ID: 0014_message_arena
-Revises: 0013_message_sources
+Revision ID: 0015_message_arena
+Revises: 0014_feedback_guest_owner
 Create Date: 2026-07-23
 """
 
@@ -1027,8 +1317,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0014_message_arena"
-down_revision = "0013_message_sources"
+revision = "0015_message_arena"
+down_revision = "0014_feedback_guest_owner"
 branch_labels = None
 depends_on = None
 
@@ -1049,7 +1339,7 @@ def downgrade() -> None:
 - [ ] **Step 6: Move BOTH head-revision pins**
 
 In `tests/test_migrate.py:89` and `tests/test_reset.py:102`, replace
-`"0013_message_sources"` with `"0014_message_arena"`. Both files assert the head; missing
+`"0014_feedback_guest_owner"` with `"0015_message_arena"`. Both files assert the head; missing
 either turns the suite red.
 
 - [ ] **Step 7: Run the migration tests**
@@ -1063,7 +1353,7 @@ Expected: all pass.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/meno_rag/db/orm.py alembic/versions/0014_message_arena.py tests/test_migrate.py tests/test_reset.py tests/test_arena_turn_persistence.py
+git add src/meno_rag/db/orm.py alembic/versions/0015_message_arena.py tests/test_migrate.py tests/test_reset.py tests/test_arena_turn_persistence.py
 git commit -m "feat(arena): columns for storing a comparison as a single turn"
 ```
 
