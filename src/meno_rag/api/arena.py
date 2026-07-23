@@ -17,6 +17,7 @@ async def submit_vote(vote: VoteRequest, request: Request):
     user_id, guest_id = await _resolve_subject(request)
     payload = vote.model_dump()
     payload["user_id"] = user_id
+    payload["guest_session_id"] = guest_id
     key = f"{vote.model_a}:{vote.kb_a}|{vote.model_b}:{vote.kb_b}"
     async with lock.acquire(key), database.sessionmaker() as session:
         if vote.session_id:

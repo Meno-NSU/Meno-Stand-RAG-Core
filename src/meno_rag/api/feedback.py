@@ -82,6 +82,7 @@ async def submit_survey(payload: SurveyRequest, request: Request):
             session_id=payload.session_id,
             answer=payload.answer,
             user_id=user_id,
+            guest_session_id=guest_id,
         )
         await session.commit()
     return {"status": "ok"}

@@ -252,21 +252,23 @@ covers the remainder):
   if taken. `submit_arena_vote` has the identical theoretical race today. Narrow, and a retry
   seconds apart — the realistic case — is fully covered.
 
-- **The survey is not subject-scoped on read or write.** On an untagged (legacy) conversation,
-  which anyone may read, one guest can see another's survey answer and overwrite it via
-  `POST /v1/feedback/survey`. Closing it needs the same `guest_session_id` column
-  `message_feedback` got — the same change the erasure gap below needs, so they should be done
-  together.
+- ~~**The survey is not subject-scoped on read.**~~ Closed by `0016_guest_owner_surveys_votes`:
+  `session_surveys` and `arena_votes` now carry `guest_session_id`, and `get_session_survey`
+  scopes by the caller the way `get_conversation_feedback` does.
 
-- **Guest erasure is still incomplete for surveys and arena votes.** Adding
-  `message_feedback.guest_session_id` let `delete_subject_data`'s guest branch sweep a guest's
-  ratings, including those left on a conversation they do not own — an untagged legacy
-  conversation, which the write policy still permits anyone to rate. `SessionSurvey` and
-  `ArenaVote` have no guest owner column, so the same rows survive a guest's 152-ФЗ erasure
-  request. Closing it needs the same shape of change per table: a nullable `guest_session_id`,
-  a migration, population on write, and a matching sweep line. Narrow — it only affects rows on
-  conversations the subject does not own, since the per-conversation cascade catches the rest —
-  but it is a right-to-erasure path and should not stay open indefinitely.
+- ~~**Guest erasure is incomplete for surveys and arena votes.**~~ Closed by the same migration —
+  `delete_subject_data`'s guest branch now sweeps both by `guest_session_id`, so its two branches
+  reach equally far.
+
+- **A cross-subject write can still overwrite one row, on both feedback and surveys.**
+  `upsert_message_feedback` matches on `(run_id, session_id)` and `upsert_session_survey` on
+  `session_id` alone — neither scopes the match by the caller. The ownership check on the endpoint
+  stops this for a conversation that has an owner, so what remains is untagged (legacy)
+  conversations, which `conversation_owner_matches` deliberately lets anyone write to. There, a
+  second subject's answer still silently replaces the first and retags the row to itself. Closing
+  it means deciding what a cross-subject collision should do under `UniqueConstraint("session_id")`
+  — refuse, or keep one row per subject and drop the constraint — which is a design decision, not
+  a mechanical fix.
 
 - Retrieval-set storage (Цель 3) is unchanged and stays improvement-gated.
 - Guest conversations are not adopted into an account on sign-in (decided 2026-07-23).

@@ -136,6 +136,68 @@ async def test_erases_a_guests_rating_on_a_conversation_they_do_not_own(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_erases_a_guests_survey_answer_on_a_conversation_they_do_not_own(tmp_path):
+    """Mirrors test_erases_a_guests_rating_on_a_conversation_they_do_not_own, but for
+    SessionSurvey. UniqueConstraint("session_id") means only one subject's answer can be
+    the current row for a given conversation, so — unlike the feedback test above, which
+    seeds two independent rows on two different runs — this seeds a single row tagged to
+    g1 and checks it is swept even though g1 never owned the conversation itself.
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'gs.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            s.add(GuestSession(id="g1", secret_hash="h-g1", expires_at=datetime.now(UTC) + timedelta(days=1)))
+            await repositories.ensure_conversation(s, "c-untagged")  # nobody owns this one
+            await repositories.upsert_session_survey(s, session_id="c-untagged", answer="yes", guest_session_id="g1")
+            await s.commit()
+
+        async with db.sessionmaker() as s:
+            await repositories.delete_subject_data(s, guest_session_id="g1")
+            await s.commit()
+
+        assert await _count(db, "session_surveys", "WHERE guest_session_id='g1'") == 0
+        assert await _count(db, "conversations", "WHERE id='c-untagged'") == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_erases_a_guests_arena_vote_on_a_conversation_they_do_not_own(tmp_path):
+    """Mirrors test_erases_a_guests_rating_on_a_conversation_they_do_not_own, but for
+    ArenaVote."""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'gv.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            s.add(GuestSession(id="g1", secret_hash="h-g1", expires_at=datetime.now(UTC) + timedelta(days=1)))
+            await repositories.ensure_conversation(s, "c-untagged")  # nobody owns this one
+            await repositories.submit_arena_vote(
+                s,
+                {
+                    "model_a": "m1",
+                    "kb_a": "kb",
+                    "model_b": "m2",
+                    "kb_b": "kb",
+                    "winner": "a",
+                    "session_id": "c-untagged",
+                    "turn_index": 0,
+                    "guest_session_id": "g1",
+                },
+            )
+            await s.commit()
+
+        async with db.sessionmaker() as s:
+            await repositories.delete_subject_data(s, guest_session_id="g1")
+            await s.commit()
+
+        assert await _count(db, "arena_votes", "WHERE guest_session_id='g1'") == 0
+        assert await _count(db, "conversations", "WHERE id='c-untagged'") == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_requires_exactly_one_subject(tmp_path):
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'e.sqlite3'}")
     await db.init_models()
