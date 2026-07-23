@@ -196,6 +196,16 @@ covers the remainder):
   `{model, messages, stream, user, knowledge_base_id}` — so until Part B ships, arena keeps
   writing the duplicated question and two racing assistant rows described above. The backend
   change is a no-op for production arena traffic on its own.
+- **A vote that arrives before its turn never marks a winner.** `/v1/arena/vote` and
+  `/v1/arena/turn` are independent endpoints with no enforced ordering. If the vote lands first,
+  it is recorded in `arena_votes` and the Elo store correctly, but `set_arena_turn_winner`
+  no-ops because the turn does not exist yet — and once the turn is written with
+  `winner: null`, `submit_arena_vote`'s `(session_id, turn_index)` idempotency treats every
+  later vote for that pair as a duplicate, so the winner can never be set. The comparison
+  restores as unvoted forever. Fixing it means either ordering the two requests in Part B, or
+  having `append_arena_turn` backfill the winner from an existing `arena_votes` row. The second
+  is self-contained and does not depend on the frontend, so it is the better candidate.
+
 - **Existing malformed arena history.** Conversations that already used arena carry
   duplicated questions and split answers. Phase 3 stops producing them but does not clean
   up what is already stored, so those conversations will restore looking odd. A cleanup
