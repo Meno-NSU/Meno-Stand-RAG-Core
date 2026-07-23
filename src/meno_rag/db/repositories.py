@@ -852,10 +852,14 @@ async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, 
         .tuples()
         .all()
     )
-    # The join holds by construction: _persist_success calls ensure_conversation
-    # (conversations.id == session_id) before create_pipeline_run, so every run has
-    # a matching conversation. There is no FK enforcing it — runs inserted outside
-    # that path would be undercounted here.
+    # The join holds by construction for ordinary (non-arena) requests: _persist_success calls
+    # ensure_conversation (conversations.id == session_id) before create_pipeline_run, so every
+    # such run has a matching conversation. It does NOT hold for arena requests — there,
+    # _persist_success skips ensure_conversation entirely (arena turns are only created later,
+    # if ever, by append_arena_turn from /v1/arena/turn), so a pipeline_runs row can exist with
+    # no matching conversation at all. There is no FK enforcing the join either way — runs with
+    # no matching conversation are simply dropped by it, undercounted here rather than
+    # miscounted.
     question_counts = dict(
         (
             await session.execute(

@@ -206,6 +206,31 @@ def test_a_stranger_cannot_clear_another_guests_rating_on_an_untagged_conversati
     assert body["turns"][1]["feedback"] == {"rating": "up", "comment": None}  # A's rating survives
 
 
+def test_a_stranger_cannot_overwrite_another_subjects_survey_answer(client, db_path):
+    """The ownership check was added to /v1/feedback/survey alongside the feedback endpoints
+    (_ensure_conversation_ownership guards all three), but nothing exercised it here.
+    SessionSurvey's UniqueConstraint("session_id") makes this the same overwrite-the-owner
+    class of bug that motivated the feedback ownership work: with no check, a stranger's
+    "no" would silently replace the owner's already-recorded "yes"."""
+    owner = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
+    assert (
+        client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "yes"}, headers=owner).status_code
+        == 200
+    )
+
+    stranger = _guest_headers(client)
+    assert (
+        client.post(
+            "/v1/feedback/survey", json={"session_id": "c1", "answer": "no"}, headers=stranger
+        ).status_code
+        == 404
+    )
+
+    body = client.get("/v1/conversations/c1", headers=owner).json()
+    assert body["survey"] == {"answer": "yes"}  # untouched
+
+
 def test_migration_adds_the_guest_owner_column(tmp_path):
     url = f"sqlite:///{tmp_path / 'm.sqlite3'}"
     assert run_bootstrap(url) == 0

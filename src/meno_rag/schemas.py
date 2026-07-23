@@ -125,16 +125,27 @@ class ArenaSide(BaseModel):
     key: Literal["a", "b"]
     model: str | None = None
     knowledge_base_id: str | None = None
-    content: str
-    request_id: str | None = None
-    sources: list[dict[str, str]] = Field(default_factory=list)
+    # Generous enough for a real answer (settings.max_output_tokens defaults to 8192 tokens;
+    # even a dense, mostly-Cyrillic generation at ~2 chars/token tops out well under 20k
+    # chars), while still bounding a single row's storage cost — this is a cheap direct
+    # database write behind a self-granted guest consent, unlike /v1/chat/completions, which
+    # costs an attacker a full pipeline run.
+    content: str = Field(..., max_length=20_000)
+    # Same reasoning as `content`, capping the count rather than each dict's field lengths:
+    # settings.max_context_chunks defaults to 12, so a real side's shown sources should never
+    # exceed that by more than a small margin.
+    sources: list[dict[str, str]] = Field(default_factory=list, max_length=20)
 
 
 class ArenaTurnRequest(BaseModel):
     """A finished side-by-side comparison, posted once after both sides answer."""
 
     session_id: str = Field(..., min_length=1)
-    question: str = Field(..., min_length=1)
+    # Generous for a pasted paragraph-level question — far above any real chat turn, and well
+    # under settings.max_qa_prompt_chars (60_000, the full system+context+history+question
+    # budget for an actual pipeline run) — while still bounding this endpoint's per-row
+    # storage cost the same way FeedbackRequest.comment (2000) already does for feedback.
+    question: str = Field(..., min_length=1, max_length=8_000)
     turn_index: int | None = Field(default=None, ge=0)
     sides: list[ArenaSide] = Field(..., min_length=2, max_length=2)
 

@@ -213,6 +213,59 @@ def test_side_sources_are_projected_to_title_and_link(client, db_path):
     ]
 
 
+def test_oversized_question_is_rejected(client, db_path):
+    """Unlike /v1/chat/completions, this is a cheap direct database write behind a
+    self-granted guest consent — it costs an attacker no pipeline run. question, sides[].content
+    and sides[].sources are bounded the same way FeedbackRequest.comment already is."""
+    headers = _consenting_guest(client, db_path)
+    turn = {**TURN, "session_id": "c5", "question": "Ы" * 8001}
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 422
+
+
+def test_oversized_side_content_is_rejected(client, db_path):
+    headers = _consenting_guest(client, db_path)
+    turn = {
+        "session_id": "c6",
+        "question": "Вопрос?",
+        "turn_index": 0,
+        "sides": [
+            {**SIDES[0], "content": "Ы" * 20_001},
+            SIDES[1],
+        ],
+    }
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 422
+
+
+def test_too_many_side_sources_is_rejected(client, db_path):
+    headers = _consenting_guest(client, db_path)
+    turn = {
+        "session_id": "c7",
+        "question": "Вопрос?",
+        "turn_index": 0,
+        "sides": [
+            {**SIDES[0], "sources": [{"document_title": "T", "source_url": "U"}] * 21},
+            SIDES[1],
+        ],
+    }
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 422
+
+
+def test_a_realistic_long_answer_is_accepted(client, db_path):
+    """The bound must not reject a legitimately long, real answer — pick a size a verbose
+    generation could plausibly reach (well above typical, still under the 20_000 cap)."""
+    headers = _consenting_guest(client, db_path)
+    turn = {
+        "session_id": "c8",
+        "question": "Вопрос?",
+        "turn_index": 0,
+        "sides": [
+            {**SIDES[0], "content": "Ответ. " * 2000},  # ~14,000 chars
+            SIDES[1],
+        ],
+    }
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 200
+
+
 VOTE = {
     "model_a": "qwen",
     "kb_a": "kb1",
