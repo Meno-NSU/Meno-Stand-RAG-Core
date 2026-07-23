@@ -86,7 +86,7 @@ def test_run_bootstrap_tracked_db_advances_to_head(tmp_path):
         engine.dispose()
     assert "generation_model" in cols_after
     assert "core_model" in cols_after
-    assert rev == "0015_message_arena"
+    assert rev == "0016_guest_owner_surveys_votes"
 
 
 def test_run_bootstrap_untracked_db_fails_with_diagnostic(tmp_path, capsys):
