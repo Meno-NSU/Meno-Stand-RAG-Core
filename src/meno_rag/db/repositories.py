@@ -144,16 +144,13 @@ async def delete_subject_data(
     user) or the guest_session for a guest. Consent events survive; see the note below.
 
     Both branches also sweep records tagged with the subject's own id that the per-
-    conversation cascade above would not reach — most commonly feedback left on a
-    conversation the subject does not own (an untagged/legacy one, which the write-side
-    ownership policy in api/feedback.py still lets anyone rate; see
-    conversation_owner_matches). The registered-user branch reaches further only because
-    ArenaVote and SessionSurvey carry a user_id column with no guest_session_id
-    counterpart: for a user we sweep ArenaVote, MessageFeedback, and SessionSurvey by
-    user_id; for a guest we can only sweep MessageFeedback by guest_session_id — an arena
-    vote or survey answer a guest left on a conversation they don't own has no guest column
-    to match here and is not reachable by this function. Aggregate Elo (arena_ratings) is
-    anonymous and stays regardless.
+    conversation cascade above would not reach — most commonly feedback, a survey answer,
+    or an arena vote left on a conversation the subject does not own (an untagged/legacy
+    one, which the write-side ownership policy in api/feedback.py and api/arena.py still
+    lets anyone touch; see conversation_owner_matches). ArenaVote, MessageFeedback, and
+    SessionSurvey all carry both a user_id column and a guest_session_id column, so the two
+    branches reach equally far: for a user we sweep all three by user_id; for a guest, by
+    guest_session_id. Aggregate Elo (arena_ratings) is anonymous and stays regardless.
 
     ``consent_events`` are deliberately KEPT. Art. 9 of 152-ФЗ puts the burden of proving
     that consent was obtained on the operator, so the evidentiary record has to outlive the
@@ -173,7 +170,9 @@ async def delete_subject_data(
         await session.execute(delete(SessionSurvey).where(SessionSurvey.user_id == user_id))
         await session.execute(delete(User).where(User.id == user_id))
     else:
+        await session.execute(delete(ArenaVote).where(ArenaVote.guest_session_id == guest_session_id))
         await session.execute(delete(MessageFeedback).where(MessageFeedback.guest_session_id == guest_session_id))
+        await session.execute(delete(SessionSurvey).where(SessionSurvey.guest_session_id == guest_session_id))
         await session.execute(delete(GuestSession).where(GuestSession.id == guest_session_id))
 
 
@@ -427,17 +426,33 @@ async def get_conversation_feedback(
     return {row.run_id: {"rating": row.value, "comment": row.comment} for row in rows}
 
 
-async def get_session_survey(session: AsyncSession, *, conversation_id: str) -> dict[str, str] | None:
-    """The end-of-session survey answer for this conversation, or None if unanswered.
+async def get_session_survey(
+    session: AsyncSession, *, conversation_id: str, user_id: str | None = None, guest_session_id: str | None = None
+) -> dict[str, str] | None:
+    """The caller's end-of-session survey answer for this conversation, or None if
+    unanswered — or answered by somebody else.
 
-    Unlike get_conversation_feedback, this takes no user_id and applies no per-subject
-    scoping — deliberately, not an oversight. `SessionSurvey` carries
-    `UniqueConstraint("session_id")`, so the answer is a property of the conversation
-    itself, not of a subject, and the only caller (`get_conversation`) has already passed
-    the conversation ownership check before this runs.
+    Scoped exactly like get_conversation_feedback: a signed-in caller matches on user_id,
+    a guest on guest_session_id, and with neither there is no subject to scope to, so
+    nothing is returned. `SessionSurvey` carries `UniqueConstraint("session_id")` — one row
+    per conversation — which used to read as "the survey is a property of the conversation,
+    not of a subject, so it needs no scoping." That doesn't hold: `conversation_owner_matches`
+    returns True for anyone on an untagged (legacy) conversation, so without this scoping
+    one guest's GET surfaced another guest's answer on such a conversation — the same read
+    leak `message_feedback.guest_session_id` closed for ratings. (The write side is a
+    separate, narrower residual: `upsert_session_survey`'s match is still by session_id
+    alone, same as `upsert_message_feedback`'s, so a second guest posting to the same
+    untagged conversation still overwrites and retags the one row — bounded to legacy
+    conversations, and not what this scoping closes.)
     """
+    if user_id is not None:
+        clause = SessionSurvey.user_id == user_id
+    elif guest_session_id is not None:
+        clause = SessionSurvey.guest_session_id == guest_session_id
+    else:
+        return None
     survey = (
-        await session.execute(select(SessionSurvey).where(SessionSurvey.session_id == conversation_id))
+        await session.execute(select(SessionSurvey).where(SessionSurvey.session_id == conversation_id, clause))
     ).scalar_one_or_none()
     return None if survey is None else {"answer": survey.answer}
 
@@ -573,15 +588,25 @@ async def upsert_session_survey(
     session_id: str,
     answer: str,
     user_id: str | None = None,
+    guest_session_id: str | None = None,
 ) -> None:
     result = await session.execute(select(SessionSurvey).where(SessionSurvey.session_id == session_id))
     survey = result.scalar_one_or_none()
     if survey is None:
-        session.add(SessionSurvey(session_id=session_id, answer=answer, user_id=user_id))
+        session.add(
+            SessionSurvey(
+                session_id=session_id,
+                answer=answer,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+            )
+        )
     else:
         survey.answer = answer
         if user_id is not None:
             survey.user_id = user_id
+        if guest_session_id is not None:
+            survey.guest_session_id = guest_session_id
         survey.updated_at = datetime.now(UTC)
 
 
