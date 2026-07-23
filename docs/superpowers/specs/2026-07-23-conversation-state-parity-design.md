@@ -189,6 +189,13 @@ covers the remainder):
 - **Part B (frontend)** — identity-scoped chat list, loading `GET /v1/conversations` on
   sign-in, lazy per-conversation loading, rendering restored arena turns, and the notice
   telling guests their chats live only in this browser. Separate spec.
+
+  **Part B carries a hard dependency, not just new features.** The arena fix only takes effect
+  once Meno-Web sends `arena: true` on both `/v1/chat/completions` calls of a comparison and
+  posts the finished comparison to `/v1/arena/turn`. Today it sends neither — the chat body is
+  `{model, messages, stream, user, knowledge_base_id}` — so until Part B ships, arena keeps
+  writing the duplicated question and two racing assistant rows described above. The backend
+  change is a no-op for production arena traffic on its own.
 - **Existing malformed arena history.** Conversations that already used arena carry
   duplicated questions and split answers. Phase 3 stops producing them but does not clean
   up what is already stored, so those conversations will restore looking odd. A cleanup
