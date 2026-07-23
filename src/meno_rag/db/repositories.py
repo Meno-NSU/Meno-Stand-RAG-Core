@@ -416,7 +416,29 @@ async def append_arena_turn(
     guest_session_id: str | None = None,
     analysis_allowed: bool = False,
 ) -> None:
-    """Store a comparison as one user row plus one assistant row.
+    """Store a comparison as one user row plus one assistant row, idempotent on
+    (conversation_id, turn_index).
+
+    A retry, a double-fired client effect, or two tabs replaying the same comparison must not
+    create a second (user, assistant) pair — that would reintroduce the duplicated-question,
+    broken-alternation bug this feature exists to fix. When `turn_index` is not None and a
+    stored `turn_kind="arena"` row already carries that `turn_index` for this conversation, it
+    is updated in place instead of appending a second pair (mirrors upsert_message_feedback's
+    insert-or-update shape). The existing user row is left untouched — a repost of the same
+    turn carries the same question, and the invariant this closes is "no duplicate rows", not
+    "keep the question text in sync".
+
+    `turn_index=None` never matches an existing turn and always appends a fresh pair. Matching
+    None against another None would make every turn_index-less post collide with every other
+    one on the conversation — worse than the duplicate this guards against for the clients
+    that never send it.
+
+    If an ArenaVote for (conversation_id, turn_index) already exists — a vote that raced ahead
+    of its own turn — its winner is carried onto the stored turn here: the same value
+    set_arena_turn_winner would have written had the turn existed first. Skipped when
+    turn_index is None for the same collision reason as above (and because
+    set_arena_turn_winner/submit_arena_vote's own dedupe already treat a missing turn_index as
+    unmatchable).
 
     `content` on the assistant row is side A's answer: the column is NOT NULL and previews and
     exports need text, while `winner` may be "tie" or "both_bad", so "the winning answer" is not
@@ -429,17 +451,53 @@ async def append_arena_turn(
         guest_session_id=guest_session_id,
         analysis_allowed=analysis_allowed,
     )
-    await append_message(session, conversation_id=conversation_id, role="user", content=question)
     # Same allow-list as an ordinary answer: this row is written under the service consent,
     # so a side's sources may carry only the title and the link (Цель 1).
-    stored = [{**side, "sources": shown_source_refs(side.get("sources") or [])} for side in sides]
+    stored_sides = [{**side, "sources": shown_source_refs(side.get("sources") or [])} for side in sides]
+
+    existing: Message | None = None
+    winner: str | None = None
+    if turn_index is not None:
+        # Matched in Python rather than queried inside the JSON column, same reasoning as
+        # set_arena_turn_winner: SQLite and PostgreSQL spell JSON queries differently, and on
+        # PostgreSQL the live column is `json`, not `jsonb`, so it has no equality operator to
+        # query with. A conversation holds few arena turns.
+        rows = (
+            (
+                await session.execute(
+                    select(Message).where(
+                        Message.conversation_id == conversation_id, Message.turn_kind == "arena"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        existing = next((row for row in rows if (row.arena or {}).get("turn_index") == turn_index), None)
+        winner = (
+            await session.execute(
+                select(ArenaVote.winner).where(
+                    ArenaVote.session_id == conversation_id,
+                    ArenaVote.turn_index == turn_index,
+                )
+            )
+        ).scalar_one_or_none()
+
+    if existing is not None:
+        # Reassign rather than mutate: a plain JSON column is not change-tracked, so an
+        # in-place `existing.arena["sides"] = ...` would never reach the database.
+        existing.content = stored_sides[0]["content"]
+        existing.arena = {"turn_index": turn_index, "winner": winner, "sides": stored_sides}
+        return
+
+    await append_message(session, conversation_id=conversation_id, role="user", content=question)
     session.add(
         Message(
             conversation_id=conversation_id,
             role="assistant",
-            content=stored[0]["content"],
+            content=stored_sides[0]["content"],
             turn_kind="arena",
-            arena={"turn_index": turn_index, "winner": None, "sides": stored},
+            arena={"turn_index": turn_index, "winner": winner, "sides": stored_sides},
         )
     )
 

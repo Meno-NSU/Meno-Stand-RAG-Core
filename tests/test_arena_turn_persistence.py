@@ -9,13 +9,14 @@ import asyncio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, func, inspect, select
 
 from meno_rag.api import arena, auth, guest, history
 from meno_rag.cache.redis_client import ArenaLock
 from meno_rag.config import Settings
 from meno_rag.db import repositories
 from meno_rag.db.migrate import run_bootstrap
+from meno_rag.db.orm import Message
 from meno_rag.db.session import Database
 
 SIDES = [
@@ -277,3 +278,80 @@ def test_a_strangers_vote_does_not_set_the_winner_on_someone_elses_turn(client, 
     # the owner's own future vote for this turn is not blocked by the dedup check either.
     body = client.get("/v1/conversations/c4", headers=owner_headers).json()
     assert body["turns"][1]["winner"] is None
+
+
+def _message_counts(db_path, conversation_id):
+    async def _count(session):
+        total = (
+            await session.execute(
+                select(func.count()).select_from(Message).where(Message.conversation_id == conversation_id)
+            )
+        ).scalar_one()
+        arena_rows = (
+            await session.execute(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == conversation_id, Message.turn_kind == "arena")
+            )
+        ).scalar_one()
+        return total, arena_rows
+
+    return _with_db(db_path, _count)
+
+
+def test_reposting_the_same_turn_updates_it_in_place_instead_of_duplicating(client, db_path):
+    """A retry, a double-fired React effect, or two tabs replaying one comparison must not
+    write two user rows carrying the same question and two assistant rows — that is exactly
+    the duplicated-question, broken-alternation bug this phase exists to eliminate.
+    append_arena_turn is idempotent on (conversation_id, turn_index): reposting the identical
+    turn updates the existing pair in place rather than appending a second one."""
+    headers = _consenting_guest(client, db_path)
+    turn = {**TURN, "session_id": "c10"}
+
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 200
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 200
+
+    total, arena_rows = _message_counts(db_path, "c10")
+    assert total == 2  # one user row, one assistant row — not four
+    assert arena_rows == 1
+
+    body = client.get("/v1/conversations/c10", headers=headers).json()
+    assert [t["kind"] for t in body["turns"]] == ["user", "arena"]
+
+
+def test_turn_index_none_always_appends_a_fresh_pair(client, db_path):
+    """turn_index is optional (`ArenaTurnRequest.turn_index: int | None`). Matching None
+    against another None would make every turn_index-less post collide with every other one
+    on the same conversation — worse than the duplicate-pair bug this fix closes. So
+    turn_index=None is never treated as a match key: it always appends a new pair, exactly
+    like the pre-fix behaviour for every turn_index."""
+    headers = _consenting_guest(client, db_path)
+    turn = {**TURN, "session_id": "c11", "turn_index": None}
+
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 200
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 200
+
+    total, arena_rows = _message_counts(db_path, "c11")
+    assert total == 4  # two independent pairs
+    assert arena_rows == 2
+
+    body = client.get("/v1/conversations/c11", headers=headers).json()
+    assert [t["kind"] for t in body["turns"]] == ["user", "arena", "user", "arena"]
+
+
+def test_a_vote_that_arrives_before_its_turn_is_reflected_once_the_turn_is_posted(client, db_path):
+    """set_arena_turn_winner no-ops when the turn does not exist yet (the vote raced ahead of
+    its own turn), and submit_arena_vote's dedupe then treats every later vote for that
+    (session_id, turn_index) as a duplicate — so without carrying the vote's winner onto the
+    turn at write time, a comparison restored after a race like this can never show a winner.
+    """
+    headers = _consenting_guest(client, db_path)
+
+    early_vote = {**VOTE, "session_id": "c12", "turn_index": 0, "winner": "b"}
+    assert client.post("/v1/arena/vote", json=early_vote, headers=headers).status_code == 200
+
+    turn = {**TURN, "session_id": "c12", "turn_index": 0}
+    assert client.post("/v1/arena/turn", json=turn, headers=headers).status_code == 200
+
+    body = client.get("/v1/conversations/c12", headers=headers).json()
+    assert body["turns"][1]["winner"] == "b"
