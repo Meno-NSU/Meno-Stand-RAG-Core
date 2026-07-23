@@ -96,6 +96,43 @@ async def test_deletes_registered_account_and_data(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_erases_a_guests_rating_on_a_conversation_they_do_not_own(tmp_path):
+    """A guest may rate an answer on a conversation they don't own — an untagged one, which
+    the write-side ownership policy in api/feedback.py still permits anyone to rate (see
+    conversation_owner_matches's docstring). That MessageFeedback row is tagged with the
+    guest's own guest_session_id, not the conversation's, so the per-conversation cascade
+    above (which only walks conversations the guest actually owns) never reaches it. It must
+    still be erased directly, the same way user_id-tagged feedback is swept for a
+    registered user — and only that guest's row, not a second guest's rating on the very
+    same conversation, and not the conversation itself (which the guest still doesn't own).
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'gf.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            s.add(GuestSession(id="g1", secret_hash="h-g1", expires_at=datetime.now(UTC) + timedelta(days=1)))
+            s.add(GuestSession(id="g2", secret_hash="h-g2", expires_at=datetime.now(UTC) + timedelta(days=1)))
+            await repositories.ensure_conversation(s, "c-untagged")  # nobody owns this one
+            await repositories.upsert_message_feedback(
+                s, run_id="run-1", session_id="c-untagged", value="up", guest_session_id="g1"
+            )
+            await repositories.upsert_message_feedback(
+                s, run_id="run-2", session_id="c-untagged", value="down", guest_session_id="g2"
+            )
+            await s.commit()
+
+        async with db.sessionmaker() as s:
+            await repositories.delete_subject_data(s, guest_session_id="g1")
+            await s.commit()
+
+        assert await _count(db, "message_feedback", "WHERE guest_session_id='g1'") == 0
+        assert await _count(db, "message_feedback", "WHERE guest_session_id='g2'") == 1
+        assert await _count(db, "conversations", "WHERE id='c-untagged'") == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_requires_exactly_one_subject(tmp_path):
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'e.sqlite3'}")
     await db.init_models()

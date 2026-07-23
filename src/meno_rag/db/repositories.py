@@ -121,9 +121,19 @@ async def delete_subject_data(
 
     Deletes every conversation the subject owns (each via delete_conversation_cascade),
     their consent events, and the subject row itself — the account for a registered user
-    (their JWT then resolves to no user) or the guest_session for a guest. For a registered
-    user we also drop any feedback / surveys / arena votes tagged with their user_id that a
-    per-conversation cascade would not reach. Aggregate Elo (arena_ratings) is anonymous and stays.
+    (their JWT then resolves to no user) or the guest_session for a guest.
+
+    Both branches also sweep records tagged with the subject's own id that the per-
+    conversation cascade above would not reach — most commonly feedback left on a
+    conversation the subject does not own (an untagged/legacy one, which the write-side
+    ownership policy in api/feedback.py still lets anyone rate; see
+    conversation_owner_matches). The registered-user branch reaches further only because
+    ArenaVote and SessionSurvey carry a user_id column with no guest_session_id
+    counterpart: for a user we sweep ArenaVote, MessageFeedback, and SessionSurvey by
+    user_id; for a guest we can only sweep MessageFeedback by guest_session_id — an arena
+    vote or survey answer a guest left on a conversation they don't own has no guest column
+    to match here and is not reachable by this function. Aggregate Elo (arena_ratings) is
+    anonymous and stays regardless.
     """
     if (user_id is None) == (guest_session_id is None):
         raise ValueError("Exactly one of user_id / guest_session_id must be set.")
@@ -143,6 +153,7 @@ async def delete_subject_data(
         await session.execute(delete(ConsentEvent).where(ConsentEvent.user_id == user_id))
         await session.execute(delete(User).where(User.id == user_id))
     else:
+        await session.execute(delete(MessageFeedback).where(MessageFeedback.guest_session_id == guest_session_id))
         await session.execute(delete(ConsentEvent).where(ConsentEvent.guest_session_id == guest_session_id))
         await session.execute(delete(GuestSession).where(GuestSession.id == guest_session_id))
 
