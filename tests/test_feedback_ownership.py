@@ -215,15 +215,12 @@ def test_a_stranger_cannot_overwrite_another_subjects_survey_answer(client, db_p
     owner = _guest_headers(client)
     _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
     assert (
-        client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "yes"}, headers=owner).status_code
-        == 200
+        client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "yes"}, headers=owner).status_code == 200
     )
 
     stranger = _guest_headers(client)
     assert (
-        client.post(
-            "/v1/feedback/survey", json={"session_id": "c1", "answer": "no"}, headers=stranger
-        ).status_code
+        client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "no"}, headers=stranger).status_code
         == 404
     )
 

@@ -483,9 +483,7 @@ async def append_arena_turn(
         rows = (
             (
                 await session.execute(
-                    select(Message).where(
-                        Message.conversation_id == conversation_id, Message.turn_kind == "arena"
-                    )
+                    select(Message).where(Message.conversation_id == conversation_id, Message.turn_kind == "arena")
                 )
             )
             .scalars()

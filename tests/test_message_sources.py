@@ -288,9 +288,7 @@ async def test_arena_ownership_conflict_blocks_pipeline_analytics_too(tmp_path):
 
         async with db.sessionmaker() as s:
             run_ids = (await s.execute(select(PipelineRun.id))).scalars().all()
-            owner = (
-                await s.execute(select(Conversation.guest_session_id).where(Conversation.id == "c1"))
-            ).scalar_one()
+            owner = (await s.execute(select(Conversation.guest_session_id).where(Conversation.id == "c1"))).scalar_one()
         assert run_ids == []  # nothing written under the victim's conversation
         assert owner == "victim"  # ownership untouched
     finally:
