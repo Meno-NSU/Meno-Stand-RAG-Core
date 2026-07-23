@@ -76,9 +76,7 @@ def _guest_session_id(db_path):
 
 def _seed_answer_turn(db_path, *, conv_id, guest_session_id=None, user_id=None, run_id="run-1"):
     async def _write(session):
-        await repositories.ensure_conversation(
-            session, conv_id, guest_session_id=guest_session_id, user_id=user_id
-        )
+        await repositories.ensure_conversation(session, conv_id, guest_session_id=guest_session_id, user_id=user_id)
         await repositories.append_message(session, conversation_id=conv_id, role="user", content="Вопрос?")
         await repositories.append_message(
             session,

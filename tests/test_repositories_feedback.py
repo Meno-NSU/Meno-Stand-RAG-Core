@@ -100,9 +100,7 @@ async def test_get_conversation_feedback_is_scoped_to_the_caller(tmp_path):
             await repositories.upsert_message_feedback(
                 s, run_id="run-1", session_id="c1", value="up", comment="Полезно", user_id="u1"
             )
-            await repositories.upsert_message_feedback(
-                s, run_id="run-2", session_id="c1", value="down", user_id="u2"
-            )
+            await repositories.upsert_message_feedback(s, run_id="run-2", session_id="c1", value="down", user_id="u2")
             await s.commit()
 
         async with db.sessionmaker() as s:

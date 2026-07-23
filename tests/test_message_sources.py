@@ -37,9 +37,7 @@ async def test_append_message_round_trips_sources_in_display_order(tmp_path):
             {"document_title": "Приказ 42", "source_url": "https://nsu.ru/42"},
         ]
         async with db.sessionmaker() as s:
-            await repositories.append_message(
-                s, conversation_id="c1", role="assistant", content="ans", sources=sources
-            )
+            await repositories.append_message(s, conversation_id="c1", role="assistant", content="ans", sources=sources)
             await s.commit()
 
         async with db.sessionmaker() as s:
