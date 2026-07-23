@@ -47,6 +47,16 @@ class Message(Base):
     model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     knowledge_base_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    # The sources shown to the user under this answer, in display order. Part of the
+    # answer itself, so it is stored whenever the conversation is — unlike the `sources`
+    # table, which hangs off `pipeline_runs` and therefore only exists with the
+    # improvement opt-in.
+    sources: Mapped[list[dict[str, str]] | None] = mapped_column(JsonCompat, nullable=True)
+    # "answer" for an ordinary reply, "arena" for a side-by-side comparison. An arena turn
+    # is ONE assistant row — both answers live in `arena` — so the strict user/assistant
+    # alternation the backend requires still holds.
+    turn_kind: Mapped[str] = mapped_column(String(16), default="answer", server_default="answer", nullable=False)
+    arena: Mapped[dict | None] = mapped_column(JsonCompat, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
@@ -161,6 +171,7 @@ class MessageFeedback(Base):
     run_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     value: Mapped[str] = mapped_column(String(8), nullable=False)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

@@ -8,6 +8,7 @@ import httpx
 import structlog
 
 from meno_rag.llm.think_detector import extract_thinking, has_thinking
+from meno_rag.logging_config import preview_field
 
 logger = structlog.get_logger(__name__)
 
@@ -184,7 +185,7 @@ def _log_vllm_completion(*, model: str, base_url: str, data: dict[str, Any]) -> 
             )
         log.info(
             "vllm_response",
-            content_preview=visible[:200],
+            **preview_field("content_preview", visible, 200),
             content_chars=len(visible),
             finish_reason=finish_reason,
             prompt_tokens=usage.get("prompt_tokens"),
@@ -215,7 +216,7 @@ def _log_vllm_stream_completion(*, model: str, base_url: str, content: str, fini
             )
         log.info(
             "vllm_stream_response",
-            content_preview=visible[:200],
+            **preview_field("content_preview", visible, 200),
             content_chars=len(visible),
             finish_reason=finish_reason,
         )

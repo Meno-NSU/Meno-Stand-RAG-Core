@@ -77,3 +77,62 @@ async def test_upsert_survey_inserts_then_updates(tmp_path):
         assert rows[0].answer == "yes"
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_get_conversation_feedback_is_scoped_to_the_caller(tmp_path):
+    """Feedback is keyed by (run_id, session_id) with no ownership check on write. This
+    seeds two *different* runs (run-1, run-2) in the same conversation, tagged to two
+    different users, and checks that reading as one user surfaces only their own run's
+    rating — not the other user's rating on the conversation's other run.
+
+    It does not show, and under `UniqueConstraint("run_id", "session_id")` cannot show,
+    two subjects both holding a rating on the *same* run: there is only ever one row per
+    run, so a second write to it overwrites the first (see
+    test_upsert_feedback_inserts_then_updates above) rather than competing with it.
+    """
+    from meno_rag.db import repositories
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'fb.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            await repositories.upsert_message_feedback(
+                s, run_id="run-1", session_id="c1", value="up", comment="Полезно", user_id="u1"
+            )
+            await repositories.upsert_message_feedback(s, run_id="run-2", session_id="c1", value="down", user_id="u2")
+            await s.commit()
+
+        async with db.sessionmaker() as s:
+            mine = await repositories.get_conversation_feedback(s, conversation_id="c1", user_id="u1")
+        assert mine == {"run-1": {"rating": "up", "comment": "Полезно"}}
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_get_conversation_feedback_for_a_guest_reads_their_own_tagged_rows(tmp_path):
+    """A guest is identified by a real guest_session_id (Task 5a), not by the mere absence
+    of a user_id — that old fallback made every guest's untagged row visible to every other
+    guest, which is the bug this task fixes. With no identity at all (no user_id, no
+    guest_session_id) there is no subject to scope to, so the read returns nothing."""
+    from meno_rag.db import repositories
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'fb2.sqlite3'}")
+    await db.init_models()
+    try:
+        async with db.sessionmaker() as s:
+            await repositories.upsert_message_feedback(
+                s, run_id="run-1", session_id="c1", value="up", guest_session_id="g1"
+            )
+            await s.commit()
+
+        async with db.sessionmaker() as s:
+            got = await repositories.get_conversation_feedback(s, conversation_id="c1", guest_session_id="g1")
+        assert got == {"run-1": {"rating": "up", "comment": None}}
+
+        async with db.sessionmaker() as s:
+            anonymous = await repositories.get_conversation_feedback(s, conversation_id="c1")
+        assert anonymous == {}
+    finally:
+        await db.close()

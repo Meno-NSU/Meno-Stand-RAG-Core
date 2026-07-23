@@ -15,6 +15,7 @@ import structlog
 from meno_rag.api.events import StageEvent, StageName, StageStatus
 from meno_rag.config import Settings
 from meno_rag.llm.think_detector import has_thinking
+from meno_rag.logging_config import preview_field
 from meno_rag.schemas import ChatMessage, PipelineOutcome
 from meno_rag.stand.context import flatten_sources, normalize_urls, prepare_context
 from meno_rag.stand.dialogue_history import prepare_dialogue_history
@@ -264,7 +265,7 @@ class StandRagPipeline:
             "generation_completed",
             model_id=runtime.generation.model_id,
             answer_chars=len(answer),
-            answer_preview=answer[:200],
+            **preview_field("answer_preview", answer, 200),
         )
         return answer
 
@@ -378,7 +379,7 @@ class StandRagPipeline:
         logger.info(
             "rewrite_parsed",
             model_id=runtime.model_id,
-            raw_preview=rewritten[:300],
+            **preview_field("raw_preview", rewritten, 300),
             raw_chars=len(rewritten),
             had_thinking=has_thinking(rewritten),
             parsed_count=len(parsed),
@@ -807,7 +808,7 @@ def _log_rerank_choice(response: dict[str, Any], *, chunk_id: int, model_id: str
             first_logprob=first.get("logprob"),
             top_tokens=[(t.get("token"), t.get("logprob")) for t in top],
             finish_reason=finish_reason,
-            content_preview=content[:50],
+            **preview_field("content_preview", content, 50),
         )
     except Exception:  # pragma: no cover
         logger.debug("rerank_choice_log_failed", chunk_id=chunk_id, exc_info=True)

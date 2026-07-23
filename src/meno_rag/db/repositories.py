@@ -53,6 +53,22 @@ async def ensure_conversation(
     return conversation
 
 
+def shown_source_refs(sources: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Only the title and the link — the fields Цель 1 (сервисная обработка) covers.
+
+    Durable conversation records are written under the service consent alone, so they must
+    never accumulate retrieval content such as chunk text or relevance scores, which Цель 3
+    gates. Applied at the storage boundary so no caller can bypass it.
+    """
+    return [
+        {
+            "document_title": source.get("document_title") or "",
+            "source_url": source.get("source_url") or "",
+        }
+        for source in sources
+    ]
+
+
 async def append_message(
     session: AsyncSession,
     *,
@@ -62,6 +78,7 @@ async def append_message(
     model: str | None = None,
     knowledge_base_id: str | None = None,
     request_id: str | None = None,
+    sources: list[dict[str, str]] | None = None,
 ) -> None:
     await ensure_conversation(session, conversation_id)
     session.add(
@@ -72,6 +89,7 @@ async def append_message(
             model=model,
             knowledge_base_id=knowledge_base_id,
             request_id=request_id,
+            sources=None if sources is None else shown_source_refs(sources),
         )
     )
 
@@ -96,36 +114,66 @@ async def clear_conversation(session: AsyncSession, conversation_id: str) -> Non
     await delete_conversation_cascade(session, conversation_id)
 
 
+async def delete_subject_conversations(
+    session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None
+) -> int:
+    """Delete every conversation the subject owns (each via the full cascade); returns the count.
+
+    Backs "erase my server-side history but keep my account" — the middle ground between
+    deleting one conversation and delete_subject_data, which also removes the account or
+    guest session. Exactly one id.
+    """
+    if (user_id is None) == (guest_session_id is None):
+        raise ValueError("Exactly one of user_id / guest_session_id must be set.")
+    clause = (
+        Conversation.user_id == user_id if user_id is not None else Conversation.guest_session_id == guest_session_id
+    )
+    conversation_ids = list((await session.execute(select(Conversation.id).where(clause))).scalars().all())
+    for conversation_id in conversation_ids:
+        await delete_conversation_cascade(session, conversation_id)
+    return len(conversation_ids)
+
+
 async def delete_subject_data(
     session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None
 ) -> None:
     """Erase everything tied to a subject (152-ФЗ right to erasure). Exactly one id.
 
-    Deletes every conversation the subject owns (each via delete_conversation_cascade),
-    their consent events, and the subject row itself — the account for a registered user
-    (their JWT then resolves to no user) or the guest_session for a guest. For a registered
-    user we also drop any feedback / surveys / arena votes tagged with their user_id that a
-    per-conversation cascade would not reach. Aggregate Elo (arena_ratings) is anonymous and stays.
+    Deletes every conversation the subject owns (via delete_subject_conversations) and the
+    subject row itself — the account for a registered user (their JWT then resolves to no
+    user) or the guest_session for a guest. Consent events survive; see the note below.
+
+    Both branches also sweep records tagged with the subject's own id that the per-
+    conversation cascade above would not reach — most commonly feedback left on a
+    conversation the subject does not own (an untagged/legacy one, which the write-side
+    ownership policy in api/feedback.py still lets anyone rate; see
+    conversation_owner_matches). The registered-user branch reaches further only because
+    ArenaVote and SessionSurvey carry a user_id column with no guest_session_id
+    counterpart: for a user we sweep ArenaVote, MessageFeedback, and SessionSurvey by
+    user_id; for a guest we can only sweep MessageFeedback by guest_session_id — an arena
+    vote or survey answer a guest left on a conversation they don't own has no guest column
+    to match here and is not reachable by this function. Aggregate Elo (arena_ratings) is
+    anonymous and stays regardless.
+
+    ``consent_events`` are deliberately KEPT. Art. 9 of 152-ФЗ puts the burden of proving
+    that consent was obtained on the operator, so the evidentiary record has to outlive the
+    account it belonged to. A consent event carries no email and no dialogue content — only
+    the purpose, the decision, the document kind/version/SHA-256, the source and the
+    timestamp, keyed by an id that resolves to nobody once the subject row above is gone.
+    Their retention period is the operator's to set (see the legal package), not this call's.
     """
     if (user_id is None) == (guest_session_id is None):
         raise ValueError("Exactly one of user_id / guest_session_id must be set.")
 
-    if user_id is not None:
-        conv_clause = Conversation.user_id == user_id
-    else:
-        conv_clause = Conversation.guest_session_id == guest_session_id
-    conversation_ids = (await session.execute(select(Conversation.id).where(conv_clause))).scalars().all()
-    for conversation_id in conversation_ids:
-        await delete_conversation_cascade(session, conversation_id)
+    await delete_subject_conversations(session, user_id=user_id, guest_session_id=guest_session_id)
 
     if user_id is not None:
         await session.execute(delete(ArenaVote).where(ArenaVote.user_id == user_id))
         await session.execute(delete(MessageFeedback).where(MessageFeedback.user_id == user_id))
         await session.execute(delete(SessionSurvey).where(SessionSurvey.user_id == user_id))
-        await session.execute(delete(ConsentEvent).where(ConsentEvent.user_id == user_id))
         await session.execute(delete(User).where(User.id == user_id))
     else:
-        await session.execute(delete(ConsentEvent).where(ConsentEvent.guest_session_id == guest_session_id))
+        await session.execute(delete(MessageFeedback).where(MessageFeedback.guest_session_id == guest_session_id))
         await session.execute(delete(GuestSession).where(GuestSession.id == guest_session_id))
 
 
@@ -271,12 +319,12 @@ async def add_pipeline_stage(
 
 
 async def add_sources(session: AsyncSession, *, run_id: str, sources: list[dict[str, str]]) -> None:
-    for idx, source in enumerate(sources):
+    for idx, source in enumerate(shown_source_refs(sources)):
         session.add(
             SourceRecord(
                 run_id=run_id,
-                document_title=source.get("document_title") or "",
-                source_url=source.get("source_url") or "",
+                document_title=source["document_title"],
+                source_url=source["source_url"],
                 ordinal=idx,
             )
         )
@@ -290,6 +338,7 @@ async def upsert_message_feedback(
     value: str,
     comment: str | None = None,
     user_id: str | None = None,
+    guest_session_id: str | None = None,
 ) -> None:
     result = await session.execute(
         select(MessageFeedback).where(
@@ -306,6 +355,7 @@ async def upsert_message_feedback(
                 value=value,
                 comment=comment,
                 user_id=user_id,
+                guest_session_id=guest_session_id,
             )
         )
     else:
@@ -313,19 +363,208 @@ async def upsert_message_feedback(
         feedback.comment = comment
         if user_id is not None:
             feedback.user_id = user_id
+        if guest_session_id is not None:
+            feedback.guest_session_id = guest_session_id
         feedback.updated_at = datetime.now(UTC)
 
 
-async def clear_message_feedback(session: AsyncSession, *, run_id: str, session_id: str) -> int:
-    result = await session.execute(
-        delete(MessageFeedback).where(
-            MessageFeedback.run_id == run_id,
-            MessageFeedback.session_id == session_id,
-        )
-    )
+async def clear_message_feedback(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    session_id: str,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
+) -> int:
+    """Delete the caller's own rating for (run_id, session_id).
+
+    Scoped by caller identity with the same precedence get_conversation_feedback uses for
+    reads — user_id when authenticated, else guest_session_id — so one guest cannot delete
+    another guest's rating merely because conversation_owner_matches lets both of them write
+    into the same untagged (legacy) conversation: they could not read it, but before this
+    scoping they could still destroy it. A fully anonymous caller (no user_id, no
+    guest_session_id — no X-Guest-Token was ever presented) matches on (run_id, session_id)
+    alone, same as always: there is no narrower identity to scope to, and untagged feedback
+    predates guest_session_id entirely.
+    """
+    clause = [MessageFeedback.run_id == run_id, MessageFeedback.session_id == session_id]
+    if user_id is not None:
+        clause.append(MessageFeedback.user_id == user_id)
+    elif guest_session_id is not None:
+        clause.append(MessageFeedback.guest_session_id == guest_session_id)
+    result = await session.execute(delete(MessageFeedback).where(*clause))
     # DELETE yields a CursorResult (has rowcount) at runtime; the async execute()
     # return type is the broader Result, so mypy needs the hint.
     return result.rowcount or 0  # type: ignore[attr-defined]
+
+
+async def get_conversation_feedback(
+    session: AsyncSession, *, conversation_id: str, user_id: str | None = None, guest_session_id: str | None = None
+) -> dict[str, dict[str, str | None]]:
+    """The caller's ratings in this conversation, keyed by run_id.
+
+    The write path (`/v1/feedback`) now checks conversation ownership before every upsert
+    (see `conversation_owner_matches` and its callers in `api/feedback.py`), so a row tagged
+    with a given `user_id`/`guest_session_id` was in fact written by that subject — this is
+    no longer a partial mitigation standing in for a missing boundary, it is a real per-
+    subject scope. A signed-in caller sees only rows tagged with their own `user_id`; a
+    guest sees only rows tagged with their own `guest_session_id` — two different guests are
+    now distinguishable, unlike the old fallback to `user_id IS NULL`, which was every
+    guest's row at once. With neither id (no authenticated user, no guest session) there is
+    no subject to scope to, so nothing is returned.
+    """
+    if user_id is not None:
+        clause = MessageFeedback.user_id == user_id
+    elif guest_session_id is not None:
+        clause = MessageFeedback.guest_session_id == guest_session_id
+    else:
+        return {}
+    rows = (
+        (await session.execute(select(MessageFeedback).where(MessageFeedback.session_id == conversation_id, clause)))
+        .scalars()
+        .all()
+    )
+    return {row.run_id: {"rating": row.value, "comment": row.comment} for row in rows}
+
+
+async def get_session_survey(session: AsyncSession, *, conversation_id: str) -> dict[str, str] | None:
+    """The end-of-session survey answer for this conversation, or None if unanswered.
+
+    Unlike get_conversation_feedback, this takes no user_id and applies no per-subject
+    scoping — deliberately, not an oversight. `SessionSurvey` carries
+    `UniqueConstraint("session_id")`, so the answer is a property of the conversation
+    itself, not of a subject, and the only caller (`get_conversation`) has already passed
+    the conversation ownership check before this runs.
+    """
+    survey = (
+        await session.execute(select(SessionSurvey).where(SessionSurvey.session_id == conversation_id))
+    ).scalar_one_or_none()
+    return None if survey is None else {"answer": survey.answer}
+
+
+async def append_arena_turn(
+    session: AsyncSession,
+    *,
+    conversation_id: str,
+    question: str,
+    sides: list[dict],
+    turn_index: int | None = None,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
+    analysis_allowed: bool = False,
+) -> None:
+    """Store a comparison as one user row plus one assistant row, idempotent on
+    (conversation_id, turn_index).
+
+    A retry, a double-fired client effect, or two tabs replaying the same comparison must not
+    create a second (user, assistant) pair — that would reintroduce the duplicated-question,
+    broken-alternation bug this feature exists to fix. When `turn_index` is not None and a
+    stored `turn_kind="arena"` row already carries that `turn_index` for this conversation, it
+    is updated in place instead of appending a second pair (mirrors upsert_message_feedback's
+    insert-or-update shape). The existing user row is left untouched — a repost of the same
+    turn carries the same question, and the invariant this closes is "no duplicate rows", not
+    "keep the question text in sync".
+
+    `turn_index=None` never matches an existing turn and always appends a fresh pair. Matching
+    None against another None would make every turn_index-less post collide with every other
+    one on the conversation — worse than the duplicate this guards against for the clients
+    that never send it.
+
+    If an ArenaVote for (conversation_id, turn_index) already exists — a vote that raced ahead
+    of its own turn — its winner is carried onto the stored turn here: the same value
+    set_arena_turn_winner would have written had the turn existed first. Skipped when
+    turn_index is None for the same collision reason as above (and because
+    set_arena_turn_winner/submit_arena_vote's own dedupe already treat a missing turn_index as
+    unmatchable).
+
+    `content` on the assistant row is side A's answer: the column is NOT NULL and previews and
+    exports need text, while `winner` may be "tie" or "both_bad", so "the winning answer" is not
+    always defined. Clients render from `arena["sides"]`.
+    """
+    await ensure_conversation(
+        session,
+        conversation_id,
+        user_id=user_id,
+        guest_session_id=guest_session_id,
+        analysis_allowed=analysis_allowed,
+    )
+    # Same allow-list as an ordinary answer: this row is written under the service consent,
+    # so a side's sources may carry only the title and the link (Цель 1).
+    stored_sides = [{**side, "sources": shown_source_refs(side.get("sources") or [])} for side in sides]
+
+    existing: Message | None = None
+    winner: str | None = None
+    if turn_index is not None:
+        # Matched in Python rather than queried inside the JSON column, same reasoning as
+        # set_arena_turn_winner: SQLite and PostgreSQL spell JSON queries differently, and on
+        # PostgreSQL the live column is `json`, not `jsonb`, so it has no equality operator to
+        # query with. A conversation holds few arena turns.
+        rows = (
+            (
+                await session.execute(
+                    select(Message).where(Message.conversation_id == conversation_id, Message.turn_kind == "arena")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        existing = next((row for row in rows if (row.arena or {}).get("turn_index") == turn_index), None)
+        winner = (
+            await session.execute(
+                select(ArenaVote.winner).where(
+                    ArenaVote.session_id == conversation_id,
+                    ArenaVote.turn_index == turn_index,
+                )
+            )
+        ).scalar_one_or_none()
+
+    if existing is not None:
+        # Reassign rather than mutate: a plain JSON column is not change-tracked, so an
+        # in-place `existing.arena["sides"] = ...` would never reach the database.
+        existing.content = stored_sides[0]["content"]
+        existing.arena = {"turn_index": turn_index, "winner": winner, "sides": stored_sides}
+        return
+
+    await append_message(session, conversation_id=conversation_id, role="user", content=question)
+    session.add(
+        Message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=stored_sides[0]["content"],
+            turn_kind="arena",
+            arena={"turn_index": turn_index, "winner": winner, "sides": stored_sides},
+        )
+    )
+
+
+async def set_arena_turn_winner(
+    session: AsyncSession, *, conversation_id: str, turn_index: int | None, winner: str
+) -> bool:
+    """Mark which side won a stored comparison. Returns False if no such turn exists.
+
+    The turn is matched in Python rather than by querying inside the JSON column, which SQLite
+    and PostgreSQL spell differently — and on PostgreSQL the live column is `json`, not `jsonb`,
+    so it has no equality operator to query with. A conversation holds few arena turns.
+    """
+    if turn_index is None:
+        return False
+    rows = (
+        (
+            await session.execute(
+                select(Message).where(Message.conversation_id == conversation_id, Message.turn_kind == "arena")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in rows:
+        stored = row.arena or {}
+        if stored.get("turn_index") == turn_index:
+            # Reassign rather than mutate: a plain JSON column is not change-tracked, so an
+            # in-place `stored["winner"] = winner` would never reach the database.
+            row.arena = {**stored, "winner": winner}
+            return True
+    return False
 
 
 async def upsert_session_survey(
@@ -603,10 +842,15 @@ async def current_consent_state(
 
 
 async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, Any]]:
-    """Registered users ranked by arena votes + feedback given + questions asked.
+    """SEALED — backs api/leaderboard.py, which is not mounted. Do not call from a route.
 
-    Exposes nickname only (never email); a null/empty nickname falls back to
-    ``anon-<first 8 of id>``. Anonymous activity (user_id NULL) is excluded.
+    Registered users ranked by arena votes + feedback given + questions asked. Exposes
+    nickname only (never email); a null/empty nickname falls back to ``anon-<first 8 of
+    id>``. Anonymous activity (user_id NULL) is excluded.
+
+    Serving this to visitors is распространение of personal data and needs its own art.
+    10.1 152-ФЗ consent; the ``anon-<id[:8]>`` fallback additionally derives a public label
+    from an internal identifier. See api/leaderboard.py before reviving either.
     """
     vote_counts = dict(
         (
