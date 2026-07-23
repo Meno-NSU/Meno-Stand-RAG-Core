@@ -125,12 +125,15 @@ class ArenaSide(BaseModel):
     key: Literal["a", "b"]
     model: str | None = None
     knowledge_base_id: str | None = None
-    # Generous enough for a real answer (settings.max_output_tokens defaults to 8192 tokens;
-    # even a dense, mostly-Cyrillic generation at ~2 chars/token tops out well under 20k
-    # chars), while still bounding a single row's storage cost — this is a cheap direct
-    # database write behind a self-granted guest consent, unlike /v1/chat/completions, which
-    # costs an attacker a full pipeline run.
-    content: str = Field(..., max_length=20_000)
+    # Generous enough for a real answer even in the least token-efficient realistic case:
+    # settings.max_output_tokens defaults to 8192 tokens, and a mostly-Latin/code-heavy
+    # generation can reach ~4-5 chars/token, so the theoretical maximum is in the
+    # ~35-40k range — 40k comfortably covers it (a mostly-Cyrillic generation tokenizes
+    # less efficiently per character and lands well under this). Still bounds a single
+    # row's storage cost — this is a cheap direct database write behind a self-granted
+    # guest consent, unlike /v1/chat/completions, which costs an attacker a full pipeline
+    # run.
+    content: str = Field(..., max_length=40_000)
     # Same reasoning as `content`, capping the count rather than each dict's field lengths:
     # settings.max_context_chunks defaults to 12, so a real side's shown sources should never
     # exceed that by more than a small margin.

@@ -229,7 +229,7 @@ def test_oversized_side_content_is_rejected(client, db_path):
         "question": "Вопрос?",
         "turn_index": 0,
         "sides": [
-            {**SIDES[0], "content": "Ы" * 20_001},
+            {**SIDES[0], "content": "A" * 40_001},
             SIDES[1],
         ],
     }
@@ -252,14 +252,14 @@ def test_too_many_side_sources_is_rejected(client, db_path):
 
 def test_a_realistic_long_answer_is_accepted(client, db_path):
     """The bound must not reject a legitimately long, real answer — pick a size a verbose
-    generation could plausibly reach (well above typical, still under the 20_000 cap)."""
+    generation could plausibly reach (well above typical, still under the 40_000 cap)."""
     headers = _consenting_guest(client, db_path)
     turn = {
         "session_id": "c8",
         "question": "Вопрос?",
         "turn_index": 0,
         "sides": [
-            {**SIDES[0], "content": "Ответ. " * 2000},  # ~14,000 chars
+            {**SIDES[0], "content": "Ответ. " * 4000},  # ~28,000 chars
             SIDES[1],
         ],
     }
