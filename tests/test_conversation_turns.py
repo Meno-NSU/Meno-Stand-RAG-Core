@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,6 +14,7 @@ from meno_rag.db import repositories
 from meno_rag.db.migrate import run_bootstrap
 from meno_rag.db.orm import GuestSession
 from meno_rag.db.session import Database
+from tests._dbhelpers import with_db as _with_db
 
 SOURCES = [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
 
@@ -45,26 +44,6 @@ def client(db_path):
 
 def _guest_headers(client):
     return {"X-Guest-Token": client.post("/v1/guest/session").json()["guest_token"]}
-
-
-def _with_db(db_path, coro_factory):
-    """Run one DB coroutine on its own engine and event loop.
-
-    TestClient drives the app in a loop of its own, so these tests stay synchronous and
-    open a second connection to the same sqlite file instead of mixing the two loops.
-    """
-
-    async def _run():
-        db = Database(f"sqlite+aiosqlite:///{db_path}")
-        try:
-            async with db.sessionmaker() as session:
-                result = await coro_factory(session)
-                await session.commit()
-                return result
-        finally:
-            await db.close()
-
-    return asyncio.run(_run())
 
 
 def _guest_session_id(db_path):
