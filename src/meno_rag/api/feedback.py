@@ -61,7 +61,11 @@ async def clear_feedback(payload: FeedbackClearRequest, request: Request):
     async with database.sessionmaker() as session:
         await _ensure_conversation_ownership(session, payload.session_id, user_id=user_id, guest_id=guest_id)
         removed = await repositories.clear_message_feedback(
-            session, run_id=payload.completion_id, session_id=payload.session_id
+            session,
+            run_id=payload.completion_id,
+            session_id=payload.session_id,
+            user_id=user_id,
+            guest_session_id=guest_id,
         )
         await session.commit()
     return {"status": "ok", "removed": removed}

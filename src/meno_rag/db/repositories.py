@@ -349,13 +349,31 @@ async def upsert_message_feedback(
         feedback.updated_at = datetime.now(UTC)
 
 
-async def clear_message_feedback(session: AsyncSession, *, run_id: str, session_id: str) -> int:
-    result = await session.execute(
-        delete(MessageFeedback).where(
-            MessageFeedback.run_id == run_id,
-            MessageFeedback.session_id == session_id,
-        )
-    )
+async def clear_message_feedback(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    session_id: str,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
+) -> int:
+    """Delete the caller's own rating for (run_id, session_id).
+
+    Scoped by caller identity with the same precedence get_conversation_feedback uses for
+    reads — user_id when authenticated, else guest_session_id — so one guest cannot delete
+    another guest's rating merely because conversation_owner_matches lets both of them write
+    into the same untagged (legacy) conversation: they could not read it, but before this
+    scoping they could still destroy it. A fully anonymous caller (no user_id, no
+    guest_session_id — no X-Guest-Token was ever presented) matches on (run_id, session_id)
+    alone, same as always: there is no narrower identity to scope to, and untagged feedback
+    predates guest_session_id entirely.
+    """
+    clause = [MessageFeedback.run_id == run_id, MessageFeedback.session_id == session_id]
+    if user_id is not None:
+        clause.append(MessageFeedback.user_id == user_id)
+    elif guest_session_id is not None:
+        clause.append(MessageFeedback.guest_session_id == guest_session_id)
+    result = await session.execute(delete(MessageFeedback).where(*clause))
     # DELETE yields a CursorResult (has rowcount) at runtime; the async execute()
     # return type is the broader Result, so mypy needs the hint.
     return result.rowcount or 0  # type: ignore[attr-defined]

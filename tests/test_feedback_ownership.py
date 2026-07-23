@@ -176,6 +176,36 @@ def test_a_stranger_cannot_clear_another_subjects_rating(client, db_path):
     assert body["turns"][1]["feedback"] == {"rating": "up", "comment": None}
 
 
+def test_a_stranger_cannot_clear_another_guests_rating_on_an_untagged_conversation(client, db_path):
+    """Mirrors test_one_guest_does_not_see_another_guests_rating_on_an_untagged_conversation,
+    but for the delete path. conversation_owner_matches returns True for anyone on an untagged
+    (legacy) conversation, so _ensure_conversation_ownership alone does not stop guest B from
+    reaching clear_message_feedback here — guest A cannot read guest B's rating on this
+    conversation, but before this fix guest B could still destroy it. Only scoping the delete
+    by the caller's own identity (the same precedence get_conversation_feedback already uses
+    for reads) closes this.
+    """
+    first = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=None)  # untagged conversation
+    client.post(
+        "/v1/feedback",
+        json={"completion_id": "run-1", "session_id": "c1", "value": "up"},
+        headers=first,
+    )
+
+    second = _guest_headers(client)
+    resp = client.post(
+        "/v1/feedback/clear",
+        json={"completion_id": "run-1", "session_id": "c1"},
+        headers=second,
+    )
+    assert resp.status_code == 200  # not revealed as a conflict — the conversation is untagged
+    assert resp.json()["removed"] == 0  # but nothing was actually removed
+
+    body = client.get("/v1/conversations/c1", headers=first).json()
+    assert body["turns"][1]["feedback"] == {"rating": "up", "comment": None}  # A's rating survives
+
+
 def test_migration_adds_the_guest_owner_column(tmp_path):
     url = f"sqlite:///{tmp_path / 'm.sqlite3'}"
     assert run_bootstrap(url) == 0
