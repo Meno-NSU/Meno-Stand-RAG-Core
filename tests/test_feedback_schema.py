@@ -19,7 +19,17 @@ def test_migration_creates_feedback_tables(tmp_path: Path):
         names = set(insp.get_table_names())
         assert {"message_feedback", "session_surveys"} <= names
         fb_cols = {c["name"] for c in insp.get_columns("message_feedback")}
-        assert fb_cols == {"id", "run_id", "session_id", "user_id", "value", "comment", "created_at", "updated_at"}
+        assert fb_cols == {
+            "id",
+            "run_id",
+            "session_id",
+            "user_id",
+            "guest_session_id",
+            "value",
+            "comment",
+            "created_at",
+            "updated_at",
+        }
         sv_cols = {c["name"] for c in insp.get_columns("session_surveys")}
         assert sv_cols == {"id", "session_id", "user_id", "answer", "created_at", "updated_at"}
     finally:
