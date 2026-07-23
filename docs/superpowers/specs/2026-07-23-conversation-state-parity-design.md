@@ -74,6 +74,8 @@ turns. Designed in full up front, because all three phases below feed the same r
     {
       "kind": "arena",
       "created_at": "…",
+      "content": "…",
+      "turn_index": 0,
       "winner": "a",
       "sides": [
         { "key": "a", "model": "…", "knowledge_base_id": "…", "content": "…", "sources": [] },
@@ -94,6 +96,12 @@ Shape rules, so clients never branch on absence:
   the row's `turn_kind` (`"answer"` or `"arena"`).
 - `winner` takes the values `VoteRequest.winner` already accepts — `"a"`, `"b"`, `"tie"` or
   `"both_bad"` — or `null` when the comparison was never voted on.
+- An arena turn also carries `content` — side A's answer, the text stored on the row itself,
+  since the column is `NOT NULL` and previews and exports need something while `"tie"` and
+  `"both_bad"` leave "the winning answer" undefined. Clients render from `sides`.
+- An arena turn carries `turn_index`, because voting keys off it. Without it a client that
+  restored the conversation on another device has no local state to supply, so it could never
+  vote on a comparison it can see — which would defeat the goal above.
 
 ## Storage design
 
@@ -125,7 +133,7 @@ fields for that reason. Whether to drop the analytics table afterwards is a sepa
 
 **Arena turns** — `messages` gains `turn_kind` (`'answer' | 'arena'`, defaulting to
 `'answer'`) and a nullable `arena` JSON column holding both sides and the winner. One
-assistant row per arena turn, so alternation holds. Migration `0014_message_arena`.
+assistant row per arena turn, so alternation holds. Migration `0015_message_arena`.
 
 Both revision ids stay well under the `alembic_version.version_num` `VARCHAR(32)` limit
 that broke a prod deploy on 2026-07-22.
@@ -155,6 +163,32 @@ both sides finish rather than when a vote happens.
 `session_id` = conversation id) **scoped to the calling subject**; the conversation's
 survey answer attached at the top level. Ownership checks are unchanged.
 
+**The survey is read unscoped, deliberately, where feedback is scoped.** `session_surveys`
+carries `UniqueConstraint("session_id")`, so the answer is a property of the conversation
+rather than of a subject, and the caller has already passed the conversation ownership check.
+Feedback is scoped per subject because `conversation_owner_matches` returns `True` for any
+untagged (legacy) conversation, and two guests reading one of those must not see each other's
+ratings. The same argument would apply to the survey, and the residual is recorded in the
+follow-ups: on an untagged conversation one guest can read and overwrite another's survey
+answer. It is bounded — untagged conversations can only be legacy, since a subject with no id
+resolves to no consent and neither write path can create one today.
+
+## Behaviour that changes for existing clients
+
+Everything else in this design is inert until the frontend catches up. These are not:
+
+**The feedback and vote endpoints now return 404 to a caller who does not own the
+conversation.** `/v1/feedback`, `/v1/feedback/clear`, `/v1/feedback/survey` and
+`/v1/arena/vote` previously accepted writes with no credentials and no ownership check. The
+realistic trigger is the guest → signed-in transition: the frontend keeps `sessionId` from
+localStorage across sign-in, while the conversation row stays tagged `guest_session_id`. Rating
+an answer or voting inside a chat started before signing in will now fail. That follows from
+the recorded decision not to adopt guest conversations into an account, and `clear_history` has
+behaved this way since Stage 1b — but unlike the rest of this work it ships the moment the
+branch merges, on endpoints users hit today. Part B should either hide those controls on
+conversations the signed-in user does not own, or surface the 404 as an explanation rather than
+an error.
+
 ## Phases
 
 Each phase is independently shippable and testable; the contract above is the target of all
@@ -181,7 +215,7 @@ covers the remainder):
 - An arena turn persists as **one** assistant row: the question appears exactly once and
   alternation holds.
 - An unvoted arena turn restores with `winner: null`; voting sets it.
-- Migration head pins move to `0014_message_arena`; the revision-id length guard added on
+- Migration head pins move to `0015_message_arena`; the revision-id length guard added on
   2026-07-22 keeps covering the new ids.
 
 ## Out of scope / follow-ups
@@ -211,6 +245,12 @@ covers the remainder):
   up what is already stored, so those conversations will restore looking odd. A cleanup
   pass needs a reliable way to recognise the pattern — worth deciding once Part B shows how
   visible it is.
+- **The survey is not subject-scoped on read or write.** On an untagged (legacy) conversation,
+  which anyone may read, one guest can see another's survey answer and overwrite it via
+  `POST /v1/feedback/survey`. Closing it needs the same `guest_session_id` column
+  `message_feedback` got — the same change the erasure gap below needs, so they should be done
+  together.
+
 - **Guest erasure is still incomplete for surveys and arena votes.** Adding
   `message_feedback.guest_session_id` let `delete_subject_data`'s guest branch sweep a guest's
   ratings, including those left on a conversation they do not own — an untagged legacy
