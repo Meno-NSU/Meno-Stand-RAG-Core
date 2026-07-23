@@ -109,11 +109,11 @@ async def test_patch_improvement_flips_existing_conversation_both_ways(tmp_path)
                 await s.commit()
             assert not await _flag(db, "cX")
 
-            grant = {"document_version": "1.0", "service_and_history": True, "meno_improvement": True}
+            grant = {"document_version": "2.0", "service_and_history": True, "meno_improvement": True}
             assert (await c.patch("/v1/privacy/settings", headers=h, json=grant)).status_code == 200
             assert await _flag(db, "cX")  # retroactively eligible
 
-            revoke = {"document_version": "1.0", "service_and_history": True, "meno_improvement": False}
+            revoke = {"document_version": "2.0", "service_and_history": True, "meno_improvement": False}
             assert (await c.patch("/v1/privacy/settings", headers=h, json=revoke)).status_code == 200
             assert not await _flag(db, "cX")  # symmetric withdrawal
     finally:
