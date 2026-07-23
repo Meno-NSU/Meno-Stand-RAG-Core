@@ -51,7 +51,7 @@ class Message(Base):
     # answer itself, so it is stored whenever the conversation is — unlike the `sources`
     # table, which hangs off `pipeline_runs` and therefore only exists with the
     # improvement opt-in.
-    sources: Mapped[list | dict | None] = mapped_column(JsonCompat, nullable=True)
+    sources: Mapped[list[dict[str, str]] | None] = mapped_column(JsonCompat, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")

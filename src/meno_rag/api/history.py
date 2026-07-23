@@ -16,7 +16,9 @@ from meno_rag.schemas import (
     ClearHistoryRequest,
     ClearHistoryResponse,
     ConversationResponse,
+    SourceRef,
     SurveyAnswer,
+    TurnFeedback,
     UserTurn,
 )
 
@@ -49,19 +51,14 @@ def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> UserTurn 
     if kind == "user":
         return UserTurn(content=message.content, created_at=created_at)
     if kind == "answer":
-        # `message.sources` and `feedback.get(...)` are typed via the generic JSON-column and
-        # untyped-dict shapes upstream (orm.py's shared JsonCompat annotation on `sources`;
-        # repositories.get_conversation_feedback's `dict[str, dict]` return). The actual values
-        # are always {"document_title", "source_url"} / {"rating", "comment"} shaped, and
-        # AnswerTurn's own field validation enforces that at construction time, so mypy needs
-        # the hint here rather than a change to those shared upstream types.
+        raw_feedback = feedback.get(message.request_id) if message.request_id else None
         return AnswerTurn(
             content=message.content,
             created_at=created_at,
             model=message.model,
             request_id=message.request_id,
-            sources=message.sources or [],  # type: ignore[arg-type]
-            feedback=feedback.get(message.request_id) if message.request_id else None,  # type: ignore[arg-type]
+            sources=[SourceRef.model_validate(s) for s in (message.sources or [])],
+            feedback=TurnFeedback.model_validate(raw_feedback) if raw_feedback is not None else None,
         )
     raise ValueError(f"Unrecognised turn kind: {kind!r}")
 
