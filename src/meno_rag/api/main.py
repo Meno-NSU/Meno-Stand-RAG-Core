@@ -1077,19 +1077,30 @@ async def _persist_success(
                 # No consent to store the chat — nothing is written server-side.
                 return
 
+            # Ownership check guards BOTH halves below: the conversation/message writes
+            # (skipped for arena) and the `if improvement:` analytics block (not skipped for
+            # arena). `arena` is a plain client-controlled boolean on ChatCompletionRequest,
+            # and session_id is caller-supplied (payload.user) — so this must not live inside
+            # `if not arena:` alone, or a caller could set arena=True, keep someone else's
+            # session_id, and still reach create_pipeline_run/add_sources/
+            # create_generation_record/the JSONL trace for a conversation they do not own.
+            # list_contributor_leaderboard joins pipeline_runs to conversations by session_id
+            # and groups by the conversation's user_id, so an injected run would inflate the
+            # *victim's* contributor score, not the attacker's.
+            existing = await session.get(Conversation, session_id)
+            if existing is not None and not repositories.conversation_owner_matches(
+                existing, user_id=user_id, guest_session_id=guest_session_id
+            ):
+                # Someone else's session_id (e.g. a spoofed payload.user) — do not
+                # write this turn into a conversation the caller doesn't own.
+                logger.warning("persist_ownership_conflict", request_id=run_id)
+                return
+
             if not arena:
                 # Arena requests: both sides POST with the same session_id and race each
                 # other, so letting each side persist itself here would write the question
                 # twice and both assistant answers in a nondeterministic order. A later
                 # task records the completed comparison once, from a dedicated endpoint.
-                existing = await session.get(Conversation, session_id)
-                if existing is not None and not repositories.conversation_owner_matches(
-                    existing, user_id=user_id, guest_session_id=guest_session_id
-                ):
-                    # Someone else's session_id (e.g. a spoofed payload.user) — do not
-                    # write this turn into a conversation the caller doesn't own.
-                    logger.warning("persist_ownership_conflict", request_id=run_id)
-                    return
                 await repositories.ensure_conversation(
                     session,
                     session_id,

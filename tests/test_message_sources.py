@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, inspect, select
 from meno_rag.api.main import _persist_success
 from meno_rag.db import repositories
 from meno_rag.db.migrate import run_bootstrap
-from meno_rag.db.orm import PipelineRun
+from meno_rag.db.orm import Conversation, PipelineRun
 from meno_rag.db.session import Database
 from meno_rag.schemas import PipelineOutcome
 
@@ -256,5 +256,42 @@ async def test_arena_requests_still_record_pipeline_analytics_per_side(tmp_path)
             run_ids = (await s.execute(select(PipelineRun.id))).scalars().all()
         assert messages == []
         assert sorted(run_ids) == ["run-a", "run-b"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_arena_ownership_conflict_blocks_pipeline_analytics_too(tmp_path):
+    """`arena: true` is a plain client-controlled boolean on ChatCompletionRequest. Before
+    this fix, the ownership check that stops a caller writing into someone else's
+    conversation lived entirely inside `if not arena:` — so a caller could set arena=True,
+    keep a victim's session_id (payload.user is caller-controlled), and still fall through to
+    the `if improvement:` analytics block, writing pipeline_runs (plus stages/sources/
+    generation_records and the JSONL trace) tagged to a conversation they do not own.
+
+    This is not only hygiene: list_contributor_leaderboard joins PipelineRun.session_id to
+    Conversation.id and groups by Conversation.user_id, so an injected run would have
+    inflated the *victim's* contributor score, not the attacker's.
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'arena_conflict.sqlite3'}")
+    await db.init_models()
+    try:
+        # victim already owns "c1" (e.g. from an earlier, legitimate chat).
+        async with db.sessionmaker() as s:
+            await repositories.ensure_conversation(s, "c1", guest_session_id="victim")
+            await s.commit()
+
+        # attacker has full consent of their own, but replays the victim's session_id
+        # (a spoofed payload.user) with arena=True.
+        await _grant(db, guest_session_id="attacker", improvement=True)
+        await _persist(db, arena=True, guest_session_id="attacker", session_id="c1", run_id="attacker-run")
+
+        async with db.sessionmaker() as s:
+            run_ids = (await s.execute(select(PipelineRun.id))).scalars().all()
+            owner = (
+                await s.execute(select(Conversation.guest_session_id).where(Conversation.id == "c1"))
+            ).scalar_one()
+        assert run_ids == []  # nothing written under the victim's conversation
+        assert owner == "victim"  # ownership untouched
     finally:
         await db.close()
