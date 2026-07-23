@@ -47,7 +47,7 @@ def test_first_run_grants_service_and_improvement(client):
         "/v1/privacy/settings",
         headers=h,
         json={
-            "document_version": "1.0",
+            "document_version": "2.0",
             "service_and_history": True,
             "meno_improvement": True,
             "source": "first_run_modal",
@@ -63,12 +63,12 @@ def test_toggle_improvement_off(client):
     client.patch(
         "/v1/privacy/settings",
         headers=h,
-        json={"document_version": "1.0", "service_and_history": True, "meno_improvement": True},
+        json={"document_version": "2.0", "service_and_history": True, "meno_improvement": True},
     )
     r = client.patch(
         "/v1/privacy/settings",
         headers=h,
-        json={"document_version": "1.0", "service_and_history": True, "meno_improvement": False},
+        json={"document_version": "2.0", "service_and_history": True, "meno_improvement": False},
     )
     assert r.json() == {"service_and_history": True, "meno_improvement": False}
 
@@ -86,7 +86,7 @@ def test_revoking_service_requires_deletion(client):
     r = client.patch(
         "/v1/privacy/settings",
         headers=_guest_headers(client),
-        json={"document_version": "1.0", "service_and_history": False, "meno_improvement": False},
+        json={"document_version": "2.0", "service_and_history": False, "meno_improvement": False},
     )
     assert r.status_code == 400
 
@@ -100,7 +100,7 @@ def test_delete_data_erases_guest(client):
     client.patch(
         "/v1/privacy/settings",
         headers=h,
-        json={"document_version": "1.0", "service_and_history": True, "meno_improvement": True},
+        json={"document_version": "2.0", "service_and_history": True, "meno_improvement": True},
     )
     assert client.get("/v1/privacy/settings", headers=h).json()["service_and_history"] is True
 

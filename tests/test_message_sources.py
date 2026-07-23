@@ -267,9 +267,9 @@ async def test_arena_ownership_conflict_blocks_pipeline_analytics_too(tmp_path):
     the `if improvement:` analytics block, writing pipeline_runs (plus stages/sources/
     generation_records and the JSONL trace) tagged to a conversation they do not own.
 
-    This is not only hygiene: list_contributor_leaderboard joins PipelineRun.session_id to
-    Conversation.id and groups by Conversation.user_id, so an injected run would have
-    inflated the *victim's* contributor score, not the attacker's.
+    This is not only hygiene: the analytics subtree is what the improvement consent gates,
+    so an injected run would attach the attacker's content to the *victim's* conversation —
+    and be exported under the victim's consent, not the attacker's.
     """
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'arena_conflict.sqlite3'}")
     await db.init_models()

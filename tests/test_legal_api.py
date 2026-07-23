@@ -25,7 +25,7 @@ def test_lists_the_three_documents_with_hashes(client):
     assert docs["personal_data_consent"]["url"] == "/consent"
     assert docs["terms_of_use"]["url"] == "/terms"
     for d in docs.values():
-        assert d["version"] == "1.0"
+        assert d["version"] == "2.0"
         assert len(d["sha256"]) == 64  # hex SHA-256
 
 

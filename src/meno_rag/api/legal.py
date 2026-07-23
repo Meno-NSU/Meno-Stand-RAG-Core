@@ -17,9 +17,9 @@ from fastapi import APIRouter, HTTPException, Request
 _LEGAL_DIR = Path(__file__).resolve().parents[3] / "legal"
 
 LEGAL_DOCUMENTS: dict[str, dict[str, str]] = {
-    "privacy_policy": {"file": "privacy-policy.ru.md", "url": "/privacy", "version": "1.0"},
-    "personal_data_consent": {"file": "personal-data-consent.ru.md", "url": "/consent", "version": "1.0"},
-    "terms_of_use": {"file": "terms-of-use.ru.md", "url": "/terms", "version": "1.0"},
+    "privacy_policy": {"file": "privacy-policy.ru.md", "url": "/privacy", "version": "2.0"},
+    "personal_data_consent": {"file": "personal-data-consent.ru.md", "url": "/consent", "version": "2.0"},
+    "terms_of_use": {"file": "terms-of-use.ru.md", "url": "/terms", "version": "2.0"},
 }
 
 

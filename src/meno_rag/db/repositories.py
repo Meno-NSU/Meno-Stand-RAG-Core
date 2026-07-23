@@ -114,14 +114,34 @@ async def clear_conversation(session: AsyncSession, conversation_id: str) -> Non
     await delete_conversation_cascade(session, conversation_id)
 
 
+async def delete_subject_conversations(
+    session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None
+) -> int:
+    """Delete every conversation the subject owns (each via the full cascade); returns the count.
+
+    Backs "erase my server-side history but keep my account" — the middle ground between
+    deleting one conversation and delete_subject_data, which also removes the account or
+    guest session. Exactly one id.
+    """
+    if (user_id is None) == (guest_session_id is None):
+        raise ValueError("Exactly one of user_id / guest_session_id must be set.")
+    clause = (
+        Conversation.user_id == user_id if user_id is not None else Conversation.guest_session_id == guest_session_id
+    )
+    conversation_ids = list((await session.execute(select(Conversation.id).where(clause))).scalars().all())
+    for conversation_id in conversation_ids:
+        await delete_conversation_cascade(session, conversation_id)
+    return len(conversation_ids)
+
+
 async def delete_subject_data(
     session: AsyncSession, *, user_id: str | None = None, guest_session_id: str | None = None
 ) -> None:
     """Erase everything tied to a subject (152-ФЗ right to erasure). Exactly one id.
 
-    Deletes every conversation the subject owns (each via delete_conversation_cascade),
-    their consent events, and the subject row itself — the account for a registered user
-    (their JWT then resolves to no user) or the guest_session for a guest.
+    Deletes every conversation the subject owns (via delete_subject_conversations) and the
+    subject row itself — the account for a registered user (their JWT then resolves to no
+    user) or the guest_session for a guest. Consent events survive; see the note below.
 
     Both branches also sweep records tagged with the subject's own id that the per-
     conversation cascade above would not reach — most commonly feedback left on a
@@ -134,27 +154,26 @@ async def delete_subject_data(
     vote or survey answer a guest left on a conversation they don't own has no guest column
     to match here and is not reachable by this function. Aggregate Elo (arena_ratings) is
     anonymous and stays regardless.
+
+    ``consent_events`` are deliberately KEPT. Art. 9 of 152-ФЗ puts the burden of proving
+    that consent was obtained on the operator, so the evidentiary record has to outlive the
+    account it belonged to. A consent event carries no email and no dialogue content — only
+    the purpose, the decision, the document kind/version/SHA-256, the source and the
+    timestamp, keyed by an id that resolves to nobody once the subject row above is gone.
+    Their retention period is the operator's to set (see the legal package), not this call's.
     """
     if (user_id is None) == (guest_session_id is None):
         raise ValueError("Exactly one of user_id / guest_session_id must be set.")
 
-    if user_id is not None:
-        conv_clause = Conversation.user_id == user_id
-    else:
-        conv_clause = Conversation.guest_session_id == guest_session_id
-    conversation_ids = (await session.execute(select(Conversation.id).where(conv_clause))).scalars().all()
-    for conversation_id in conversation_ids:
-        await delete_conversation_cascade(session, conversation_id)
+    await delete_subject_conversations(session, user_id=user_id, guest_session_id=guest_session_id)
 
     if user_id is not None:
         await session.execute(delete(ArenaVote).where(ArenaVote.user_id == user_id))
         await session.execute(delete(MessageFeedback).where(MessageFeedback.user_id == user_id))
         await session.execute(delete(SessionSurvey).where(SessionSurvey.user_id == user_id))
-        await session.execute(delete(ConsentEvent).where(ConsentEvent.user_id == user_id))
         await session.execute(delete(User).where(User.id == user_id))
     else:
         await session.execute(delete(MessageFeedback).where(MessageFeedback.guest_session_id == guest_session_id))
-        await session.execute(delete(ConsentEvent).where(ConsentEvent.guest_session_id == guest_session_id))
         await session.execute(delete(GuestSession).where(GuestSession.id == guest_session_id))
 
 
@@ -823,10 +842,15 @@ async def current_consent_state(
 
 
 async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, Any]]:
-    """Registered users ranked by arena votes + feedback given + questions asked.
+    """SEALED — backs api/leaderboard.py, which is not mounted. Do not call from a route.
 
-    Exposes nickname only (never email); a null/empty nickname falls back to
-    ``anon-<first 8 of id>``. Anonymous activity (user_id NULL) is excluded.
+    Registered users ranked by arena votes + feedback given + questions asked. Exposes
+    nickname only (never email); a null/empty nickname falls back to ``anon-<first 8 of
+    id>``. Anonymous activity (user_id NULL) is excluded.
+
+    Serving this to visitors is распространение of personal data and needs its own art.
+    10.1 152-ФЗ consent; the ``anon-<id[:8]>`` fallback additionally derives a public label
+    from an internal identifier. See api/leaderboard.py before reviving either.
     """
     vote_counts = dict(
         (
@@ -850,14 +874,10 @@ async def list_contributor_leaderboard(session: AsyncSession) -> list[dict[str, 
         .tuples()
         .all()
     )
-    # The join holds by construction for ordinary (non-arena) requests: _persist_success calls
-    # ensure_conversation (conversations.id == session_id) before create_pipeline_run, so every
-    # such run has a matching conversation. It does NOT hold for arena requests — there,
-    # _persist_success skips ensure_conversation entirely (arena turns are only created later,
-    # if ever, by append_arena_turn from /v1/arena/turn), so a pipeline_runs row can exist with
-    # no matching conversation at all. There is no FK enforcing the join either way — runs with
-    # no matching conversation are simply dropped by it, undercounted here rather than
-    # miscounted.
+    # The join holds by construction: _persist_success calls ensure_conversation
+    # (conversations.id == session_id) before create_pipeline_run, so every run has
+    # a matching conversation. There is no FK enforcing it — runs inserted outside
+    # that path would be undercounted here.
     question_counts = dict(
         (
             await session.execute(

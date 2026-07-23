@@ -115,6 +115,24 @@ async def list_conversations(request: Request):
     }
 
 
+@router.delete("/v1/conversations")
+async def delete_all_conversations(request: Request):
+    """Erase the caller's whole server-side history, keeping their account.
+
+    The middle ground the legal package requires between deleting one chat and
+    ``DELETE /v1/privacy/data`` (which also removes the account or guest session):
+    a user must be able to wipe their history without giving up their account.
+    """
+    user_id, guest_id = await _resolve_subject(request)
+    if user_id is None and guest_id is None:
+        raise HTTPException(status_code=401, detail="A JWT or X-Guest-Token is required.")
+    database: Database = request.app.state.database
+    async with database.sessionmaker() as session:
+        deleted = await repositories.delete_subject_conversations(session, user_id=user_id, guest_session_id=guest_id)
+        await session.commit()
+    return {"status": "deleted", "conversations": deleted}
+
+
 @router.get("/v1/conversations/{conversation_id}", response_model=ConversationResponse)
 async def get_conversation(conversation_id: str, request: Request) -> ConversationResponse:
     user_id, guest_id = await _resolve_subject(request)

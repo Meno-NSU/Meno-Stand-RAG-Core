@@ -51,8 +51,10 @@ async def test_deletes_only_the_subjects_data(tmp_path):
         # g1 fully erased
         assert await _count(db, "conversations", "WHERE id='cA'") == 0
         assert await _count(db, "messages", "WHERE conversation_id='cA'") == 0
-        assert await _count(db, "consent_events", "WHERE guest_session_id='g1'") == 0
         assert await _count(db, "guest_sessions", "WHERE id='g1'") == 0
+        # ...except the consent record: art. 9 152-ФЗ makes proving consent the operator's
+        # burden, so the evidentiary row outlives the subject it can no longer identify.
+        assert await _count(db, "consent_events", "WHERE guest_session_id='g1'") == 1
         # g2 untouched
         assert await _count(db, "conversations", "WHERE id='cB'") == 1
         assert await _count(db, "messages", "WHERE conversation_id='cB'") == 1
@@ -90,7 +92,8 @@ async def test_deletes_registered_account_and_data(tmp_path):
         assert await _count(db, "users", "WHERE id='u1'") == 0
         assert await _count(db, "conversations", "WHERE id='cU'") == 0
         assert await _count(db, "messages", "WHERE conversation_id='cU'") == 0
-        assert await _count(db, "consent_events", "WHERE user_id='u1'") == 0
+        # Kept as proof that consent was obtained — see test_deletes_only_the_subjects_data.
+        assert await _count(db, "consent_events", "WHERE user_id='u1'") == 1
     finally:
         await db.close()
 

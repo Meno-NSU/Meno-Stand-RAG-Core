@@ -23,6 +23,7 @@ from meno_rag.llm.openrouter_errors import (
 )
 from meno_rag.llm.status import ModelStatusStore
 from meno_rag.llm.think_detector import extract_thinking, has_thinking
+from meno_rag.logging_config import preview_field
 
 logger = structlog.get_logger(__name__)
 
@@ -314,7 +315,7 @@ def _log_or_completion(log: Any, *, data: dict[str, Any], duration_ms: float, st
             "or_request_completed",
             or_status_code=status_code,
             or_duration_ms=duration_ms,
-            content_preview=visible[:200],
+            **preview_field("content_preview", visible, 200),
             content_chars=len(visible),
             finish_reason=finish_reason,
             prompt_tokens=usage.get("prompt_tokens"),

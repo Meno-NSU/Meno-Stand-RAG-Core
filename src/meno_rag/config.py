@@ -9,6 +9,12 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", validation_alias="APP_HOST")
     app_port: int = Field(default=9006, validation_alias="APP_PORT")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+    # Whether the application log may carry short excerpts of message content (up to 200
+    # chars of an answer, 300 of the rewritten search queries). They make a bad answer
+    # diagnosable from the log alone. They are also personal data, so the log then needs an
+    # approved retention period and restricted access, and the Policy has to say so — set
+    # this to false wherever that does not hold.
+    log_content_previews: bool = Field(default=True, validation_alias="LOG_CONTENT_PREVIEWS")
     app_env: str = Field(default="development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
 
     database_url: str = Field(

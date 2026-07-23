@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import text
 
-from meno_rag.api import arena, auth, feedback, guest, history, leaderboard, legal, privacy
+from meno_rag.api import arena, auth, feedback, guest, history, legal, privacy
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
@@ -94,13 +94,23 @@ def check_runtime_safety(settings: Settings) -> list[str]:
             "auth_jwt_secret_weak: AUTH_JWT_SECRET is < 32 bytes — acceptable for dev, but use a "
             "long random secret in production (HS256 key strength)."
         )
+    # Excerpts of a dialogue in the log are personal data. Lawful to keep for diagnosing
+    # errors, but only alongside an approved log retention period and restricted access —
+    # neither of which the code can verify, so production gets a standing reminder.
+    if settings.is_production and settings.log_content_previews:
+        warnings.append(
+            "log_content_previews_on: the application log carries excerpts of answers and "
+            "rewritten queries. Confirm the log has an approved retention period and "
+            "restricted access, and that the Policy describes it — or set "
+            "LOG_CONTENT_PREVIEWS=false."
+        )
     return warnings
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, content_previews=settings.log_content_previews)
     for warning in check_runtime_safety(settings):
         logger.warning(warning)
     database = Database(
@@ -304,7 +314,10 @@ def create_app() -> FastAPI:
     app.include_router(legal.router)
     app.include_router(privacy.router)
     app.include_router(feedback.router)
-    app.include_router(leaderboard.router)
+    # api.leaderboard is deliberately NOT mounted — the contributor board published
+    # nicknames and per-user activity to every visitor, which is distribution of personal
+    # data and needs its own art. 10.1 152-ФЗ consent. The module stays for a possible
+    # future; see its docstring before mounting it again.
     return app
 
 
@@ -807,6 +820,8 @@ async def _non_stream_response(
             stream=False,
             classified=classified,
             stage=stage,
+            user_id=user_id,
+            guest_session_id=guest_session_id,
         )
         return _classified_error_response(classified, retry_id=completion_id, stage=stage)
     finally:
@@ -1014,6 +1029,8 @@ async def _stream_response(
             stream=True,
             classified=classified,
             stage=stage,
+            user_id=user_id,
+            guest_session_id=guest_session_id,
         )
     finally:
         # If the client disconnected mid-prepare, the background prepare task is
@@ -1084,9 +1101,6 @@ async def _persist_success(
             # `if not arena:` alone, or a caller could set arena=True, keep someone else's
             # session_id, and still reach create_pipeline_run/add_sources/
             # create_generation_record/the JSONL trace for a conversation they do not own.
-            # list_contributor_leaderboard joins pipeline_runs to conversations by session_id
-            # and groups by the conversation's user_id, so an injected run would inflate the
-            # *victim's* contributor score, not the attacker's.
             existing = await session.get(Conversation, session_id)
             if existing is not None and not repositories.conversation_owner_matches(
                 existing, user_id=user_id, guest_session_id=guest_session_id
@@ -1206,13 +1220,26 @@ async def _persist_failure(
     stream: bool,
     classified: ClassifiedError | None = None,
     stage: str | None = None,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
 ) -> None:
+    """Record a failed turn for diagnostics.
+
+    The row itself (error code, stage, model, timings) is operational data kept under the
+    operator's legitimate interest. The *question text* is not: it is the user's message,
+    and storing it needs the same service consent as a successful turn — so without that
+    consent the row is written with an empty question rather than not at all, which keeps
+    the failure diagnosable without keeping what the subject did not agree to store.
+    """
     question = ""
     for message in reversed(payload.messages):
         if message.role == "user":
             question = message.content
             break
     async with database.sessionmaker() as session:
+        state = await repositories.current_consent_state(session, user_id=user_id, guest_session_id=guest_session_id)
+        if not state["SERVICE_AND_HISTORY"]:
+            question = ""
         await repositories.create_pipeline_run(
             session,
             run_id=run_id,
