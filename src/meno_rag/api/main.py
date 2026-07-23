@@ -777,6 +777,7 @@ async def _non_stream_response(
             max_tokens=max_tokens,
             user_id=user_id,
             guest_session_id=guest_session_id,
+            arena=payload.arena,
             trace_writer=request.app.state.trace_writer,
         )
     except Exception as exc:
@@ -950,6 +951,7 @@ async def _stream_response(
             max_tokens=max_tokens,
             user_id=user_id,
             guest_session_id=guest_session_id,
+            arena=payload.arena,
             trace_writer=request.app.state.trace_writer,
         )
         metrics_mod.record_chat_request(
@@ -1056,6 +1058,7 @@ async def _persist_success(
     max_tokens: int,
     user_id: str | None = None,
     guest_session_id: str | None = None,
+    arena: bool = False,
     trace_writer: TraceWriter | None = None,
 ) -> None:
     try:
@@ -1074,42 +1077,47 @@ async def _persist_success(
                 # No consent to store the chat — nothing is written server-side.
                 return
 
-            existing = await session.get(Conversation, session_id)
-            if existing is not None and not repositories.conversation_owner_matches(
-                existing, user_id=user_id, guest_session_id=guest_session_id
-            ):
-                # Someone else's session_id (e.g. a spoofed payload.user) — do not
-                # write this turn into a conversation the caller doesn't own.
-                logger.warning("persist_ownership_conflict", request_id=run_id)
-                return
-            await repositories.ensure_conversation(
-                session,
-                session_id,
-                user_id=user_id,
-                guest_session_id=guest_session_id,
-                analysis_allowed=improvement,
-            )
-            await repositories.append_message(
-                session,
-                conversation_id=session_id,
-                role="user",
-                content=question,
-                model=model,
-                knowledge_base_id=KB_ID,
-                request_id=run_id,
-            )
-            await repositories.append_message(
-                session,
-                conversation_id=session_id,
-                role="assistant",
-                content=answer,
-                model=model,
-                knowledge_base_id=KB_ID,
-                request_id=run_id,
-                # Outside the `if improvement:` block below on purpose: these are the
-                # sources the user was shown, part of the answer, not analytics.
-                sources=outcome.sources,
-            )
+            if not arena:
+                # Arena requests: both sides POST with the same session_id and race each
+                # other, so letting each side persist itself here would write the question
+                # twice and both assistant answers in a nondeterministic order. A later
+                # task records the completed comparison once, from a dedicated endpoint.
+                existing = await session.get(Conversation, session_id)
+                if existing is not None and not repositories.conversation_owner_matches(
+                    existing, user_id=user_id, guest_session_id=guest_session_id
+                ):
+                    # Someone else's session_id (e.g. a spoofed payload.user) — do not
+                    # write this turn into a conversation the caller doesn't own.
+                    logger.warning("persist_ownership_conflict", request_id=run_id)
+                    return
+                await repositories.ensure_conversation(
+                    session,
+                    session_id,
+                    user_id=user_id,
+                    guest_session_id=guest_session_id,
+                    analysis_allowed=improvement,
+                )
+                await repositories.append_message(
+                    session,
+                    conversation_id=session_id,
+                    role="user",
+                    content=question,
+                    model=model,
+                    knowledge_base_id=KB_ID,
+                    request_id=run_id,
+                )
+                await repositories.append_message(
+                    session,
+                    conversation_id=session_id,
+                    role="assistant",
+                    content=answer,
+                    model=model,
+                    knowledge_base_id=KB_ID,
+                    request_id=run_id,
+                    # Outside the `if improvement:` block below on purpose: these are the
+                    # sources the user was shown, part of the answer, not analytics.
+                    sources=outcome.sources,
+                )
 
             # Extended RAG pipeline records + the JSONL trace are analysis detail —
             # stored only with the improvement opt-in.

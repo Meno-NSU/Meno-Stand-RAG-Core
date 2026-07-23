@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, select
 
 from meno_rag.api.main import _persist_success
 from meno_rag.db import repositories
 from meno_rag.db.migrate import run_bootstrap
+from meno_rag.db.orm import PipelineRun
 from meno_rag.db.session import Database
 from meno_rag.schemas import PipelineOutcome
 
@@ -123,10 +124,17 @@ async def _grant(db, *, guest_session_id: str, improvement: bool) -> None:
         await s.commit()
 
 
-async def _persist(db, *, guest_session_id: str = "g1", session_id: str = "c1") -> None:
+async def _persist(
+    db,
+    *,
+    guest_session_id: str = "g1",
+    session_id: str = "c1",
+    run_id: str = "run-1",
+    arena: bool = False,
+) -> None:
     await _persist_success(
         database=db,
-        run_id="run-1",
+        run_id=run_id,
         session_id=session_id,
         model="m",
         generation_model="m",
@@ -141,6 +149,7 @@ async def _persist(db, *, guest_session_id: str = "g1", session_id: str = "c1") 
         temperature=None,
         max_tokens=10,
         guest_session_id=guest_session_id,
+        arena=arena,
     )
 
 
@@ -192,5 +201,60 @@ async def test_only_the_shown_title_and_link_are_stored_on_the_message(tmp_path)
         async with db.sessionmaker() as s:
             messages = await repositories.get_conversation_messages(s, "c1")
         assert messages[0].sources == [{"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_arena_requests_write_no_conversation_messages(tmp_path):
+    """Both arena sides POST /v1/chat/completions with the same session_id, racing each
+    other. Letting each side persist itself would append the question twice and both
+    assistant answers in a nondeterministic order, breaking the strict user/assistant
+    alternation this backend requires. Arena requests must skip the conversation writes
+    entirely — a later task records the completed comparison once, from a dedicated
+    endpoint, as a single user row plus a single assistant row.
+
+    Consent must be granted (Цель 1) so an early "no consent" return can't make this pass
+    for the wrong reason: with consent absent, _persist_success already writes nothing,
+    proving nothing about the arena guard specifically.
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'arena.sqlite3'}")
+    await db.init_models()
+    try:
+        await _grant(db, guest_session_id="g1", improvement=False)
+        # Side A and side B: same session_id, both flagged as arena.
+        await _persist(db, arena=True)
+        await _persist(db, arena=True)
+
+        async with db.sessionmaker() as s:
+            messages = await repositories.get_conversation_messages(s, "c1")
+        assert messages == []
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_arena_requests_still_record_pipeline_analytics_per_side(tmp_path):
+    """Each arena side is still a real pipeline run, so the `if improvement:` analytics
+    block (create_pipeline_run, stages, sources, generation record) must keep running for
+    arena requests — only the conversation/message writes are skipped. Uses distinct
+    run_ids per side, exactly like production (each side is a separate HTTP request with
+    its own completion_id): reusing one run_id here would collide on the pipeline_runs
+    primary key and silently swallow the second insert, masking the very regression this
+    test exists to catch (an `if not arena:` guard drawn too wide, over the analytics
+    block too).
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'arena_analytics.sqlite3'}")
+    await db.init_models()
+    try:
+        await _grant(db, guest_session_id="g1", improvement=True)
+        await _persist(db, arena=True, run_id="run-a")
+        await _persist(db, arena=True, run_id="run-b")
+
+        async with db.sessionmaker() as s:
+            messages = await repositories.get_conversation_messages(s, "c1")
+            run_ids = (await s.execute(select(PipelineRun.id))).scalars().all()
+        assert messages == []
+        assert sorted(run_ids) == ["run-a", "run-b"]
     finally:
         await db.close()

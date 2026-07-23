@@ -20,6 +20,11 @@ class ChatCompletionRequest(BaseModel):
     knowledge_base_id: str | None = None
     knowledge_base: str | None = None
 
+    # Set by the arena UI. Both sides share one session_id, so letting each side persist
+    # itself would write the question twice and two assistant rows in a racing order.
+    # The completed comparison is posted once to /v1/arena/turn instead.
+    arena: bool = False
+
     model_config = {"extra": "allow"}
 
 
