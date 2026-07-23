@@ -444,6 +444,36 @@ async def append_arena_turn(
     )
 
 
+async def set_arena_turn_winner(
+    session: AsyncSession, *, conversation_id: str, turn_index: int | None, winner: str
+) -> bool:
+    """Mark which side won a stored comparison. Returns False if no such turn exists.
+
+    The turn is matched in Python rather than by querying inside the JSON column, which SQLite
+    and PostgreSQL spell differently — and on PostgreSQL the live column is `json`, not `jsonb`,
+    so it has no equality operator to query with. A conversation holds few arena turns.
+    """
+    if turn_index is None:
+        return False
+    rows = (
+        (
+            await session.execute(
+                select(Message).where(Message.conversation_id == conversation_id, Message.turn_kind == "arena")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in rows:
+        stored = row.arena or {}
+        if stored.get("turn_index") == turn_index:
+            # Reassign rather than mutate: a plain JSON column is not change-tracked, so an
+            # in-place `stored["winner"] = winner` would never reach the database.
+            row.arena = {**stored, "winner": winner}
+            return True
+    return False
+
+
 async def upsert_session_survey(
     session: AsyncSession,
     *,

@@ -209,3 +209,71 @@ def test_side_sources_are_projected_to_title_and_link(client, db_path):
     assert body["turns"][1]["sides"][0]["sources"] == [
         {"document_title": "Устав НГУ", "source_url": "https://nsu.ru/ustav"}
     ]
+
+
+VOTE = {
+    "model_a": "qwen",
+    "kb_a": "kb1",
+    "model_b": "llama",
+    "kb_b": "kb1",
+    "winner": "b",
+    "session_id": "c1",
+    "turn_index": 0,
+}
+
+
+def test_voting_sets_the_winner_on_the_stored_turn(client, db_path):
+    headers = _consenting_guest(client, db_path)
+    client.post("/v1/arena/turn", json=TURN, headers=headers)
+
+    assert client.post("/v1/arena/vote", json=VOTE, headers=headers).status_code == 200
+
+    body = client.get("/v1/conversations/c1", headers=headers).json()
+    assert body["turns"][1]["winner"] == "b"
+
+
+def test_a_vote_for_an_unknown_turn_is_harmless(client, db_path):
+    headers = _consenting_guest(client, db_path)
+    client.post("/v1/arena/turn", json=TURN, headers=headers)
+
+    stray = {**VOTE, "turn_index": 7}
+    assert client.post("/v1/arena/vote", json=stray, headers=headers).status_code == 200
+
+    body = client.get("/v1/conversations/c1", headers=headers).json()
+    assert body["turns"][1]["winner"] is None
+
+
+def test_a_tie_vote_round_trips_as_tie_not_a_or_b(client, db_path):
+    """winner is Literal["a", "b", "tie", "both_bad"] end to end — exercise a value other
+    than "a"/"b" so a naive implementation that only handles the binary case is caught."""
+    headers = _consenting_guest(client, db_path)
+    turn = {**TURN, "session_id": "c3"}
+    client.post("/v1/arena/turn", json=turn, headers=headers)
+
+    tie_vote = {**VOTE, "session_id": "c3", "winner": "tie"}
+    assert client.post("/v1/arena/vote", json=tie_vote, headers=headers).status_code == 200
+
+    body = client.get("/v1/conversations/c3", headers=headers).json()
+    assert body["turns"][1]["winner"] == "tie"
+
+
+def test_a_strangers_vote_does_not_set_the_winner_on_someone_elses_turn(client, db_path):
+    """Voting now mutates the stored turn, so the same ownership boundary that
+    /v1/arena/turn and the feedback endpoints enforce applies here too. It matters more
+    than it might first appear: submit_arena_vote's (session_id, turn_index) idempotency
+    means a stranger's vote would not just fail to move the stored winner — recorded=True
+    for the stranger's vote would permanently consume the one write the real owner's own
+    vote gets for that turn, via the same dedup check."""
+    owner_headers = _consenting_guest(client, db_path)
+    turn = {**TURN, "session_id": "c4"}
+    client.post("/v1/arena/turn", json=turn, headers=owner_headers)
+
+    stranger_headers = _consenting_guest(client, db_path)
+    stray_vote = {**VOTE, "session_id": "c4"}
+    resp = client.post("/v1/arena/vote", json=stray_vote, headers=stranger_headers)
+    assert resp.status_code == 404
+
+    # And the turn is untouched — no winner, and (since the vote was rejected outright)
+    # the owner's own future vote for this turn is not blocked by the dedup check either.
+    body = client.get("/v1/conversations/c4", headers=owner_headers).json()
+    assert body["turns"][1]["winner"] is None
