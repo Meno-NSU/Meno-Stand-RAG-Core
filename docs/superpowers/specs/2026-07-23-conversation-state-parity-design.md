@@ -121,9 +121,15 @@ What separates the two copies is the **write gate, not the lifetime**. The analy
 only ever written under the improvement consent, so a conversation rendered out of it has no
 sources at all for anyone who declined — the bug this spec exists to fix. Deletion does not
 separate them: withdrawing the improvement consent deletes nothing (it records a `revoked`
-event and flips `conversations.analysis_allowed`), and retention and erasure both run
-`delete_conversation_cascade`, which removes the messages and the `pipeline_runs` subtree in
-the same transaction. Neither copy outlives the other.
+event and flips `conversations.analysis_allowed`), and for a conversation that exists, retention
+and erasure both run `delete_conversation_cascade`, which removes the messages and the
+`pipeline_runs` subtree in the same transaction, so neither copy outlives the other.
+
+(That "for a conversation that exists" qualifier was missing here originally, and a final review
+caught the gap it hid: two write paths — the arena-flagged persist and `_persist_failure` — write
+a `pipeline_run` without ever creating a conversation, orphaning the analytics copy so that
+`delete_conversation_cascade` never reaches it. That is closed by `0017_pipeline_run_owner`; see
+the erasure item under follow-ups.)
 
 The message copy therefore carries only what Цель 1 (сервисная обработка) covers —
 «показанные источники», the title and the link. It must not accumulate retrieval content such
@@ -230,15 +236,32 @@ covers the remainder):
   `{model, messages, stream, user, knowledge_base_id}` — so until Part B ships, arena keeps
   writing the duplicated question and two racing assistant rows described above. The backend
   change is a no-op for production arena traffic on its own.
-- **A vote that arrives before its turn never marks a winner.** `/v1/arena/vote` and
-  `/v1/arena/turn` are independent endpoints with no enforced ordering. If the vote lands first,
-  it is recorded in `arena_votes` and the Elo store correctly, but `set_arena_turn_winner`
-  no-ops because the turn does not exist yet — and once the turn is written with
-  `winner: null`, `submit_arena_vote`'s `(session_id, turn_index)` idempotency treats every
-  later vote for that pair as a duplicate, so the winner can never be set. The comparison
-  restores as unvoted forever. Fixing it means either ordering the two requests in Part B, or
-  having `append_arena_turn` backfill the winner from an existing `arena_votes` row. The second
-  is self-contained and does not depend on the frontend, so it is the better candidate.
+- ~~**A vote that arrives before its turn never marks a winner.**~~ Closed in code — a final
+  review found this text stale. `append_arena_turn` backfills the winner from an existing
+  `arena_votes` row on both its insert and in-place-update paths, so a turn written after its
+  vote comes back already marked. Covered by
+  `test_a_vote_that_arrives_before_its_turn_is_reflected_once_the_turn_is_posted`.
+
+- ~~**Personal data in an orphaned `pipeline_run` survives erasure and retention.**~~ Closed by
+  `0017_pipeline_run_owner`. The arena-flagged persist and `_persist_failure` write a
+  `pipeline_run` (carrying the question text, and via `generation_records` the answer and
+  retrieved chunks) without creating a conversation, so `delete_conversation_cascade` — the only
+  thing that deleted `pipeline_runs`, matched by `session_id` — never reached them, and neither
+  did erasure or retention. `pipeline_runs` now carries `user_id`/`guest_session_id`, populated
+  on both write paths; `delete_subject_data` sweeps by owner; and retention ages out any
+  `pipeline_run` with no matching conversation, which also removes pre-migration orphans (whose
+  owner columns are NULL and so cannot be reached by the owner sweep) over time. A one-time
+  operator purge of existing orphans is in the deployment checklist.
+
+- **Known minor gaps, recorded, not fixed** (from the final review; none blocks launch):
+  message ordering has no deterministic tiebreaker, so two rows of one turn sharing a
+  microsecond `created_at` could read back inverted (pre-existing, all turns, low probability);
+  a sign-in/out during active generation can drop the in-flight answer via `setActiveChats`
+  identity routing (narrow); the survey answer is returned by the backend but not consumed on
+  restore, so a conversation surveyed on one device can re-prompt on another (idempotent
+  overwrite, benign); `/v1/arena/turn` size caps silently drop an over-long comparison
+  (best-effort POST, `console.error` only — wants a log alert); anonymous arena votes (no
+  `session_id`) have no idempotency, allowing Elo inflation.
 
 - **Existing malformed arena history.** Conversations that already used arena carry
   duplicated questions and split answers. Phase 3 stops producing them but does not clean
