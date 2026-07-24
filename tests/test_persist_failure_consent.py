@@ -94,6 +94,27 @@ async def test_question_is_dropped_without_consent_but_the_failure_is_still_reco
 
 
 @pytest.mark.asyncio
+async def test_persist_failure_tags_the_pipeline_run_with_its_owner(tmp_path):
+    """Load-bearing for the erasure sweep in delete_subject_data: _persist_failure never
+    calls ensure_conversation, so a failed turn on a session_id no earlier successful turn
+    ever created leaves an orphaned pipeline_runs row. Unless this path tags it with the
+    caller's guest_session_id/user_id, delete_subject_data has nothing to match and the row
+    (question text included, once consent is granted) survives erasure forever.
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'owner.sqlite3'}")
+    await db.init_models()
+    try:
+        await _seed_guest(db, granted=True)
+        await _run(db)
+        async with db.sessionmaker() as session:
+            row = (await session.execute(text("SELECT user_id, guest_session_id FROM pipeline_runs"))).one()
+        assert row.guest_session_id == "g1"
+        assert row.user_id is None
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_an_unidentified_caller_leaves_no_question_either(tmp_path):
     """No JWT and no guest token → no consent state → nothing of theirs is kept."""
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'anon.sqlite3'}")
