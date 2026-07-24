@@ -99,7 +99,7 @@ def test_run_reset_then_bootstrap_recovers_user_reported_state(tmp_path):
         engine.dispose()
     assert "conversations" in tables
     assert "pipeline_runs" in tables
-    assert rev == "0016_guest_owner_surveys_votes"
+    assert rev == "0017_pipeline_run_owner"
 
 
 def test_run_reset_noop_on_pristine_db(tmp_path, capsys):
