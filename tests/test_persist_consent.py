@@ -94,23 +94,30 @@ async def test_no_consent_stores_nothing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_consent_logs_the_drop(tmp_path):
+async def test_no_consent_logs_the_drop(tmp_path, monkeypatch):
     # The drop must not be silent: without SERVICE_AND_HISTORY the whole chat is discarded,
     # which is exactly how an un-consented account loses all its history. Emit an ids-only
-    # `persist_skipped_no_consent` event so operators can see it.
-    from structlog.testing import capture_logs
+    # `persist_skipped_no_consent` event so operators can see it. Capture by swapping the
+    # module logger for a recording double — robust to structlog config/ordering, unlike
+    # structlog.testing.capture_logs (which the app's cached logger config defeats).
+    from unittest.mock import MagicMock
+
+    import meno_rag.api.main as main_mod
+
+    rec = MagicMock()
+    monkeypatch.setattr(main_mod, "logger", rec)
 
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'log.sqlite3'}")
     await db.init_models()
     try:
-        with capture_logs() as logs:
-            await _persist(db, user_id="u-nc")  # no consent recorded
-        drop = [e for e in logs if e.get("event") == "persist_skipped_no_consent"]
+        await _persist(db, user_id="u-nc")  # no consent recorded
+        drop = [c for c in rec.info.call_args_list if c.args and c.args[0] == "persist_skipped_no_consent"]
         assert len(drop) == 1
-        assert drop[0]["user_id"] == "u-nc"
-        assert drop[0]["session_id"] == "sess"
+        kw = drop[0].kwargs
+        assert kw["user_id"] == "u-nc"
+        assert kw["session_id"] == "sess"
         # ids only — never the question or answer text
-        assert "question" not in drop[0] and "answer" not in drop[0]
+        assert "question" not in kw and "answer" not in kw
     finally:
         await db.close()
 
