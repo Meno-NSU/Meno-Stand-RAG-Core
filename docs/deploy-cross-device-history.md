@@ -55,6 +55,7 @@ Migrations, in order, all additive:
 | `0014_feedback_guest_owner` | `message_feedback.guest_session_id` |
 | `0015_message_arena` | `messages.turn_kind` (NOT NULL, `server_default 'answer'`), `messages.arena` |
 | `0016_guest_owner_surveys_votes` | `guest_session_id` on `session_surveys` and `arena_votes` |
+| `0017_pipeline_run_owner` | `user_id` + `guest_session_id` on `pipeline_runs` — so a right-to-erasure request reaches analytics rows that were never attached to a conversation |
 
 Every one is `ADD COLUMN`, nullable or with a constant default. On PostgreSQL 11+ that is a
 catalog-only change — no table rewrite, no long lock — so it is safe on a live `messages` table.
@@ -69,10 +70,11 @@ including `conversations`, `messages` and `alembic_version`. It exists for a cle
 Verify before restarting anything:
 
 ```sql
-SELECT version_num FROM alembic_version;                 -- expect 0016_guest_owner_surveys_votes
+SELECT version_num FROM alembic_version;                 -- expect 0017_pipeline_run_owner
 \d messages                                              -- sources, turn_kind, arena present
 \d message_feedback                                      -- guest_session_id present
 \d session_surveys                                       -- guest_session_id present
+\d pipeline_runs                                         -- user_id, guest_session_id present
 SELECT count(*) FROM messages WHERE turn_kind IS NULL;   -- expect 0: server_default backfills
 ```
 
@@ -103,18 +105,33 @@ content-hashed, so a normal reload is usually enough — but check).
 
 ## 4. Verify on the real site
 
+**Verify against a conversation you create *after* this deploy, not existing pilot data.** This
+deploy is what first adds `messages.sources`, `turn_kind`/`arena`. A conversation created before it
+has `sources = NULL` and no arena rows, so it legitimately restores with **no source blocks** — that
+is correct, not a broken restore. So the steps below create fresh state first, then restore it. Sign
+in as a real test account, not a guest — a guest's chats are local and never restore by design.
+
+Also a precondition: none of this stores anything unless the account granted **history consent**.
+The first-load consent modal is non-dismissible and both of its buttons grant it, so a normal
+operator satisfies this automatically — but if you dismiss or defer it, every step below produces
+empty history and you will misread the deploy as broken.
+
 In this order, because each step depends on the last:
 
 1. **As a guest**, open the sidebar: the notice "Чаты хранятся только в этом браузере" is there.
-2. **Sign in.** The chat list is replaced by the account's conversations; the guest chats are gone
-   from the list.
-3. **Open a conversation that has history.** It comes back with its sources, its model label under
-   the answer, and any rating filled in — the thumb selected, not just the comment.
-4. **Ask a question, reload the page.** The answer is still there, with its sources.
+2. **Sign in** to a test account, granting the consent modal.
+3. **Ask a question.** It answers with sources under it and a model label.
+4. **Rate the answer** (thumb + a comment), and **reload the page.** The conversation is still there;
+   the answer keeps its sources and model label, and the rating comes back filled in — the thumb
+   selected, not just the comment.
 5. **Run one arena comparison and vote.** Reload. There is **one** comparison with both answers and
-   the chosen side, and the question appears **once**. If the question appears twice, the frontend
-   is not sending `arena: true` — the build did not take.
-6. **Sign out.** The guest chats reappear; the account chats are gone.
+   the chosen side, and the question appears **once**.
+   - Question appears **twice** → the frontend is not sending `arena: true`; the frontend build did
+     not take, or the old bundle is cached (hard-reload).
+   - Comparison appears **zero** times → either `/v1/arena/turn` 404s (backend/frontend version skew
+     — the backend did not deploy, or the router did not mount) or history consent was not granted
+     (step 2).
+6. **Sign out.** The guest chats reappear; the account chats are gone from the list.
 
 Then check the backend log for `persist_ownership_conflict` and `persist_success_failed`. Neither
 should be firing.
@@ -134,6 +151,37 @@ Roll the schema back only if a migration itself failed partway:
 That drops the new columns and the data in them — the shown sources and stored arena turns
 written since the deploy. Nothing older is affected.
 
+## 6. One-time cleanup of pre-existing orphaned analytics rows (optional, do consciously)
+
+`0017_pipeline_run_owner` makes new analytics rows attributable, so a right-to-erasure request
+reaches them and retention ages them out. But `pipeline_runs` rows written **before** this deploy
+that were never attached to a conversation (an arena side that failed, or a turn that errored on a
+never-saved chat) have NULL owner columns — they cannot be attributed to a subject retroactively,
+so an erasure request can never match them. Retention will remove them over time (it ages out any
+`pipeline_run` with no matching conversation), but they persist until they age past the retention
+cutoff.
+
+If pilot data exists and you want those unattributable rows gone before launch rather than waiting
+for retention, purge them once, in a transaction, after taking the backup:
+
+```sql
+BEGIN;
+-- How many, and how old — look before you delete.
+SELECT count(*), min(created_at), max(created_at)
+  FROM pipeline_runs p
+ WHERE NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id = p.session_id);
+
+-- Deleting the pipeline_run cascades to its stage runs, sources and generation_records
+-- via their run_id FK.
+DELETE FROM pipeline_runs p
+ WHERE NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id = p.session_id);
+COMMIT;
+```
+
+This deletes analytics data permanently. It is optional — the going-forward and retention paths are
+correct without it — so run it only if leaving unattributable pilot rows in place until retention is
+not acceptable for launch.
+
 ## What is still open after this
 
 None of these block the deploy; they are recorded in
@@ -146,3 +194,8 @@ None of these block the deploy; they are recorded in
 - On an untagged legacy conversation, which anyone may write to by policy, a second subject's
   rating or survey answer still replaces the first.
 - `/v1/arena/turn` has a narrow TOCTOU window: its idempotency is select-then-branch with no lock.
+- Message ordering has no deterministic tiebreaker — two rows of one turn sharing a microsecond
+  `created_at` could read back inverted (pre-existing, all turns, low probability).
+- The survey answer is returned by the backend but not consumed on restore, so a conversation
+  surveyed on one device can re-prompt on another (the re-answer is an idempotent overwrite).
+- Anonymous arena votes (no `session_id`) have no idempotency, allowing Elo inflation.
