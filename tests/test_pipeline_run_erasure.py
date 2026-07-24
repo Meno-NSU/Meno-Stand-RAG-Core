@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from meno_rag.db import repositories
 from meno_rag.db.migrate import run_bootstrap
@@ -147,5 +147,114 @@ async def test_erasure_still_deletes_a_conversation_linked_pipeline_run(tmp_path
             assert await s.get(Conversation, "conv-1") is None
             assert await s.get(PipelineRun, "run-1") is None
             assert await s.get(GenerationRecord, "run-1") is None
+    finally:
+        await db.close()
+
+
+async def _pipeline_run_ids(db):
+    async with db.sessionmaker() as s:
+        return sorted(r for (r,) in (await s.execute(text("SELECT id FROM pipeline_runs"))).all())
+
+
+async def test_retention_deletes_an_orphaned_pipeline_run_older_than_cutoff_keeps_a_recent_one(tmp_path):
+    """The storage-limitation side of the same gap: an orphan nobody ever erases must still
+    age out on its own created_at, same as delete_conversations_older_than already does for
+    conversation-linked rows. Also covers the pre-migration case (NULL owner columns) —
+    this sweep matches on "no conversation", not on ownership, so it reaches those too."""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'ret_orphan.sqlite3'}")
+    await db.init_models()
+    try:
+        old = datetime.now(UTC) - timedelta(days=100)
+        recent = datetime.now(UTC) - timedelta(days=1)
+        async with db.sessionmaker() as s:
+            s.add(
+                PipelineRun(
+                    id="old-orphan",
+                    session_id="no-such-conversation-1",
+                    model="m",
+                    knowledge_base_id="kb",
+                    user_question="q",
+                    created_at=old,
+                )
+            )
+            s.add(
+                PipelineRun(
+                    id="new-orphan",
+                    session_id="no-such-conversation-2",
+                    model="m",
+                    knowledge_base_id="kb",
+                    user_question="q",
+                    created_at=recent,
+                )
+            )
+            await s.commit()
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        async with db.sessionmaker() as s:
+            deleted = await repositories.delete_orphaned_pipeline_runs_older_than(s, cutoff=cutoff)
+            await s.commit()
+
+        assert deleted == 1
+        assert await _pipeline_run_ids(db) == ["new-orphan"]
+    finally:
+        await db.close()
+
+
+async def test_retention_leaves_a_conversation_linked_pipeline_run_alone_even_when_old(tmp_path):
+    """The orphan sweep must not reach a run that DOES have a matching conversation — that
+    one is delete_conversations_older_than's job (via the cascade), not this function's."""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'ret_linked.sqlite3'}")
+    await db.init_models()
+    try:
+        old = datetime.now(UTC) - timedelta(days=100)
+        async with db.sessionmaker() as s:
+            await repositories.ensure_conversation(s, "conv-old", guest_session_id="g1")
+            await _seed_pipeline_run(s, run_id="linked-old", session_id="conv-old", guest_session_id="g1")
+            run = await s.get(PipelineRun, "linked-old")
+            run.created_at = old
+            await s.commit()
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        async with db.sessionmaker() as s:
+            deleted = await repositories.delete_orphaned_pipeline_runs_older_than(s, cutoff=cutoff)
+            await s.commit()
+
+        assert deleted == 0
+        assert await _pipeline_run_ids(db) == ["linked-old"]
+    finally:
+        await db.close()
+
+
+async def test_run_retention_ages_out_orphans_and_conversation_linked_runs_together(tmp_path):
+    """Integration check on the actual CLI entry point (meno-rag-retention calls
+    run_retention): both an old orphan and an old conversation-linked run are gone
+    afterwards — the orphan via the new sweep, the linked one via the existing
+    conversation cascade — while a recent orphan survives."""
+    from meno_rag.db.retention import run_retention
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'ret_combined.sqlite3'}")
+    await db.init_models()
+    try:
+        old = datetime.now(UTC) - timedelta(days=100)
+        recent = datetime.now(UTC) - timedelta(days=1)
+        async with db.sessionmaker() as s:
+            await repositories.ensure_conversation(s, "conv-old", guest_session_id="g1")
+            conversation = await s.get(Conversation, "conv-old")
+            conversation.updated_at = old
+            await _seed_pipeline_run(s, run_id="linked-old", session_id="conv-old", guest_session_id="g1")
+            linked = await s.get(PipelineRun, "linked-old")
+            linked.created_at = old
+            await _seed_pipeline_run(s, run_id="orphan-old", session_id="no-conversation", guest_session_id="g2")
+            orphan_old = await s.get(PipelineRun, "orphan-old")
+            orphan_old.created_at = old
+            await _seed_pipeline_run(s, run_id="orphan-new", session_id="no-conversation-2", guest_session_id="g3")
+            orphan_new = await s.get(PipelineRun, "orphan-new")
+            orphan_new.created_at = recent
+            await s.commit()
+
+        deleted = await run_retention(db, days=30)
+
+        assert deleted == 2  # 1 conversation (+ its linked run) + 1 orphaned run
+        assert await _pipeline_run_ids(db) == ["orphan-new"]
     finally:
         await db.close()

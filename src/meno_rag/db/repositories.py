@@ -254,6 +254,39 @@ async def delete_conversations_older_than(session: AsyncSession, *, cutoff: date
     return len(ids)
 
 
+async def delete_orphaned_pipeline_runs_older_than(session: AsyncSession, *, cutoff: datetime) -> int:
+    """Delete pipeline_runs older than ``cutoff`` with no matching ``conversations`` row;
+    returns the count. The companion retention step ``run_retention`` also calls, alongside
+    ``delete_conversations_older_than`` — a clearly separate statement, not tangled into that
+    function's per-conversation loop.
+
+    Closes the storage-limitation side of the pipeline_runs ownership gap (see
+    delete_subject_data's docstring): the arena branch of _persist_success and
+    _persist_failure can both write a pipeline_runs row without ever creating its
+    conversation, so delete_conversations_older_than's cascade — which only walks
+    conversations — never sees that row at all. It ages out here instead, on its own
+    created_at, so it is retained no longer than a conversation-linked run would be.
+
+    Matched by "no conversation", not by owner, so this is also the only path that ever
+    reaches a pre-migration orphan (written before user_id/guest_session_id existed on this
+    table): those rows are unattributable to any subject — delete_subject_data's sweep
+    cannot and should not reach them — but they are still exactly as orphaned, and this is
+    where they eventually go.
+
+    A conversation-linked run is untouched here even if old; that one is
+    delete_conversations_older_than's job, via the cascade.
+    """
+    result = await session.execute(
+        delete(PipelineRun).where(
+            PipelineRun.created_at < cutoff,
+            ~PipelineRun.session_id.in_(select(Conversation.id)),
+        )
+    )
+    # DELETE yields a CursorResult (has rowcount) at runtime; the async execute()
+    # return type is the broader Result, so mypy needs the hint (mirrors clear_message_feedback).
+    return result.rowcount or 0  # type: ignore[attr-defined]
+
+
 def conversation_owner_matches(
     conversation: Conversation, *, user_id: str | None, guest_session_id: str | None
 ) -> bool:
