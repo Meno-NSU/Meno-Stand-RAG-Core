@@ -13,6 +13,7 @@ import httpx
 import structlog
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import text
@@ -36,6 +37,7 @@ from meno_rag.api.runtime_resolver import (
     ModelUnreachableError,
     resolve_pipeline_runtime,
 )
+from meno_rag.api.validation import sanitize_validation_errors
 from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings, parse_cors_origins
 from meno_rag.db import repositories
@@ -324,6 +326,22 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
+@app.exception_handler(RequestValidationError)
+async def log_request_validation_error(request: Request, exc: RequestValidationError):
+    # A 422 otherwise says only "Unprocessable Entity" in the access log — the failing
+    # field is in the response body the client usually swallows. Log the field so a 422
+    # is self-diagnosing, with the raw input stripped (see sanitize_validation_errors),
+    # and return the same trimmed detail.
+    safe_errors = sanitize_validation_errors(exc.errors())
+    logger.warning(
+        "request_validation_error",
+        path=request.url.path,
+        method=request.method,
+        errors=safe_errors,
+    )
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
+
+
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
     request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
@@ -529,9 +547,14 @@ async def list_models(request: Request):
 async def refresh_models(request: Request):
     vllm_registry: VLLMRegistry = request.app.state.vllm_registry
     or_registry = request.app.state.openrouter_registry
-    await vllm_registry.refresh()
+    # Concurrent, not sequential: refresh is awaited by the client (the frontend fires it
+    # around login), so a slow remote vLLM endpoint and the OpenRouter probe must not
+    # stack — that stacking was a ~20s post-login stall when a remote endpoint was slow to
+    # answer /v1/models. gather makes the wait the slower of the two, not their sum.
+    refreshes: list[Any] = [vllm_registry.refresh()]
     if or_registry is not None:
-        await or_registry.discover()
+        refreshes.append(or_registry.discover())
+    await asyncio.gather(*refreshes)
     return await list_models(request)
 
 
