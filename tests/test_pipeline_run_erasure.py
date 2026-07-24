@@ -128,11 +128,12 @@ async def test_erasure_does_not_touch_another_subjects_orphaned_pipeline_run(tmp
 
 async def test_erasure_sweep_cannot_reach_a_pre_migration_orphan_with_null_owner_columns(tmp_path):
     """A row written before this migration (or by any future bug that skips the populate
-    step) has NULL user_id/guest_session_id — unattributable to any subject. delete_subject_
-    data's sweep matches on equality to a concrete id, which SQL NULL never satisfies, so it
-    is correctly powerless here: no amount of erasing g1's data should touch a row nobody can
-    prove is g1's. Only the retention age-out (delete_orphaned_pipeline_runs_older_than, by
-    "no conversation + old", not by owner) can ever remove a row like this — see
+    step) has NULL user_id/guest_session_id — unattributable to any subject.
+    delete_subject_data's sweep matches on equality to a concrete id, which SQL NULL never
+    satisfies, so it is correctly powerless here: no amount of erasing g1's data should touch
+    a row nobody can prove is g1's. Only the retention age-out
+    (delete_orphaned_pipeline_runs_older_than, by "no conversation + old", not by owner) can
+    ever remove a row like this — see
     test_retention_deletes_an_orphaned_pipeline_run_older_than_cutoff_keeps_a_recent_one,
     which seeds the identical NULL-owner shape and confirms retention does reach it.
     """
