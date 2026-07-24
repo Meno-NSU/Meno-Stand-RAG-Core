@@ -1114,7 +1114,16 @@ async def _persist_success(
             service = state["SERVICE_AND_HISTORY"]
             improvement = state["MENO_IMPROVEMENT"]
             if not service:
-                # No consent to store the chat — nothing is written server-side.
+                # No consent to store the chat — nothing is written server-side. Log it
+                # (ids only, never content): the drop is otherwise invisible, and a missing
+                # SERVICE_AND_HISTORY consent for an account silently loses all its history.
+                logger.info(
+                    "persist_skipped_no_consent",
+                    session_id=session_id,
+                    run_id=run_id,
+                    user_id=user_id,
+                    guest_session_id=guest_session_id,
+                )
                 return
 
             # Ownership check guards BOTH halves below: the conversation/message writes
