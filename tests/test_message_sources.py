@@ -251,9 +251,13 @@ async def test_arena_requests_still_record_pipeline_analytics_per_side(tmp_path)
 
         async with db.sessionmaker() as s:
             messages = await repositories.get_conversation_messages(s, "c1")
-            run_ids = (await s.execute(select(PipelineRun.id))).scalars().all()
+            rows = (await s.execute(select(PipelineRun.id, PipelineRun.guest_session_id))).all()
         assert messages == []
-        assert sorted(run_ids) == ["run-a", "run-b"]
+        # Load-bearing for the erasure sweep in delete_subject_data: the arena path never
+        # creates a conversation for this session_id (see test above), so a pipeline_runs
+        # row it writes is only reachable by guest_session_id — it must be populated here,
+        # or delete_subject_data has nothing to match and the row is orphaned forever.
+        assert sorted(rows) == [("run-a", "g1"), ("run-b", "g1")]
     finally:
         await db.close()
 

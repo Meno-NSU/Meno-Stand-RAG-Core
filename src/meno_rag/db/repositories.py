@@ -147,10 +147,23 @@ async def delete_subject_data(
     conversation cascade above would not reach — most commonly feedback, a survey answer,
     or an arena vote left on a conversation the subject does not own (an untagged/legacy
     one, which the write-side ownership policy in api/feedback.py and api/arena.py still
-    lets anyone touch; see conversation_owner_matches). ArenaVote, MessageFeedback, and
-    SessionSurvey all carry both a user_id column and a guest_session_id column, so the two
-    branches reach equally far: for a user we sweep all three by user_id; for a guest, by
-    guest_session_id. Aggregate Elo (arena_ratings) is anonymous and stays regardless.
+    lets anyone touch; see conversation_owner_matches). ArenaVote, MessageFeedback,
+    SessionSurvey, and PipelineRun all carry both a user_id column and a guest_session_id
+    column, so the two branches reach equally far: for a user we sweep all four by user_id;
+    for a guest, by guest_session_id. Aggregate Elo (arena_ratings) is anonymous and stays
+    regardless.
+
+    The PipelineRun sweep is the one of the four that is not merely a belt-and-suspenders
+    duplicate of the cascade above: the arena branch of _persist_success and
+    _persist_failure can both write a pipeline_runs row (question text, under the
+    improvement consent) without ever creating its conversation, so delete_subject_conversations
+    never sees that session_id at all — this is the only path that ever reaches such a row.
+    For a normal, conversation-linked run the delete here is redundant with the cascade
+    (harmless: the row is simply already gone). Deleting a pipeline_runs row cascades to its
+    pipeline_stage_runs / sources / generation_records via their run_id FK, same as through
+    the cascade. A pre-migration orphan (written before these columns existed) has NULL
+    owner columns and is unattributable — this sweep cannot and should not reach it; only
+    the retention age-out (no matching conversation + old) eventually removes it.
 
     ``consent_events`` are deliberately KEPT. Art. 9 of 152-ФЗ puts the burden of proving
     that consent was obtained on the operator, so the evidentiary record has to outlive the
@@ -168,11 +181,13 @@ async def delete_subject_data(
         await session.execute(delete(ArenaVote).where(ArenaVote.user_id == user_id))
         await session.execute(delete(MessageFeedback).where(MessageFeedback.user_id == user_id))
         await session.execute(delete(SessionSurvey).where(SessionSurvey.user_id == user_id))
+        await session.execute(delete(PipelineRun).where(PipelineRun.user_id == user_id))
         await session.execute(delete(User).where(User.id == user_id))
     else:
         await session.execute(delete(ArenaVote).where(ArenaVote.guest_session_id == guest_session_id))
         await session.execute(delete(MessageFeedback).where(MessageFeedback.guest_session_id == guest_session_id))
         await session.execute(delete(SessionSurvey).where(SessionSurvey.guest_session_id == guest_session_id))
+        await session.execute(delete(PipelineRun).where(PipelineRun.guest_session_id == guest_session_id))
         await session.execute(delete(GuestSession).where(GuestSession.id == guest_session_id))
 
 
@@ -239,6 +254,39 @@ async def delete_conversations_older_than(session: AsyncSession, *, cutoff: date
     return len(ids)
 
 
+async def delete_orphaned_pipeline_runs_older_than(session: AsyncSession, *, cutoff: datetime) -> int:
+    """Delete pipeline_runs older than ``cutoff`` with no matching ``conversations`` row;
+    returns the count. The companion retention step ``run_retention`` also calls, alongside
+    ``delete_conversations_older_than`` — a clearly separate statement, not tangled into that
+    function's per-conversation loop.
+
+    Closes the storage-limitation side of the pipeline_runs ownership gap (see
+    delete_subject_data's docstring): the arena branch of _persist_success and
+    _persist_failure can both write a pipeline_runs row without ever creating its
+    conversation, so delete_conversations_older_than's cascade — which only walks
+    conversations — never sees that row at all. It ages out here instead, on its own
+    created_at, so it is retained no longer than a conversation-linked run would be.
+
+    Matched by "no conversation", not by owner, so this is also the only path that ever
+    reaches a pre-migration orphan (written before user_id/guest_session_id existed on this
+    table): those rows are unattributable to any subject — delete_subject_data's sweep
+    cannot and should not reach them — but they are still exactly as orphaned, and this is
+    where they eventually go.
+
+    A conversation-linked run is untouched here even if old; that one is
+    delete_conversations_older_than's job, via the cascade.
+    """
+    result = await session.execute(
+        delete(PipelineRun).where(
+            PipelineRun.created_at < cutoff,
+            ~PipelineRun.session_id.in_(select(Conversation.id)),
+        )
+    )
+    # DELETE yields a CursorResult (has rowcount) at runtime; the async execute()
+    # return type is the broader Result, so mypy needs the hint (mirrors clear_message_feedback).
+    return result.rowcount or 0  # type: ignore[attr-defined]
+
+
 def conversation_owner_matches(
     conversation: Conversation, *, user_id: str | None, guest_session_id: str | None
 ) -> bool:
@@ -274,7 +322,16 @@ async def create_pipeline_run(
     error_code: str | None = None,
     error_retryable: bool | None = None,
     error_stage: str | None = None,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
 ) -> None:
+    """``user_id``/``guest_session_id`` tag the row with its subject so it can be found and
+    erased even when ``session_id`` never gets a matching ``conversations`` row — the arena
+    branch of ``_persist_success`` and ``_persist_failure`` both write a pipeline_runs row
+    without creating that conversation. Without these, such a row is orphaned beyond the
+    reach of both delete_subject_data (erasure) and the retention sweep by owner — only the
+    "no matching conversation + old" retention path would ever remove it.
+    """
     session.add(
         PipelineRun(
             id=run_id,
@@ -293,6 +350,8 @@ async def create_pipeline_run(
             error_code=error_code,
             error_retryable=error_retryable,
             error_stage=error_stage,
+            user_id=user_id,
+            guest_session_id=guest_session_id,
         )
     )
 

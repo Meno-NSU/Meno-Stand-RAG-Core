@@ -67,6 +67,12 @@ class PipelineRun(Base):
 
     id: Mapped[str] = mapped_column(String(96), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    # Owner columns (plain, no FK — same shape as ArenaVote/MessageFeedback/SessionSurvey).
+    # session_id alone is not enough to erase or age out a row whose conversation was never
+    # created (the arena and failure write paths can do this) — see delete_subject_data and
+    # delete_orphaned_pipeline_runs_older_than.
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     model: Mapped[str] = mapped_column(String(256), nullable=False)
     generation_model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     core_model: Mapped[str | None] = mapped_column(String(256), nullable=True)

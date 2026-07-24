@@ -1164,6 +1164,8 @@ async def _persist_success(
                     total_ms=total_ms,
                     response_len=len(answer),
                     stream=stream,
+                    user_id=user_id,
+                    guest_session_id=guest_session_id,
                 )
                 await session.flush()  # ensure pipeline_run id is visible for generation_record FK
                 for stage, duration_ms in outcome.stage_durations_ms.items():
@@ -1258,6 +1260,8 @@ async def _persist_failure(
             error_code=classified.code if classified else None,
             error_retryable=classified.retryable if classified else None,
             error_stage=stage,
+            user_id=user_id,
+            guest_session_id=guest_session_id,
         )
         await session.commit()
 
