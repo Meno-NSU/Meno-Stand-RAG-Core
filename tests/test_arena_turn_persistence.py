@@ -149,14 +149,16 @@ def test_stranger_cannot_post_into_someone_elses_conversation(client, db_path):
     assert client.get("/v1/conversations/c1", headers=owner_headers).status_code == 200
 
 
-def test_without_consent_nothing_is_stored(client, db_path):
+def test_history_is_stored_even_without_consent(client, db_path):
     headers = {"X-Guest-Token": client.post("/v1/guest/session").json()["guest_token"]}
 
     resp = client.post("/v1/arena/turn", json=TURN, headers=headers)
 
+    # The comparison, stored as a dialogue turn, is history — kept unconditionally, no
+    # consent required. Only the analysis flag is gated by the improvement opt-in.
     assert resp.status_code == 200
-    assert resp.json()["stored"] is False
-    assert client.get("/v1/conversations/c1", headers=headers).status_code == 404
+    assert resp.json()["stored"] is True
+    assert client.get("/v1/conversations/c1", headers=headers).status_code == 200
 
 
 def test_side_sources_are_projected_to_title_and_link(client, db_path):

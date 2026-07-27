@@ -1103,28 +1103,17 @@ async def _persist_success(
 ) -> None:
     try:
         async with database.sessionmaker() as session:
-            # Consent gate (Stage 3): what we store depends only on the subject's
-            # recorded consent, never on whether they are registered.
-            #   service     → store the chat (conversation + messages)
-            #   improvement → additionally store the RAG pipeline detail + trace,
-            #                 and mark the conversation analysis_allowed
+            # What we store depends on the subject's recorded consent:
+            #   history (conversation + messages) → stored UNCONDITIONALLY. Keeping the
+            #     user's own dialogue history is core service behaviour under the Terms of
+            #     Use (ст. 6 ч. 1 п. 5 152-ФЗ — necessary to perform the service), not a
+            #     consented purpose, so it is never gated.
+            #   improvement → additionally store the RAG pipeline detail + trace, and mark
+            #     the conversation analysis_allowed. This is the only consented purpose.
             state = await repositories.current_consent_state(
                 session, user_id=user_id, guest_session_id=guest_session_id
             )
-            service = state["SERVICE_AND_HISTORY"]
             improvement = state["MENO_IMPROVEMENT"]
-            if not service:
-                # No consent to store the chat — nothing is written server-side. Log it
-                # (ids only, never content): the drop is otherwise invisible, and a missing
-                # SERVICE_AND_HISTORY consent for an account silently loses all its history.
-                logger.info(
-                    "persist_skipped_no_consent",
-                    session_id=session_id,
-                    run_id=run_id,
-                    user_id=user_id,
-                    guest_session_id=guest_session_id,
-                )
-                return
 
             # Ownership check guards BOTH halves below: the conversation/message writes
             # (skipped for arena) and the `if improvement:` analytics block (not skipped for
@@ -1260,10 +1249,11 @@ async def _persist_failure(
     """Record a failed turn for diagnostics.
 
     The row itself (error code, stage, model, timings) is operational data kept under the
-    operator's legitimate interest. The *question text* is not: it is the user's message,
-    and storing it needs the same service consent as a successful turn — so without that
-    consent the row is written with an empty question rather than not at all, which keeps
-    the failure diagnosable without keeping what the subject did not agree to store.
+    operator's legitimate interest. The *question text* is analytics — it is kept only with
+    the improvement opt-in (the sole consented purpose); without it the row is written with
+    an empty question rather than not at all, which keeps the failure diagnosable without
+    keeping content the subject did not opt into analysing. History is unrelated here: a
+    failed turn produced no answer, so no dialogue turn is written on this path.
     """
     question = ""
     for message in reversed(payload.messages):
@@ -1272,7 +1262,10 @@ async def _persist_failure(
             break
     async with database.sessionmaker() as session:
         state = await repositories.current_consent_state(session, user_id=user_id, guest_session_id=guest_session_id)
-        if not state["SERVICE_AND_HISTORY"]:
+        if not state["MENO_IMPROVEMENT"]:
+            # The failure pipeline_run itself is a technical/error record (operations —
+            # legitimate interest, no consent). The question CONTENT inside it is analytics,
+            # so it is kept only with the improvement opt-in; otherwise blanked.
             question = ""
         await repositories.create_pipeline_run(
             session,

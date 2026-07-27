@@ -79,10 +79,10 @@ async def record_turn(payload: ArenaTurnRequest, request: Request):
             # just misfile a row.
             raise HTTPException(status_code=404, detail="Conversation not found.")
 
+        # History (the comparison stored as a dialogue turn) is kept unconditionally, like
+        # _persist_success — it is core service behaviour, not a consented purpose. Only the
+        # analysis flag below is gated by the improvement opt-in.
         state = await repositories.current_consent_state(session, user_id=user_id, guest_session_id=guest_id)
-        if not state["SERVICE_AND_HISTORY"]:
-            # Same gate as _persist_success: no consent to store the chat, nothing written.
-            return {"status": "ok", "stored": False}
 
         await repositories.append_arena_turn(
             session,
