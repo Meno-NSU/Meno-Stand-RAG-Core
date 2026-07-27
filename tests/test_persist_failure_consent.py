@@ -1,9 +1,10 @@
 # tests/test_persist_failure_consent.py
-"""A failed turn is diagnosable, but the question text still needs consent.
+"""A failed turn is diagnosable, but the question text needs the improvement consent.
 
-The Policy states that without the service consent the content of a message is not stored
-on the server. That has to hold on the error path too, otherwise the statement is false
-for every user whose very first request failed.
+The failure pipeline_run itself is a technical/error record (operations — legitimate
+interest, no consent). Its stored question CONTENT is analytics, so it is kept only with
+the improvement opt-in; without it the row still records that the model/stage failed, but
+not the user's words. History storage is unrelated — the error path writes no dialogue turn.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ async def _seed_guest(db: Database, *, granted: bool) -> None:
             await repositories.record_consent_event(
                 session,
                 guest_session_id="g1",
-                purpose="SERVICE_AND_HISTORY",
+                purpose="MENO_IMPROVEMENT",
                 action="granted",
                 document_kind="personal_data_consent",
                 document_version="2.0",

@@ -78,46 +78,20 @@ async def _counts(db):
 
 
 @pytest.mark.asyncio
-async def test_no_consent_stores_nothing(tmp_path):
+async def test_no_consent_still_stores_history(tmp_path):
+    # History (conversation + messages) is core service behaviour under the Terms of Use,
+    # NOT a consented purpose — so it is stored even with no consent recorded at all. Only
+    # the analysis subtree (pipeline_runs / generation_records) stays gated by improvement.
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'a.sqlite3'}")
     await db.init_models()
     try:
         await _persist(db, guest_session_id="g1")  # no consent recorded
         assert await _counts(db) == {
-            "conversations": 0,
-            "messages": 0,
+            "conversations": 1,
+            "messages": 2,
             "pipeline_runs": 0,
             "generation_records": 0,
         }
-    finally:
-        await db.close()
-
-
-@pytest.mark.asyncio
-async def test_no_consent_logs_the_drop(tmp_path, monkeypatch):
-    # The drop must not be silent: without SERVICE_AND_HISTORY the whole chat is discarded,
-    # which is exactly how an un-consented account loses all its history. Emit an ids-only
-    # `persist_skipped_no_consent` event so operators can see it. Capture by swapping the
-    # module logger for a recording double — robust to structlog config/ordering, unlike
-    # structlog.testing.capture_logs (which the app's cached logger config defeats).
-    from unittest.mock import MagicMock
-
-    import meno_rag.api.main as main_mod
-
-    rec = MagicMock()
-    monkeypatch.setattr(main_mod, "logger", rec)
-
-    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'log.sqlite3'}")
-    await db.init_models()
-    try:
-        await _persist(db, user_id="u-nc")  # no consent recorded
-        drop = [c for c in rec.info.call_args_list if c.args and c.args[0] == "persist_skipped_no_consent"]
-        assert len(drop) == 1
-        kw = drop[0].kwargs
-        assert kw["user_id"] == "u-nc"
-        assert kw["session_id"] == "sess"
-        # ids only — never the question or answer text
-        assert "question" not in kw and "answer" not in kw
     finally:
         await db.close()
 
