@@ -1051,7 +1051,18 @@ Expected: без ошибок
 Run: `uv run pytest tests/test_bench_token.py tests/test_bench_endpoint.py tests/test_admission.py tests/test_chat_or_errors.py tests/test_api_errors.py tests/test_api_events.py -v`
 Expected: всё зелёное
 
-Полный набор локально на macOS не гонять — он сегфолтится при наличии faiss. Полный прогон делает CI.
+**Локальный прогон на macOS требует `STAND_RESOURCES_DIR=/nonexistent`.** Проверено
+2026-09-09: без него любой тест, поднимающий приложение через `TestClient`, падает
+с `Fatal Python error: Segmentation fault` при выгрузке faiss-индекса на 938 МБ.
+Сегфолт воспроизводится и на чистом `main`, то есть к нашему коду отношения не имеет.
+Тесты от реальных ресурсов не зависят — они подменяют `app.state.pipeline` моком,
+а `lifespan` при отсутствии индекса просто выставляет `pipeline = None`.
+
+```bash
+STAND_RESOURCES_DIR=/nonexistent uv run pytest tests/test_bench_token.py tests/test_bench_endpoint.py tests/test_admission.py tests/test_chat_or_errors.py tests/test_api_errors.py tests/test_api_events.py -v
+```
+
+Полный набор локально всё равно не гонять — в CI ресурсов стенда нет, и он прогоняет всё.
 
 - [ ] **Ручная проверка через SSH-туннель (на хосте, после выката)**
 
