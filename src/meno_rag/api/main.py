@@ -660,7 +660,7 @@ async def list_knowledge_bases(request: Request):
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(payload: ChatCompletionRequest, request: Request):
+async def chat_completions(payload: ChatCompletionRequest, request: Request, response: Response):
     pipeline: StandRagPipeline | None = request.app.state.pipeline
     if pipeline is None:
         return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
@@ -668,6 +668,19 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     # Benchmark requests are recognised before anything else: they pick a
     # different admission budget, force trace capture, and skip persistence.
     bench = bench_mod.is_bench_request(request)
+    if bench:
+        # I3: a mistyped token must never be observably identical to a correct one whose
+        # trace happened to come back None — a harness can assert this header once before
+        # a run and fail fast instead of after writing a thousand rows to production
+        # tables. FastAPI merges the injected `response` object's headers onto the actual
+        # response ONLY when the endpoint returns a plain value it wraps itself (the
+        # non-stream `dict` below) — it is silently discarded whenever a Response is
+        # returned directly. That covers this one line for the non-stream success path;
+        # the streaming success path sets its own header on the StreamingResponse it
+        # returns below, and the early-return error paths (_error_response,
+        # _overloaded_response) never carry it — acceptable, since an error response is
+        # never mistaken for a successful, damage-doing production write.
+        response.headers["X-Bench-Mode"] = "1"
 
     # Admission control: fast-fail under overload rather than queueing forever.
     admission: AdmissionController = request.app.state.bench_admission if bench else request.app.state.admission
@@ -711,8 +724,15 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                 403, "This model requires signing in. Register or log in to use OpenRouter models.", "auth_required"
             )
         user_id = current_user.id if current_user is not None else None
-        guest_session = await guest.resolve_guest_session(request)
-        guest_session_id = guest_session.id if guest_session is not None else None
+        # M1: resolve_guest_session UPDATEs guest_sessions.expires_at/last_seen_at and
+        # commits — a production-table write. Bench writes nothing downstream that would
+        # ever use guest_session_id, so skip the lookup entirely rather than resolve it
+        # and merely decline to use it; a bench client sending X-Guest-Token (e.g. a curl
+        # copy-pasted out of browser devtools) must not touch this table at all.
+        guest_session_id = None
+        if not bench:
+            guest_session = await guest.resolve_guest_session(request)
+            guest_session_id = guest_session.id if guest_session is not None else None
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created_ts = int(time.time())
@@ -739,6 +759,12 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
 
         if payload.stream:
             released = True  # the streaming generator now owns the release
+            # A StreamingResponse is returned directly, so the `response.headers` set
+            # above (for the non-stream dict-wrapping case) is never merged onto it —
+            # this needs its own entry.
+            stream_headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+            if bench:
+                stream_headers["X-Bench-Mode"] = "1"
             return StreamingResponse(
                 _stream_response(
                     request=request,
@@ -756,7 +782,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     bench=bench,
                 ),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+                headers=stream_headers,
             )
 
         return await _non_stream_response(

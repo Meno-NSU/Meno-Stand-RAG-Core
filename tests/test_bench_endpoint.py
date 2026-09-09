@@ -8,10 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime
+from tests._dbhelpers import with_db as _with_db
 
 BENCH_TOKEN = "test-bench-token-0123456789"
 
@@ -26,6 +28,41 @@ def _metric_sum(name: str) -> float:
     return sum(
         sample.value for metric in metrics_mod.REGISTRY.collect() for sample in metric.samples if sample.name == name
     )
+
+
+# Every production table a chat-completion turn could conceivably touch. Used by the
+# black-box row-count tests below instead of mocking `_persist_success`/`_persist_failure`
+# at their one call site — a mock only proves that call site stayed quiet, not that no
+# other path wrote a row (that blind spot is exactly how the M1 guest-session UPDATE hid).
+_ROW_COUNT_TABLES = ("conversations", "messages", "pipeline_runs", "sources", "guest_sessions")
+
+
+def _row_counts(db_path) -> dict[str, int]:
+    """Snapshot row counts for every table in _ROW_COUNT_TABLES, via a second engine
+    against the same sqlite file (see tests/_dbhelpers.py) rather than the TestClient's
+    own event loop."""
+
+    async def _counts(session):
+        return {
+            table: (await session.execute(text(f"SELECT COUNT(*) FROM {table}"))).scalar_one()
+            for table in _ROW_COUNT_TABLES
+        }
+
+    return _with_db(db_path, _counts)
+
+
+def _guest_expires_at(db_path, guest_session_id: str):
+    """A guest session's current `expires_at`. `touch_guest_session` UPDATEs this column
+    in place, so a plain row count on `guest_sessions` can never see that write — this is
+    the complementary check that actually proves M1's fix (bench must not touch it at all)."""
+
+    async def _read(session):
+        result = await session.execute(
+            text("SELECT expires_at FROM guest_sessions WHERE id = :id"), {"id": guest_session_id}
+        )
+        return result.scalar_one()
+
+    return _with_db(db_path, _read)
 
 
 @pytest.mark.asyncio
@@ -73,6 +110,39 @@ def bench_client(monkeypatch):
         c.app.state.pipeline.prepare = AsyncMock(return_value=_fake_outcome())
         c.app.state.pipeline.generate_text = AsyncMock(return_value="Сессия начинается в январе.")
         yield c
+
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def bench_client_real_db(monkeypatch, tmp_path):
+    """Like `bench_client`, but DATABASE_URL points at an isolated on-disk sqlite file
+    instead of leaving `_persist_success` mocked out — so tests using this fixture can
+    assert on real row counts across the whole persistence path. Deliberately never the
+    developer's real var/meno_rag.sqlite3: DATABASE_URL is overridden (and the settings
+    cache cleared) before the TestClient's `with` block runs the app's lifespan, so
+    `Database(settings.database_url, ...)` is built against tmp_path from the start.
+
+    Yields (client, db_path) — db_path for a second engine via tests/_dbhelpers.with_db,
+    matching the pattern the rest of this test suite uses to inspect a TestClient-driven
+    app's database without mixing event loops.
+    """
+    db_path = tmp_path / "bench_endpoint_rowcount.sqlite3"
+    monkeypatch.setenv("BENCH_API_TOKEN", BENCH_TOKEN)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    from meno_rag.config import get_settings
+
+    get_settings.cache_clear()
+    from meno_rag.api import main as main_mod
+
+    runtime = PipelineRuntime.uniform(ModelRuntime(provider="vllm", model_id="menon-1", base_url="http://fake/v1"))
+    monkeypatch.setattr(main_mod, "_resolve_runtime", AsyncMock(return_value=runtime))
+
+    with TestClient(main_mod.app) as c:
+        c.app.state.pipeline = AsyncMock()
+        c.app.state.pipeline.prepare = AsyncMock(return_value=_fake_outcome())
+        c.app.state.pipeline.generate_text = AsyncMock(return_value="Сессия начинается в январе.")
+        yield c, db_path
 
     get_settings.cache_clear()
 
@@ -465,3 +535,232 @@ def test_bench_stream_error_is_counted_in_the_bench_metric_not_the_production_on
     assert _bench_error() == bench_error_before + 1
     assert _metric_sum("meno_errors_total") == errors_before
     assert _metric_sum("meno_chat_requests_total") == chat_before
+
+
+# --- I3: a mistyped token must be visibly different from bench mode, not silently
+# indistinguishable from a correct token whose trace happened to come back None. ---
+
+
+def test_bench_non_stream_response_carries_x_bench_mode_header(bench_client, monkeypatch):
+    from meno_rag.api import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_persist_success", AsyncMock())
+
+    r = _post(bench_client, token=BENCH_TOKEN)
+
+    assert r.status_code == 200
+    assert r.headers["X-Bench-Mode"] == "1"
+
+
+def test_normal_non_stream_response_has_no_x_bench_mode_header(bench_client, monkeypatch):
+    from meno_rag.api import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_persist_success", AsyncMock())
+
+    r = _post(bench_client, token=None)
+
+    assert r.status_code == 200
+    assert "X-Bench-Mode" not in r.headers
+
+
+def test_bench_stream_response_carries_x_bench_mode_header(bench_client, monkeypatch):
+    """The non-stream merge (FastAPI copying the injected `response` object's headers
+    onto the dict it wraps) does NOT apply here — StreamingResponse is returned directly.
+    This is why the streaming branch needs its own `headers={...}` entry, and why this
+    must be proven with a real request rather than assumed from the non-stream case."""
+    from meno_rag.api import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_persist_success", AsyncMock())
+
+    async def _tokens(*args, **kwargs):
+        yield "Сессия в январе."
+
+    bench_client.app.state.pipeline.stream_text = _tokens
+
+    r = _post_stream(bench_client, token=BENCH_TOKEN)
+
+    assert r.status_code == 200
+    assert r.headers["X-Bench-Mode"] == "1"
+
+
+def test_normal_stream_response_has_no_x_bench_mode_header(bench_client, monkeypatch):
+    from meno_rag.api import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_persist_success", AsyncMock())
+
+    async def _tokens(*args, **kwargs):
+        yield "Сессия в январе."
+
+    bench_client.app.state.pipeline.stream_text = _tokens
+
+    r = _post_stream(bench_client, token=None)
+
+    assert r.status_code == 200
+    assert "X-Bench-Mode" not in r.headers
+
+
+# --- M1: guest.resolve_guest_session UPDATEs + commits guest_sessions — a production
+# table — so bench must skip it entirely, even when a bench client happens to send
+# X-Guest-Token (e.g. a curl copy-pasted out of browser devtools). ---
+
+
+def test_bench_request_does_not_resolve_guest_session(bench_client, monkeypatch):
+    from meno_rag.api import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_persist_success", AsyncMock())
+    resolve = AsyncMock(return_value=None)
+    monkeypatch.setattr(main_mod.guest, "resolve_guest_session", resolve)
+
+    r = bench_client.post(
+        "/v1/chat/completions",
+        json={"model": "menon-1", "messages": [{"role": "user", "content": "Когда сессия?"}]},
+        headers={"Authorization": f"Bearer {BENCH_TOKEN}", "X-Guest-Token": "whatever"},
+    )
+    assert r.status_code == 200
+    assert resolve.await_count == 0  # bench: never even asked
+
+    r2 = bench_client.post(
+        "/v1/chat/completions",
+        json={"model": "menon-1", "messages": [{"role": "user", "content": "Когда сессия?"}]},
+        headers={"X-Guest-Token": "whatever"},
+    )
+    assert r2.status_code == 200
+    assert resolve.await_count == 1  # normal traffic still resolves guests as before
+
+
+# --- Test quality (finding 1): row counts across every production table, instead of
+# mocking _persist_success at its one call site — a mock only proves that call site
+# stayed quiet, not that no other path wrote a row (M1's blind spot exactly). ---
+
+
+def test_bench_request_with_guest_token_writes_no_production_rows(bench_client_real_db):
+    client, db_path = bench_client_real_db
+
+    mint = client.post("/v1/guest/session").json()
+    guest_token = mint["guest_token"]
+    guest_session_id = mint["guest_session_id"]
+
+    before = _row_counts(db_path)
+    expires_before = _guest_expires_at(db_path, guest_session_id)
+
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "menon-1", "messages": [{"role": "user", "content": "Когда сессия?"}]},
+        headers={"Authorization": f"Bearer {BENCH_TOKEN}", "X-Guest-Token": guest_token},
+    )
+    assert r.status_code == 200
+
+    after = _row_counts(db_path)
+    assert after == before  # bench: not a single row moved, in any tracked table
+    # A plain row count can never see an UPDATE — touch_guest_session mutates
+    # expires_at/last_seen_at in place without changing guest_sessions' row count. This
+    # is the check that actually proves M1: bench must not touch the row at all.
+    assert _guest_expires_at(db_path, guest_session_id) == expires_before
+
+    # Prove the row-counting methodology can actually detect a write at all — a
+    # row-count test that never sees a write is worthless. An equivalent non-bench
+    # request (same guest token) must move conversations/messages (history is stored
+    # unconditionally) and must touch — not insert a new row for — the guest session.
+    before2 = _row_counts(db_path)
+    r2 = client.post(
+        "/v1/chat/completions",
+        json={"model": "menon-1", "messages": [{"role": "user", "content": "Когда сессия?"}]},
+        headers={"X-Guest-Token": guest_token},
+    )
+    assert r2.status_code == 200
+
+    after2 = _row_counts(db_path)
+    assert after2["conversations"] == before2["conversations"] + 1
+    assert after2["messages"] == before2["messages"] + 2
+    # No MENO_IMPROVEMENT consent was granted, so the analysis tables stay untouched —
+    # same as bench, but for a different reason (consent-gated, not bench-skipped).
+    assert after2["pipeline_runs"] == before2["pipeline_runs"]
+    assert after2["sources"] == before2["sources"]
+    assert after2["guest_sessions"] == before2["guest_sessions"]  # touch is an UPDATE, not an INSERT
+    assert _guest_expires_at(db_path, guest_session_id) != expires_before  # ...but it WAS touched
+
+
+# --- Test quality (finding 2): the bench error path had no coverage at all — neither
+# the `if not bench:` guards inside the except-blocks, nor meno_chat_in_flight balance
+# under an exception, were ever exercised. ---
+
+
+def _chat_in_flight() -> float:
+    return metrics_mod.REGISTRY.get_sample_value("meno_chat_in_flight", {}) or 0.0
+
+
+def test_bench_non_stream_pipeline_error_writes_no_production_rows_and_balances_in_flight_gauge(
+    bench_client_real_db,
+):
+    client, db_path = bench_client_real_db
+    client.app.state.pipeline.generate_text = AsyncMock(side_effect=RuntimeError("boom"))
+
+    rows_before = _row_counts(db_path)
+    gauge_before = _chat_in_flight()
+
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "menon-1", "messages": [{"role": "user", "content": "Когда сессия?"}]},
+        headers={"Authorization": f"Bearer {BENCH_TOKEN}"},
+    )
+
+    assert r.status_code == 500
+    assert r.json()["error"]["code"] == "internal_error"
+    assert _row_counts(db_path) == rows_before  # the `if not bench:` guard around _persist_failure held
+    assert _chat_in_flight() == gauge_before  # gauge (never incremented for bench) came back balanced
+
+
+def test_bench_stream_pipeline_error_writes_no_production_rows_and_balances_in_flight_gauge(bench_client_real_db):
+    client, db_path = bench_client_real_db
+
+    async def _tokens_then_fail(*args, **kwargs):
+        yield "Сессия "
+        raise RuntimeError("boom")
+
+    client.app.state.pipeline.stream_text = _tokens_then_fail
+
+    rows_before = _row_counts(db_path)
+    gauge_before = _chat_in_flight()
+
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "menon-1",
+            "messages": [{"role": "user", "content": "Когда сессия?"}],
+            "stream": True,
+        },
+        headers={"Authorization": f"Bearer {BENCH_TOKEN}"},
+    )
+
+    assert r.status_code == 200
+    assert "event: error" in r.text
+    assert _row_counts(db_path) == rows_before
+    assert _chat_in_flight() == gauge_before
+
+
+# --- Test quality (finding 3): rejection of a bad token was only ever proven at the
+# is_bench_request unit level, against a SimpleNamespace double. This proves it
+# end-to-end through the real endpoint. ---
+
+
+def test_wrong_bench_token_is_a_normal_production_request_end_to_end(bench_client_real_db):
+    """A one-character typo in the token (nginx's 404 doesn't cover the SSH-tunnel
+    manual-verification path) must fall through to an ordinary production request —
+    not a silent, damage-doing full write dressed up as a successful bench run."""
+    client, db_path = bench_client_real_db
+
+    before = _row_counts(db_path)
+
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "menon-1", "messages": [{"role": "user", "content": "Когда сессия?"}]},
+        headers={"Authorization": f"Bearer TYPO-{BENCH_TOKEN}"},
+    )
+
+    assert r.status_code == 200
+    assert "pipeline_trace" not in r.json()
+    assert "X-Bench-Mode" not in r.headers
+
+    after = _row_counts(db_path)
+    assert after["conversations"] == before["conversations"] + 1  # production rows ARE written
+    assert after["messages"] == before["messages"] + 2
