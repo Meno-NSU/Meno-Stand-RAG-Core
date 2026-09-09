@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import text
 
 from meno_rag.api import arena, auth, feedback, guest, history, legal, privacy
+from meno_rag.api import bench as bench_mod
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
@@ -279,6 +280,9 @@ async def lifespan(app: FastAPI):
     app.state.model_status_store = status_store
     app.state.llm_router = llm_router
     app.state.admission = AdmissionController(settings.max_concurrent_chats)
+    # Benchmark traffic draws from its own budget so a dev's benchmark run can
+    # never exhaust the pool that serves real users.
+    app.state.bench_admission = AdmissionController(settings.bench_max_concurrent)
     app.state.retrieval_executor = retrieval_executor
     app.state.trace_writer = trace_writer
 
@@ -358,6 +362,12 @@ async def request_id_middleware(request: Request, call_next):
 async def metrics_middleware(request: Request, call_next):
     # Don't let Prometheus scrapes inflate the very series they read.
     if request.scope.get("path") == "/metrics":
+        return await call_next(request)
+
+    # Benchmark traffic is deliberately absent from the production HTTP series:
+    # a dev's benchmark run must not move the numbers an operator reads. It is
+    # counted separately in meno_bench_requests instead.
+    if bench_mod.is_bench_request(request):
         return await call_next(request)
 
     # HTTP-level counters/latency/in-flight for every route. The route template
@@ -650,15 +660,33 @@ async def list_knowledge_bases(request: Request):
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(payload: ChatCompletionRequest, request: Request):
+async def chat_completions(payload: ChatCompletionRequest, request: Request, response: Response):
     pipeline: StandRagPipeline | None = request.app.state.pipeline
     if pipeline is None:
         return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
 
+    # Benchmark requests are recognised before anything else: they pick a
+    # different admission budget, force trace capture, and skip persistence.
+    bench = bench_mod.is_bench_request(request)
+    if bench:
+        # I3: a mistyped token must never be observably identical to a correct one whose
+        # trace happened to come back None — a harness can assert this header once before
+        # a run and fail fast instead of after writing a thousand rows to production
+        # tables. FastAPI merges the injected `response` object's headers onto the actual
+        # response ONLY when the endpoint returns a plain value it wraps itself (the
+        # non-stream `dict` below) — it is silently discarded whenever a Response is
+        # returned directly. That covers this one line for the non-stream success path;
+        # the streaming success path sets its own header on the StreamingResponse it
+        # returns below, and the early-return error paths (_error_response,
+        # _overloaded_response) never carry it — acceptable, since an error response is
+        # never mistaken for a successful, damage-doing production write.
+        response.headers["X-Bench-Mode"] = "1"
+
     # Admission control: fast-fail under overload rather than queueing forever.
-    admission: AdmissionController = request.app.state.admission
+    admission: AdmissionController = request.app.state.bench_admission if bench else request.app.state.admission
     if not admission.try_acquire():
-        metrics_mod.record_error("overloaded")
+        if not bench:
+            metrics_mod.record_error("overloaded")
         return _overloaded_response(active=admission.active, limit=admission.max_concurrent)
 
     # The slot is released here for every synchronous outcome (errors and the
@@ -670,29 +698,41 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         try:
             runtime = await _resolve_runtime(request.app, payload.model)
         except ValueError as exc:
-            metrics_mod.record_error("model_not_found")
+            if not bench:
+                metrics_mod.record_error("model_not_found")
             return _error_response(400, str(exc), "model_not_found", param="model")
         except ModelRateLimitedError as exc:
-            metrics_mod.record_error("model_rate_limited")
+            if not bench:
+                metrics_mod.record_error("model_rate_limited")
             return _model_rate_limited_response(exc)
         except ModelUnreachableError as exc:
-            metrics_mod.record_error("model_unreachable")
+            if not bench:
+                metrics_mod.record_error("model_unreachable")
             return _model_unreachable_response(exc)
         except CoreModelUnavailableError:
-            metrics_mod.record_error("core_model_unavailable")
+            if not bench:
+                metrics_mod.record_error("core_model_unavailable")
             return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
 
         current_user = await auth.resolve_optional_user(request)
         if auth.requires_auth_for_model(
             runtime.generation.provider, auth_enabled=settings.auth_enabled, authenticated=current_user is not None
         ):
-            metrics_mod.record_error("auth_required")
+            if not bench:
+                metrics_mod.record_error("auth_required")
             return _error_response(
                 403, "This model requires signing in. Register or log in to use OpenRouter models.", "auth_required"
             )
         user_id = current_user.id if current_user is not None else None
-        guest_session = await guest.resolve_guest_session(request)
-        guest_session_id = guest_session.id if guest_session is not None else None
+        # M1: resolve_guest_session UPDATEs guest_sessions.expires_at/last_seen_at and
+        # commits — a production-table write. Bench writes nothing downstream that would
+        # ever use guest_session_id, so skip the lookup entirely rather than resolve it
+        # and merely decline to use it; a bench client sending X-Guest-Token (e.g. a curl
+        # copy-pasted out of browser devtools) must not touch this table at all.
+        guest_session_id = None
+        if not bench:
+            guest_session = await guest.resolve_guest_session(request)
+            guest_session_id = guest_session.id if guest_session is not None else None
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created_ts = int(time.time())
@@ -703,7 +743,11 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         requested = payload.max_tokens or settings.max_output_tokens
         max_tokens = max(requested, settings.min_output_tokens)
         temperature = payload.temperature  # pipeline applies QaSampling.temperature when None
-        capture_trace = settings.capture_pipeline_trace and random.random() < settings.pipeline_trace_sample_rate
+        # Benchmarks always get the trace: it is the reason the endpoint exists,
+        # and it must not depend on the production capture toggle or sample rate.
+        capture_trace = bench or (
+            settings.capture_pipeline_trace and random.random() < settings.pipeline_trace_sample_rate
+        )
 
         if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
             return _error_response(
@@ -715,6 +759,12 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
 
         if payload.stream:
             released = True  # the streaming generator now owns the release
+            # A StreamingResponse is returned directly, so the `response.headers` set
+            # above (for the non-stream dict-wrapping case) is never merged onto it —
+            # this needs its own entry.
+            stream_headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+            if bench:
+                stream_headers["X-Bench-Mode"] = "1"
             return StreamingResponse(
                 _stream_response(
                     request=request,
@@ -729,9 +779,10 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     guest_session_id=guest_session_id,
                     on_finish=admission.release,
                     capture_trace=capture_trace,
+                    bench=bench,
                 ),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+                headers=stream_headers,
             )
 
         return await _non_stream_response(
@@ -746,6 +797,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             user_id=user_id,
             guest_session_id=guest_session_id,
             capture_trace=capture_trace,
+            bench=bench,
         )
     finally:
         if not released:
@@ -779,6 +831,7 @@ async def _non_stream_response(
     user_id: str | None = None,
     guest_session_id: str | None = None,
     capture_trace: bool = False,
+    bench: bool = False,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -786,7 +839,8 @@ async def _non_stream_response(
     answer = ""
     outcome = None
     generation_ms = 0.0
-    metrics_mod.inc_chat_in_flight()
+    if not bench:
+        metrics_mod.inc_chat_in_flight()
     try:
         outcome = await pipeline.prepare(messages=payload.messages, runtime=runtime, capture_trace=capture_trace)
         gen_started = time.perf_counter()
@@ -795,27 +849,28 @@ async def _non_stream_response(
         )
         generation_ms = round((time.perf_counter() - gen_started) * 1000, 2)
         total_ms = round((time.perf_counter() - started) * 1000, 2)
-        await _persist_success(
-            database=database,
-            run_id=completion_id,
-            session_id=session_id,
-            model=runtime.generation.model_id,
-            generation_model=runtime.generation.model_id,
-            core_model=runtime.core.model_id,
-            endpoint=runtime.generation.base_url,
-            question=outcome.question,
-            answer=answer,
-            outcome=outcome,
-            generation_ms=generation_ms,
-            total_ms=total_ms,
-            stream=False,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            user_id=user_id,
-            guest_session_id=guest_session_id,
-            arena=payload.arena,
-            trace_writer=request.app.state.trace_writer,
-        )
+        if not bench:
+            await _persist_success(
+                database=database,
+                run_id=completion_id,
+                session_id=session_id,
+                model=runtime.generation.model_id,
+                generation_model=runtime.generation.model_id,
+                core_model=runtime.core.model_id,
+                endpoint=runtime.generation.base_url,
+                question=outcome.question,
+                answer=answer,
+                outcome=outcome,
+                generation_ms=generation_ms,
+                total_ms=total_ms,
+                stream=False,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                arena=payload.arena,
+                trace_writer=request.app.state.trace_writer,
+            )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
         classified = classify_error(exc)
@@ -826,37 +881,44 @@ async def _non_stream_response(
             error_code=classified.code,
             error_stage=stage,
         )
-        metrics_mod.record_error(classified.code)
+        if bench:
+            metrics_mod.record_bench_request(status="error")
+        if not bench:
+            metrics_mod.record_error(classified.code)
+            metrics_mod.record_chat_request(
+                provider=runtime.generation.provider,
+                stream=False,
+                status="error",
+                seconds=time.perf_counter() - started,
+            )
+            await _persist_failure(
+                database,
+                completion_id,
+                session_id,
+                runtime,
+                payload,
+                str(exc),
+                stream=False,
+                classified=classified,
+                stage=stage,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+            )
+        return _classified_error_response(classified, retry_id=completion_id, stage=stage)
+    finally:
+        if not bench:
+            metrics_mod.dec_chat_in_flight()
+
+    if bench:
+        metrics_mod.record_bench_request(status="ok")
+    else:
         metrics_mod.record_chat_request(
             provider=runtime.generation.provider,
             stream=False,
-            status="error",
+            status="ok",
             seconds=time.perf_counter() - started,
         )
-        await _persist_failure(
-            database,
-            completion_id,
-            session_id,
-            runtime,
-            payload,
-            str(exc),
-            stream=False,
-            classified=classified,
-            stage=stage,
-            user_id=user_id,
-            guest_session_id=guest_session_id,
-        )
-        return _classified_error_response(classified, retry_id=completion_id, stage=stage)
-    finally:
-        metrics_mod.dec_chat_in_flight()
-
-    metrics_mod.record_chat_request(
-        provider=runtime.generation.provider,
-        stream=False,
-        status="ok",
-        seconds=time.perf_counter() - started,
-    )
-    return {
+    response: dict[str, Any] = {
         "id": completion_id,
         "object": "chat.completion",
         "created": created_ts,
@@ -878,6 +940,11 @@ async def _non_stream_response(
             },
         },
     }
+    if bench and outcome is not None:
+        trace = getattr(outcome, "trace", None)
+        if trace is not None:
+            response["pipeline_trace"] = trace
+    return response
 
 
 async def _stream_response(
@@ -894,6 +961,7 @@ async def _stream_response(
     guest_session_id: str | None = None,
     on_finish: Callable[[], None] | None = None,
     capture_trace: bool = False,
+    bench: bool = False,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -901,7 +969,8 @@ async def _stream_response(
     stage_queue: asyncio.Queue[StageEvent] = asyncio.Queue()
     stage_durations: dict[str, float] = {}
     answer_parts: list[str] = []
-    metrics_mod.inc_chat_in_flight()
+    if not bench:
+        metrics_mod.inc_chat_in_flight()
 
     async def sink(event: StageEvent) -> None:
         await stage_queue.put(event)
@@ -968,36 +1037,45 @@ async def _stream_response(
         yield sse_data(done_chunk)
         total_ms = round((time.perf_counter() - started) * 1000, 2)
         yield StageSummary(total_ms=total_ms, stages=stage_durations).to_sse()
+        if bench:
+            # After the answer, not before it: the blob is large and would
+            # otherwise delay the first token for no benefit.
+            trace = getattr(outcome, "trace", None)
+            if trace is not None:
+                yield sse_event("pipeline_trace", {"pipeline_trace": trace})
         yield sse_data("[DONE]")
 
         answer = "".join(answer_parts)
-        await _persist_success(
-            database=database,
-            run_id=completion_id,
-            session_id=session_id,
-            model=runtime.generation.model_id,
-            generation_model=runtime.generation.model_id,
-            core_model=runtime.core.model_id,
-            endpoint=runtime.generation.base_url,
-            question=outcome.question,
-            answer=answer,
-            outcome=outcome,
-            generation_ms=generation_ms,
-            total_ms=total_ms,
-            stream=True,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            user_id=user_id,
-            guest_session_id=guest_session_id,
-            arena=payload.arena,
-            trace_writer=request.app.state.trace_writer,
-        )
-        metrics_mod.record_chat_request(
-            provider=runtime.generation.provider,
-            stream=True,
-            status="ok",
-            seconds=time.perf_counter() - started,
-        )
+        if bench:
+            metrics_mod.record_bench_request(status="ok")
+        else:
+            await _persist_success(
+                database=database,
+                run_id=completion_id,
+                session_id=session_id,
+                model=runtime.generation.model_id,
+                generation_model=runtime.generation.model_id,
+                core_model=runtime.core.model_id,
+                endpoint=runtime.generation.base_url,
+                question=outcome.question,
+                answer=answer,
+                outcome=outcome,
+                generation_ms=generation_ms,
+                total_ms=total_ms,
+                stream=True,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                arena=payload.arena,
+                trace_writer=request.app.state.trace_writer,
+            )
+            metrics_mod.record_chat_request(
+                provider=runtime.generation.provider,
+                stream=True,
+                status="ok",
+                seconds=time.perf_counter() - started,
+            )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
         classified = classify_error(exc)
@@ -1035,26 +1113,29 @@ async def _stream_response(
         err_chunk["error"] = payload_dict["error"]
         yield sse_data(err_chunk)
         yield sse_data("[DONE]")
-        metrics_mod.record_error(classified.code)
-        metrics_mod.record_chat_request(
-            provider=runtime.generation.provider,
-            stream=True,
-            status="error",
-            seconds=time.perf_counter() - started,
-        )
-        await _persist_failure(
-            database,
-            completion_id,
-            session_id,
-            runtime,
-            payload,
-            str(exc),
-            stream=True,
-            classified=classified,
-            stage=stage,
-            user_id=user_id,
-            guest_session_id=guest_session_id,
-        )
+        if bench:
+            metrics_mod.record_bench_request(status="error")
+        if not bench:
+            metrics_mod.record_error(classified.code)
+            metrics_mod.record_chat_request(
+                provider=runtime.generation.provider,
+                stream=True,
+                status="error",
+                seconds=time.perf_counter() - started,
+            )
+            await _persist_failure(
+                database,
+                completion_id,
+                session_id,
+                runtime,
+                payload,
+                str(exc),
+                stream=True,
+                classified=classified,
+                stage=stage,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+            )
     finally:
         # If the client disconnected mid-prepare, the background prepare task is
         # still running the (expensive) rewrite/retrieval/rerank work. Cancel it
@@ -1062,7 +1143,8 @@ async def _stream_response(
         # admission slot is about to be released below.
         if not prepare_task.done():
             prepare_task.cancel()
-        metrics_mod.dec_chat_in_flight()
+        if not bench:
+            metrics_mod.dec_chat_in_flight()
         if on_finish is not None:
             on_finish()
 

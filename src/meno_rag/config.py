@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -151,6 +151,24 @@ class Settings(BaseSettings):
     # Bound on the background writer's buffer. Beyond it, traces are dropped
     # (counted, never blocking) so a write spike never stalls the serving path.
     pipeline_trace_queue_max: int = Field(default=1000, validation_alias="PIPELINE_TRACE_QUEUE_MAX")
+
+    # --- Benchmark endpoint (developers only, token-gated at the nginx edge) ---
+    # Empty = feature off, and it can only be turned on deliberately. A request
+    # carrying this token in `Authorization: Bearer` gets the full pipeline trace
+    # inline and writes nothing to production tables.
+    bench_api_token: str = Field(default="", validation_alias="BENCH_API_TOKEN")
+    # Separate concurrency budget: a benchmark run must never 503 real users.
+    # Small on purpose — benchmarks are throughput-insensitive, users are not.
+    bench_max_concurrent: int = Field(default=4, validation_alias="BENCH_MAX_CONCURRENT")
+
+    @field_validator("bench_api_token")
+    @classmethod
+    def _strip_bench_api_token(cls, value: str) -> str:
+        # bench.py strips the client-supplied credential before comparing; a
+        # trailing/leading space left in the configured value would otherwise
+        # fail closed in a way that is very confusing to debug (the operator
+        # sees a correct-looking token that silently never matches).
+        return value.strip()
 
     auth_jwt_secret: str = Field(default="", validation_alias="AUTH_JWT_SECRET")
     auth_token_ttl_hours: int = Field(default=720, validation_alias="AUTH_TOKEN_TTL_HOURS")
