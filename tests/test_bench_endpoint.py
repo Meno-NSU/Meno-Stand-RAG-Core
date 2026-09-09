@@ -169,3 +169,49 @@ def test_bench_trace_is_returned_even_when_capture_is_globally_off(bench_client,
     assert "pipeline_trace" in r.json()
     bench_client.app.state.pipeline.prepare.assert_awaited()
     assert bench_client.app.state.pipeline.prepare.await_args.kwargs["capture_trace"] is True
+
+
+def _post_stream(client, *, token: str | None):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    return client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "menon-1",
+            "messages": [{"role": "user", "content": "Когда сессия?"}],
+            "stream": True,
+        },
+        headers=headers,
+    )
+
+
+def test_bench_stream_emits_a_pipeline_trace_event(bench_client, monkeypatch):
+    from meno_rag.api import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_persist_success", AsyncMock())
+
+    async def _tokens(*args, **kwargs):
+        for token in ("Сессия ", "в январе."):
+            yield token
+
+    bench_client.app.state.pipeline.stream_text = _tokens
+
+    body = _post_stream(bench_client, token=BENCH_TOKEN).text
+
+    assert "event: pipeline_trace" in body
+    assert '"rerank"' in body
+    assert body.rstrip().endswith("data: [DONE]")
+
+
+def test_normal_stream_has_no_pipeline_trace_event(bench_client, monkeypatch):
+    from meno_rag.api import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_persist_success", AsyncMock())
+
+    async def _tokens(*args, **kwargs):
+        yield "Сессия в январе."
+
+    bench_client.app.state.pipeline.stream_text = _tokens
+
+    body = _post_stream(bench_client, token=None).text
+
+    assert "event: pipeline_trace" not in body

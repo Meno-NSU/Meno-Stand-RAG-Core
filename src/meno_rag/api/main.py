@@ -920,6 +920,7 @@ async def _stream_response(
     guest_session_id: str | None = None,
     on_finish: Callable[[], None] | None = None,
     capture_trace: bool = False,
+    bench: bool = False,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -927,7 +928,8 @@ async def _stream_response(
     stage_queue: asyncio.Queue[StageEvent] = asyncio.Queue()
     stage_durations: dict[str, float] = {}
     answer_parts: list[str] = []
-    metrics_mod.inc_chat_in_flight()
+    if not bench:
+        metrics_mod.inc_chat_in_flight()
 
     async def sink(event: StageEvent) -> None:
         await stage_queue.put(event)
@@ -994,36 +996,43 @@ async def _stream_response(
         yield sse_data(done_chunk)
         total_ms = round((time.perf_counter() - started) * 1000, 2)
         yield StageSummary(total_ms=total_ms, stages=stage_durations).to_sse()
+        if bench:
+            # After the answer, not before it: the blob is large and would
+            # otherwise delay the first token for no benefit.
+            trace = getattr(outcome, "trace", None)
+            if trace is not None:
+                yield sse_event("pipeline_trace", {"pipeline_trace": trace})
         yield sse_data("[DONE]")
 
         answer = "".join(answer_parts)
-        await _persist_success(
-            database=database,
-            run_id=completion_id,
-            session_id=session_id,
-            model=runtime.generation.model_id,
-            generation_model=runtime.generation.model_id,
-            core_model=runtime.core.model_id,
-            endpoint=runtime.generation.base_url,
-            question=outcome.question,
-            answer=answer,
-            outcome=outcome,
-            generation_ms=generation_ms,
-            total_ms=total_ms,
-            stream=True,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            user_id=user_id,
-            guest_session_id=guest_session_id,
-            arena=payload.arena,
-            trace_writer=request.app.state.trace_writer,
-        )
-        metrics_mod.record_chat_request(
-            provider=runtime.generation.provider,
-            stream=True,
-            status="ok",
-            seconds=time.perf_counter() - started,
-        )
+        if not bench:
+            await _persist_success(
+                database=database,
+                run_id=completion_id,
+                session_id=session_id,
+                model=runtime.generation.model_id,
+                generation_model=runtime.generation.model_id,
+                core_model=runtime.core.model_id,
+                endpoint=runtime.generation.base_url,
+                question=outcome.question,
+                answer=answer,
+                outcome=outcome,
+                generation_ms=generation_ms,
+                total_ms=total_ms,
+                stream=True,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                arena=payload.arena,
+                trace_writer=request.app.state.trace_writer,
+            )
+            metrics_mod.record_chat_request(
+                provider=runtime.generation.provider,
+                stream=True,
+                status="ok",
+                seconds=time.perf_counter() - started,
+            )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
         classified = classify_error(exc)
@@ -1061,26 +1070,27 @@ async def _stream_response(
         err_chunk["error"] = payload_dict["error"]
         yield sse_data(err_chunk)
         yield sse_data("[DONE]")
-        metrics_mod.record_error(classified.code)
-        metrics_mod.record_chat_request(
-            provider=runtime.generation.provider,
-            stream=True,
-            status="error",
-            seconds=time.perf_counter() - started,
-        )
-        await _persist_failure(
-            database,
-            completion_id,
-            session_id,
-            runtime,
-            payload,
-            str(exc),
-            stream=True,
-            classified=classified,
-            stage=stage,
-            user_id=user_id,
-            guest_session_id=guest_session_id,
-        )
+        if not bench:
+            metrics_mod.record_error(classified.code)
+            metrics_mod.record_chat_request(
+                provider=runtime.generation.provider,
+                stream=True,
+                status="error",
+                seconds=time.perf_counter() - started,
+            )
+            await _persist_failure(
+                database,
+                completion_id,
+                session_id,
+                runtime,
+                payload,
+                str(exc),
+                stream=True,
+                classified=classified,
+                stage=stage,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+            )
     finally:
         # If the client disconnected mid-prepare, the background prepare task is
         # still running the (expensive) rewrite/retrieval/rerank work. Cancel it
@@ -1088,7 +1098,8 @@ async def _stream_response(
         # admission slot is about to be released below.
         if not prepare_task.done():
             prepare_task.cancel()
-        metrics_mod.dec_chat_in_flight()
+        if not bench:
+            metrics_mod.dec_chat_in_flight()
         if on_finish is not None:
             on_finish()
 
