@@ -37,4 +37,11 @@ def is_bench_request(request: Request) -> bool:
     token = _bearer_token(request)
     if token is None:
         return False
-    return hmac.compare_digest(token, expected)
+    try:
+        # Starlette decodes headers as latin-1, so .encode("latin-1") recovers the
+        # exact wire bytes. compare_digest rejects non-ASCII str operands, and a
+        # 500 on the production chat endpoint must never be reachable from a
+        # malformed header.
+        return hmac.compare_digest(token.encode("latin-1"), expected.encode("utf-8"))
+    except (UnicodeError, TypeError):
+        return False
