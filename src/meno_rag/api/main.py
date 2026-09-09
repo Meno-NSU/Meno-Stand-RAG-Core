@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import text
 
 from meno_rag.api import arena, auth, feedback, guest, history, legal, privacy
+from meno_rag.api import bench as bench_mod
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
@@ -658,10 +659,15 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
     if pipeline is None:
         return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
 
+    # Benchmark requests are recognised before anything else: they pick a
+    # different admission budget, force trace capture, and skip persistence.
+    bench = bench_mod.is_bench_request(request)
+
     # Admission control: fast-fail under overload rather than queueing forever.
-    admission: AdmissionController = request.app.state.admission
+    admission: AdmissionController = request.app.state.bench_admission if bench else request.app.state.admission
     if not admission.try_acquire():
-        metrics_mod.record_error("overloaded")
+        if not bench:
+            metrics_mod.record_error("overloaded")
         return _overloaded_response(active=admission.active, limit=admission.max_concurrent)
 
     # The slot is released here for every synchronous outcome (errors and the
@@ -706,7 +712,11 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         requested = payload.max_tokens or settings.max_output_tokens
         max_tokens = max(requested, settings.min_output_tokens)
         temperature = payload.temperature  # pipeline applies QaSampling.temperature when None
-        capture_trace = settings.capture_pipeline_trace and random.random() < settings.pipeline_trace_sample_rate
+        # Benchmarks always get the trace: it is the reason the endpoint exists,
+        # and it must not depend on the production capture toggle or sample rate.
+        capture_trace = bench or (
+            settings.capture_pipeline_trace and random.random() < settings.pipeline_trace_sample_rate
+        )
 
         if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
             return _error_response(
@@ -732,6 +742,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                     guest_session_id=guest_session_id,
                     on_finish=admission.release,
                     capture_trace=capture_trace,
+                    bench=bench,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
@@ -749,6 +760,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             user_id=user_id,
             guest_session_id=guest_session_id,
             capture_trace=capture_trace,
+            bench=bench,
         )
     finally:
         if not released:
@@ -782,6 +794,7 @@ async def _non_stream_response(
     user_id: str | None = None,
     guest_session_id: str | None = None,
     capture_trace: bool = False,
+    bench: bool = False,
 ):
     pipeline: StandRagPipeline = request.app.state.pipeline
     database: Database = request.app.state.database
@@ -789,7 +802,8 @@ async def _non_stream_response(
     answer = ""
     outcome = None
     generation_ms = 0.0
-    metrics_mod.inc_chat_in_flight()
+    if not bench:
+        metrics_mod.inc_chat_in_flight()
     try:
         outcome = await pipeline.prepare(messages=payload.messages, runtime=runtime, capture_trace=capture_trace)
         gen_started = time.perf_counter()
@@ -798,27 +812,28 @@ async def _non_stream_response(
         )
         generation_ms = round((time.perf_counter() - gen_started) * 1000, 2)
         total_ms = round((time.perf_counter() - started) * 1000, 2)
-        await _persist_success(
-            database=database,
-            run_id=completion_id,
-            session_id=session_id,
-            model=runtime.generation.model_id,
-            generation_model=runtime.generation.model_id,
-            core_model=runtime.core.model_id,
-            endpoint=runtime.generation.base_url,
-            question=outcome.question,
-            answer=answer,
-            outcome=outcome,
-            generation_ms=generation_ms,
-            total_ms=total_ms,
-            stream=False,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            user_id=user_id,
-            guest_session_id=guest_session_id,
-            arena=payload.arena,
-            trace_writer=request.app.state.trace_writer,
-        )
+        if not bench:
+            await _persist_success(
+                database=database,
+                run_id=completion_id,
+                session_id=session_id,
+                model=runtime.generation.model_id,
+                generation_model=runtime.generation.model_id,
+                core_model=runtime.core.model_id,
+                endpoint=runtime.generation.base_url,
+                question=outcome.question,
+                answer=answer,
+                outcome=outcome,
+                generation_ms=generation_ms,
+                total_ms=total_ms,
+                stream=False,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                arena=payload.arena,
+                trace_writer=request.app.state.trace_writer,
+            )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
         classified = classify_error(exc)
@@ -829,37 +844,40 @@ async def _non_stream_response(
             error_code=classified.code,
             error_stage=stage,
         )
-        metrics_mod.record_error(classified.code)
+        if not bench:
+            metrics_mod.record_error(classified.code)
+            metrics_mod.record_chat_request(
+                provider=runtime.generation.provider,
+                stream=False,
+                status="error",
+                seconds=time.perf_counter() - started,
+            )
+            await _persist_failure(
+                database,
+                completion_id,
+                session_id,
+                runtime,
+                payload,
+                str(exc),
+                stream=False,
+                classified=classified,
+                stage=stage,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+            )
+        return _classified_error_response(classified, retry_id=completion_id, stage=stage)
+    finally:
+        if not bench:
+            metrics_mod.dec_chat_in_flight()
+
+    if not bench:
         metrics_mod.record_chat_request(
             provider=runtime.generation.provider,
             stream=False,
-            status="error",
+            status="ok",
             seconds=time.perf_counter() - started,
         )
-        await _persist_failure(
-            database,
-            completion_id,
-            session_id,
-            runtime,
-            payload,
-            str(exc),
-            stream=False,
-            classified=classified,
-            stage=stage,
-            user_id=user_id,
-            guest_session_id=guest_session_id,
-        )
-        return _classified_error_response(classified, retry_id=completion_id, stage=stage)
-    finally:
-        metrics_mod.dec_chat_in_flight()
-
-    metrics_mod.record_chat_request(
-        provider=runtime.generation.provider,
-        stream=False,
-        status="ok",
-        seconds=time.perf_counter() - started,
-    )
-    return {
+    response: dict[str, Any] = {
         "id": completion_id,
         "object": "chat.completion",
         "created": created_ts,
@@ -881,6 +899,11 @@ async def _non_stream_response(
             },
         },
     }
+    if bench and outcome is not None:
+        trace = getattr(outcome, "trace", None)
+        if trace is not None:
+            response["pipeline_trace"] = trace
+    return response
 
 
 async def _stream_response(
