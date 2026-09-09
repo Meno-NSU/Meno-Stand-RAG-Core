@@ -95,6 +95,14 @@ _PIPELINE_TRACE = Counter(
     labelnames=("outcome",),
     registry=REGISTRY,
 )
+_BENCH_REQUESTS = Counter(
+    "meno_bench_requests",
+    "Benchmark-endpoint requests by outcome. Deliberately a separate series from "
+    "meno_chat_requests: benchmark load must not distort production numbers, but "
+    "it does consume the same GPU, so an operator needs to see that it is running.",
+    labelnames=("status",),
+    registry=REGISTRY,
+)
 
 
 def _bool_label(value: bool) -> str:
@@ -105,6 +113,10 @@ def record_chat_request(*, provider: str, stream: bool, status: str, seconds: fl
     stream_label = _bool_label(stream)
     _CHAT_REQUESTS.labels(provider=provider, stream=stream_label, status=status).inc()
     _CHAT_REQUEST_SECONDS.labels(provider=provider, stream=stream_label).observe(seconds)
+
+
+def record_bench_request(*, status: str) -> None:
+    _BENCH_REQUESTS.labels(status=status).inc()
 
 
 def record_llm_call(*, provider: str, endpoint: str, stage: str, outcome: str, seconds: float) -> None:

@@ -364,6 +364,12 @@ async def metrics_middleware(request: Request, call_next):
     if request.scope.get("path") == "/metrics":
         return await call_next(request)
 
+    # Benchmark traffic is deliberately absent from the production HTTP series:
+    # a dev's benchmark run must not move the numbers an operator reads. It is
+    # counted separately in meno_bench_requests instead.
+    if bench_mod.is_bench_request(request):
+        return await call_next(request)
+
     # HTTP-level counters/latency/in-flight for every route. The route template
     # (not the raw URL) is used as the `path` label so unmatched/random URLs
     # collapse into a single "unmatched" series instead of exploding cardinality.
@@ -679,23 +685,28 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         try:
             runtime = await _resolve_runtime(request.app, payload.model)
         except ValueError as exc:
-            metrics_mod.record_error("model_not_found")
+            if not bench:
+                metrics_mod.record_error("model_not_found")
             return _error_response(400, str(exc), "model_not_found", param="model")
         except ModelRateLimitedError as exc:
-            metrics_mod.record_error("model_rate_limited")
+            if not bench:
+                metrics_mod.record_error("model_rate_limited")
             return _model_rate_limited_response(exc)
         except ModelUnreachableError as exc:
-            metrics_mod.record_error("model_unreachable")
+            if not bench:
+                metrics_mod.record_error("model_unreachable")
             return _model_unreachable_response(exc)
         except CoreModelUnavailableError:
-            metrics_mod.record_error("core_model_unavailable")
+            if not bench:
+                metrics_mod.record_error("core_model_unavailable")
             return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
 
         current_user = await auth.resolve_optional_user(request)
         if auth.requires_auth_for_model(
             runtime.generation.provider, auth_enabled=settings.auth_enabled, authenticated=current_user is not None
         ):
-            metrics_mod.record_error("auth_required")
+            if not bench:
+                metrics_mod.record_error("auth_required")
             return _error_response(
                 403, "This model requires signing in. Register or log in to use OpenRouter models.", "auth_required"
             )
@@ -844,6 +855,8 @@ async def _non_stream_response(
             error_code=classified.code,
             error_stage=stage,
         )
+        if bench:
+            metrics_mod.record_bench_request(status="error")
         if not bench:
             metrics_mod.record_error(classified.code)
             metrics_mod.record_chat_request(
@@ -870,7 +883,9 @@ async def _non_stream_response(
         if not bench:
             metrics_mod.dec_chat_in_flight()
 
-    if not bench:
+    if bench:
+        metrics_mod.record_bench_request(status="ok")
+    else:
         metrics_mod.record_chat_request(
             provider=runtime.generation.provider,
             stream=False,
@@ -1005,7 +1020,9 @@ async def _stream_response(
         yield sse_data("[DONE]")
 
         answer = "".join(answer_parts)
-        if not bench:
+        if bench:
+            metrics_mod.record_bench_request(status="ok")
+        else:
             await _persist_success(
                 database=database,
                 run_id=completion_id,
@@ -1070,6 +1087,8 @@ async def _stream_response(
         err_chunk["error"] = payload_dict["error"]
         yield sse_data(err_chunk)
         yield sse_data("[DONE]")
+        if bench:
+            metrics_mod.record_bench_request(status="error")
         if not bench:
             metrics_mod.record_error(classified.code)
             metrics_mod.record_chat_request(
