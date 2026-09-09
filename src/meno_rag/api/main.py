@@ -279,6 +279,9 @@ async def lifespan(app: FastAPI):
     app.state.model_status_store = status_store
     app.state.llm_router = llm_router
     app.state.admission = AdmissionController(settings.max_concurrent_chats)
+    # Benchmark traffic draws from its own budget so a dev's benchmark run can
+    # never exhaust the pool that serves real users.
+    app.state.bench_admission = AdmissionController(settings.bench_max_concurrent)
     app.state.retrieval_executor = retrieval_executor
     app.state.trace_writer = trace_writer
 
