@@ -912,11 +912,13 @@ async def _non_stream_response(
     if bench:
         metrics_mod.record_bench_request(status="ok")
     else:
+        # Same instant as the total_ms reported to the client below, and taken
+        # before persistence: see the note in _stream_response.
         metrics_mod.record_chat_request(
             provider=runtime.generation.provider,
             stream=False,
             status="ok",
-            seconds=time.perf_counter() - started,
+            seconds=total_ms / 1000.0,
         )
     response: dict[str, Any] = {
         "id": completion_id,
@@ -933,7 +935,10 @@ async def _non_stream_response(
         ],
         "sources": outcome.sources if outcome is not None else [],
         "pipeline": {
-            "total_ms": round((time.perf_counter() - started) * 1000, 2),
+            # The same total_ms the metric recorded, not a fresh reading: a third
+            # measurement taken here would include the database write and disagree
+            # with both the histogram and the client's own timing.
+            "total_ms": total_ms,
             "stages": {
                 **(outcome.stage_durations_ms if outcome is not None else {}),
                 StageName.GENERATION: generation_ms,
@@ -1006,9 +1011,20 @@ async def _stream_response(
             stage=StageName.GENERATION, status=StageStatus.STARTED, model_id=runtime.generation.model_id
         ).to_sse()
         gen_started = time.perf_counter()
+        first_token_seen = False
         async for token in pipeline.stream_text(
             outcome=outcome, runtime=runtime, max_tokens=max_tokens, temperature=temperature
         ):
+            if not first_token_seen:
+                first_token_seen = True
+                # The number that matches what a reader experiences. The request
+                # histogram runs to the LAST token, so it grows with answer length
+                # rather than with responsiveness.
+                if not bench:
+                    metrics_mod.record_time_to_first_token(
+                        provider=runtime.generation.provider,
+                        seconds=time.perf_counter() - started,
+                    )
             answer_parts.append(token)
             yield sse_data(
                 openai_chunk(
@@ -1049,6 +1065,19 @@ async def _stream_response(
         if bench:
             metrics_mod.record_bench_request(status="ok")
         else:
+            # Recorded BEFORE _persist_success and from the same instant as the
+            # total_ms already sent to the client in StageSummary. Persisting
+            # writes pipeline_runs, stages, sources and generation_records (full
+            # prompt, answer and retrieved-chunk JSON); measuring after it charged
+            # that database work to chat latency, so the histogram reported a
+            # number no user ever experienced. Observed on the live host: the UI
+            # showed 7-8s while p95/p99 read 26s and 29.2s.
+            metrics_mod.record_chat_request(
+                provider=runtime.generation.provider,
+                stream=True,
+                status="ok",
+                seconds=total_ms / 1000.0,
+            )
             await _persist_success(
                 database=database,
                 run_id=completion_id,
@@ -1069,12 +1098,6 @@ async def _stream_response(
                 guest_session_id=guest_session_id,
                 arena=payload.arena,
                 trace_writer=request.app.state.trace_writer,
-            )
-            metrics_mod.record_chat_request(
-                provider=runtime.generation.provider,
-                stream=True,
-                status="ok",
-                seconds=time.perf_counter() - started,
             )
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"

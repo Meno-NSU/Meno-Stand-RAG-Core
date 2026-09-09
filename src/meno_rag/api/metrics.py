@@ -47,6 +47,16 @@ _CHAT_IN_FLIGHT = Gauge(
     "Chat completion requests currently being processed.",
     registry=REGISTRY,
 )
+_TIME_TO_FIRST_TOKEN = Histogram(
+    "meno_chat_time_to_first_token_seconds",
+    "Seconds from request arrival to the FIRST streamed token — the latency a reader "
+    "actually feels. Distinct from meno_chat_request_seconds, which for a stream runs "
+    "through to the LAST token and so grows with answer length, not with responsiveness. "
+    "Streaming only: a non-streaming response has no first token.",
+    labelnames=("provider",),
+    buckets=_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
 _LLM_CALLS = Counter(
     "meno_llm_calls",
     "Upstream LLM calls by provider, endpoint, pipeline stage, and outcome.",
@@ -128,6 +138,10 @@ def record_chat_request(*, provider: str, stream: bool, status: str, seconds: fl
 
 def record_bench_request(*, status: str) -> None:
     _BENCH_REQUESTS.labels(status=status).inc()
+
+
+def record_time_to_first_token(*, provider: str, seconds: float) -> None:
+    _TIME_TO_FIRST_TOKEN.labels(provider=provider).observe(seconds)
 
 
 def record_llm_call(*, provider: str, endpoint: str, stage: str, outcome: str, seconds: float) -> None:
