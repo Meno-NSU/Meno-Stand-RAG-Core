@@ -152,6 +152,15 @@ class Settings(BaseSettings):
     # (counted, never blocking) so a write spike never stalls the serving path.
     pipeline_trace_queue_max: int = Field(default=1000, validation_alias="PIPELINE_TRACE_QUEUE_MAX")
 
+    # --- Benchmark endpoint (developers only, token-gated at the nginx edge) ---
+    # Empty = feature off, and it can only be turned on deliberately. A request
+    # carrying this token in `Authorization: Bearer` gets the full pipeline trace
+    # inline and writes nothing to production tables.
+    bench_api_token: str = Field(default="", validation_alias="BENCH_API_TOKEN")
+    # Separate concurrency budget: a benchmark run must never 503 real users.
+    # Small on purpose — benchmarks are throughput-insensitive, users are not.
+    bench_max_concurrent: int = Field(default=4, validation_alias="BENCH_MAX_CONCURRENT")
+
     auth_jwt_secret: str = Field(default="", validation_alias="AUTH_JWT_SECRET")
     auth_token_ttl_hours: int = Field(default=720, validation_alias="AUTH_TOKEN_TTL_HOURS")
     guest_session_ttl_days: int = Field(default=365, validation_alias="GUEST_SESSION_TTL_DAYS")
