@@ -14,7 +14,18 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, G
 
 # Buckets tuned for an LLM RAG pipeline: sub-second retrieval up to multi-minute
 # generation timeouts. Shared by request/stage/LLM latency histograms.
-_LATENCY_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0)
+#
+# The 7.5-20s boundaries exist because a typical answer here takes ~7s, and the
+# previous set jumped straight from 10 to 30. histogram_quantile interpolates
+# linearly inside a bucket, so a single 15s request landed "somewhere in
+# (10, 30]" and was reported as a p99 of 28s. Measured against a live
+# Prometheus with 90% of requests at 7s and 10% at 15s: the old boundaries gave
+# p95=20.0s and p99=28.0s for a true p95/p99 of 15s. Resolution where the
+# answers actually live is worth four extra series per label combination.
+#
+# Note this does NOT rescue a percentile over a handful of requests — p99 of
+# ten samples is the slowest one wearing a costume, whatever the buckets are.
+_LATENCY_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 120.0, 300.0)
 
 REGISTRY = CollectorRegistry()
 
