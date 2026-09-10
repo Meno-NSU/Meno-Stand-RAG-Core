@@ -223,3 +223,76 @@ def test_preflight_rate_limit_records_error_code(monkeypatch):
         assert r.status_code == 429
         text = c.get("/metrics").text
     assert 'meno_errors_total{code="model_rate_limited"}' in text
+
+
+def test_stream_records_time_to_first_token(monkeypatch):
+    """TTFT is the latency a user feels; meno_chat_request_seconds is not.
+
+    For a stream the request histogram measures through to the LAST token, so a
+    long answer under load reports tens of seconds while the reader saw text
+    almost immediately. This metric exists to make that gap visible instead of
+    letting the total be mistaken for perceived latency.
+    """
+    from meno_rag.api import main as main_mod
+
+    _patch_runtime_and_persist(monkeypatch, provider="ttft")
+    with TestClient(main_mod.app) as c:
+        c.app.state.pipeline = _FakeStreamPipeline()
+        r = c.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": "q"}], "stream": True},
+        )
+        assert r.status_code == 200
+        text = c.get("/metrics").text
+    assert 'meno_chat_time_to_first_token_seconds_count{provider="ttft"} 1.0' in text
+
+
+def test_non_stream_records_no_time_to_first_token(monkeypatch):
+    """A non-streaming response has no "first token" — the metric must stay empty."""
+    from meno_rag.api import main as main_mod
+
+    _patch_runtime_and_persist(monkeypatch, provider="nottft")
+    with TestClient(main_mod.app) as c:
+        c.app.state.pipeline = _FakeNonStreamPipeline()
+        r = c.post("/v1/chat/completions", json={"model": "m", "messages": [{"role": "user", "content": "q"}]})
+        assert r.status_code == 200
+        text = c.get("/metrics").text
+    assert 'meno_chat_time_to_first_token_seconds_count{provider="nottft"}' not in text
+
+
+def test_chat_latency_excludes_persistence(monkeypatch):
+    """The recorded latency must match the number the UI shows the user.
+
+    total_ms goes out in the StageSummary event before _persist_success runs;
+    if the metric is taken after it, the histogram silently includes database
+    write time and reports a latency nobody experienced. Observed on the live
+    host: the UI showed 7-8s while p95/p99 read 26s and 29.2s.
+    """
+    import asyncio
+
+    from meno_rag.api import main as main_mod
+
+    _patch_runtime_and_persist(monkeypatch, provider="slowpersist")
+
+    async def slow_persist(**kwargs):
+        # await, not time.sleep: blocking the event loop would be both a lint
+        # error and a poor model of a real database write, which yields.
+        await asyncio.sleep(0.4)  # far above scheduler noise
+
+    monkeypatch.setattr(main_mod, "_persist_success", slow_persist)
+
+    with TestClient(main_mod.app) as c:
+        c.app.state.pipeline = _FakeStreamPipeline()
+        r = c.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": "q"}], "stream": True},
+        )
+        assert r.status_code == 200
+        text = c.get("/metrics").text
+
+    recorded = next(
+        float(line.rsplit(" ", 1)[1])
+        for line in text.splitlines()
+        if line.startswith('meno_chat_request_seconds_sum{provider="slowpersist"')
+    )
+    assert recorded < 0.3, f"latency {recorded:.3f}s includes the 0.4s persist write"
