@@ -268,14 +268,16 @@ def test_chat_latency_excludes_persistence(monkeypatch):
     write time and reports a latency nobody experienced. Observed on the live
     host: the UI showed 7-8s while p95/p99 read 26s and 29.2s.
     """
-    import time
+    import asyncio
 
     from meno_rag.api import main as main_mod
 
     _patch_runtime_and_persist(monkeypatch, provider="slowpersist")
 
     async def slow_persist(**kwargs):
-        time.sleep(0.4)  # a deliberately slow write, far above scheduler noise
+        # await, not time.sleep: blocking the event loop would be both a lint
+        # error and a poor model of a real database write, which yields.
+        await asyncio.sleep(0.4)  # far above scheduler noise
 
     monkeypatch.setattr(main_mod, "_persist_success", slow_persist)
 
