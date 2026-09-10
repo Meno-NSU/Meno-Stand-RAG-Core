@@ -17,7 +17,7 @@ def test_bench_settings_default_to_disabled():
     # feature enabled locally.
     s = Settings(_env_file=None)
     assert s.bench_api_token == ""
-    assert s.bench_max_concurrent == 4
+    assert s.bench_max_concurrent == 16
 
 
 def test_bench_settings_read_from_env():

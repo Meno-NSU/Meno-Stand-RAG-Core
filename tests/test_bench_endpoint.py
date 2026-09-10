@@ -72,7 +72,7 @@ async def test_lifespan_installs_a_separate_bench_admission_controller():
     with TestClient(app):
         assert isinstance(app.state.bench_admission, AdmissionController)
         assert app.state.bench_admission is not app.state.admission
-        assert app.state.bench_admission.max_concurrent == 4
+        assert app.state.bench_admission.max_concurrent == 16
 
 
 def _fake_outcome():
@@ -764,3 +764,34 @@ def test_wrong_bench_token_is_a_normal_production_request_end_to_end(bench_clien
     after = _row_counts(db_path)
     assert after["conversations"] == before["conversations"] + 1  # production rows ARE written
     assert after["messages"] == before["messages"] + 2
+
+
+def test_bench_rejection_is_visible_in_the_bench_metric(bench_client, monkeypatch):
+    """A bench request refused before the handler must not vanish from metrics.
+
+    record_bench_request lives inside the response functions, which an admission
+    rejection never reaches, while record_error is gated off for bench so the
+    production series stays clean. The two together made a rejected benchmark
+    run invisible: a harness firing more requests than BENCH_MAX_CONCURRENT saw
+    503s while the dashboard showed nothing but successes.
+    """
+    from meno_rag.api import main as main_mod
+    from meno_rag.api import metrics as metrics_mod
+
+    monkeypatch.setattr(main_mod, "_persist_success", AsyncMock())
+    saturated = AdmissionController(1)
+    assert saturated.try_acquire() is True
+    bench_client.app.state.bench_admission = saturated
+
+    def bench_overloaded():
+        return metrics_mod.REGISTRY.get_sample_value("meno_bench_requests_total", {"status": "overloaded"}) or 0.0
+
+    def prod_overloaded():
+        return metrics_mod.REGISTRY.get_sample_value("meno_errors_total", {"code": "overloaded"}) or 0.0
+
+    before_bench, before_prod = bench_overloaded(), prod_overloaded()
+    r = _post(bench_client, token=BENCH_TOKEN)
+
+    assert r.status_code == 503
+    assert bench_overloaded() == before_bench + 1, "rejection is missing from the bench series"
+    assert prod_overloaded() == before_prod, "rejection leaked into the production error series"
