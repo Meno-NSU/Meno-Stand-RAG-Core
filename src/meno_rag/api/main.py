@@ -659,6 +659,21 @@ async def list_knowledge_bases(request: Request):
     }
 
 
+def _record_preflight_failure(code: str, *, bench: bool) -> None:
+    """Route a failure raised before the response functions to the right series.
+
+    Bench traffic must not move production error counters — but it must not
+    vanish either. record_bench_request lives inside the response functions,
+    which these early returns never reach, so a benchmark run rejected by
+    admission used to be absent from every metric: the harness saw 503s while
+    the dashboard showed nothing but successes.
+    """
+    if bench:
+        metrics_mod.record_bench_request(status=code)
+    else:
+        metrics_mod.record_error(code)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(payload: ChatCompletionRequest, request: Request, response: Response):
     pipeline: StandRagPipeline | None = request.app.state.pipeline
@@ -685,8 +700,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
     # Admission control: fast-fail under overload rather than queueing forever.
     admission: AdmissionController = request.app.state.bench_admission if bench else request.app.state.admission
     if not admission.try_acquire():
-        if not bench:
-            metrics_mod.record_error("overloaded")
+        _record_preflight_failure("overloaded", bench=bench)
         return _overloaded_response(active=admission.active, limit=admission.max_concurrent)
 
     # The slot is released here for every synchronous outcome (errors and the
@@ -698,28 +712,23 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
         try:
             runtime = await _resolve_runtime(request.app, payload.model)
         except ValueError as exc:
-            if not bench:
-                metrics_mod.record_error("model_not_found")
+            _record_preflight_failure("model_not_found", bench=bench)
             return _error_response(400, str(exc), "model_not_found", param="model")
         except ModelRateLimitedError as exc:
-            if not bench:
-                metrics_mod.record_error("model_rate_limited")
+            _record_preflight_failure("model_rate_limited", bench=bench)
             return _model_rate_limited_response(exc)
         except ModelUnreachableError as exc:
-            if not bench:
-                metrics_mod.record_error("model_unreachable")
+            _record_preflight_failure("model_unreachable", bench=bench)
             return _model_unreachable_response(exc)
         except CoreModelUnavailableError:
-            if not bench:
-                metrics_mod.record_error("core_model_unavailable")
+            _record_preflight_failure("core_model_unavailable", bench=bench)
             return _error_response(503, "No vLLM model available for rewrite/rerank.", "core_model_unavailable")
 
         current_user = await auth.resolve_optional_user(request)
         if auth.requires_auth_for_model(
             runtime.generation.provider, auth_enabled=settings.auth_enabled, authenticated=current_user is not None
         ):
-            if not bench:
-                metrics_mod.record_error("auth_required")
+            _record_preflight_failure("auth_required", bench=bench)
             return _error_response(
                 403, "This model requires signing in. Register or log in to use OpenRouter models.", "auth_required"
             )

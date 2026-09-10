@@ -157,9 +157,13 @@ class Settings(BaseSettings):
     # carrying this token in `Authorization: Bearer` gets the full pipeline trace
     # inline and writes nothing to production tables.
     bench_api_token: str = Field(default="", validation_alias="BENCH_API_TOKEN")
-    # Separate concurrency budget: a benchmark run must never 503 real users.
-    # Small on purpose — benchmarks are throughput-insensitive, users are not.
-    bench_max_concurrent: int = Field(default=4, validation_alias="BENCH_MAX_CONCURRENT")
+    # Separate concurrency budget. Real users are protected by the budgets being
+    # SEPARATE — bench can never take a production slot — not by this number
+    # being small, so it only needs to bound GPU contention. The old default of
+    # 4 was chosen on the wrong reasoning ("benchmarks are throughput-insensitive")
+    # and rejected a normal harness: firing 15 requests with asyncio.gather is
+    # how benchmarks are run, and everything past the fourth got a 503.
+    bench_max_concurrent: int = Field(default=16, validation_alias="BENCH_MAX_CONCURRENT")
 
     @field_validator("bench_api_token")
     @classmethod
