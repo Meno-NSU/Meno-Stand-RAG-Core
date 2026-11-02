@@ -255,6 +255,8 @@ class Settings(BaseSettings):
     v2_candidates_per_query: int = Field(default=50, validation_alias="V2_CANDIDATES_PER_QUERY")
     # Fused candidates per query sent to the cross-encoder.
     v2_rerank_top: int = Field(default=40, validation_alias="V2_RERANK_TOP")
+    # JSONL timetable export from table.nsu.ru; empty disables group/teacher lookup.
+    v2_schedule_path: str = Field(default="", validation_alias="V2_SCHEDULE_PATH")
 
     model_config = SettingsConfigDict(
         env_file=".env",
