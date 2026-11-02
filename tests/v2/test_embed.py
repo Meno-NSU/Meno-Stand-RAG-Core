@@ -155,3 +155,8 @@ def test_oom_at_one_reraises():
 def test_load_embedder_unknown():
     with pytest.raises(ValueError):
         load_embedder("nope", "/x", "cpu")
+
+
+def test_encode_queries_empty():
+    out = frida().encode_queries([])
+    assert out.shape == (0, 32) and out.dtype == torch.float16

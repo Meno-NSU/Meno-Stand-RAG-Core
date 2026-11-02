@@ -60,6 +60,8 @@ class _BaseEmbedder:
         return emb.to(torch.float16)
 
     def encode_queries(self, texts: list[str]) -> torch.Tensor:
+        if not texts:
+            return torch.empty((0, self.dim), dtype=torch.float16, device=self.device)
         return self._embed([self.query_prefix + t for t in texts])
 
     def encode_docs(self, texts: list[str], batch_size: int = 128) -> torch.Tensor:
@@ -94,7 +96,7 @@ class FridaEmbedder(_BaseEmbedder):
             from transformers import AutoTokenizer, T5EncoderModel
 
             tokenizer = AutoTokenizer.from_pretrained(path)
-            model = _to_device(T5EncoderModel.from_pretrained(path, torch_dtype=_dtype(device)), device)
+            model = _to_device(T5EncoderModel.from_pretrained(path, dtype=_dtype(device)), device)
         super().__init__(tokenizer, model)
 
     def _pool(self, hidden, mask):
@@ -112,7 +114,7 @@ class Qwen3Embedder(_BaseEmbedder):
             from transformers import AutoModel, AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(path, padding_side="left")
-            model = _to_device(AutoModel.from_pretrained(path, torch_dtype=_dtype(device)), device)
+            model = _to_device(AutoModel.from_pretrained(path, dtype=_dtype(device)), device)
         super().__init__(tokenizer, model)
 
     def _pool(self, hidden, mask):
