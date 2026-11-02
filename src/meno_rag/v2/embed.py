@@ -7,6 +7,8 @@ from typing import Any, Protocol
 import torch
 import torch.nn.functional as F
 
+from meno_rag.v2._batching import run_batched
+
 MAX_LENGTH = 512
 QWEN3_INSTRUCT = (
     "Instruct: Given a question about Novosibirsk State University, "
@@ -68,20 +70,7 @@ class _BaseEmbedder:
         texts = [self.doc_prefix + t for t in texts]
         if not texts:
             return torch.empty((0, self.dim), dtype=torch.float16, device=self.device)
-        parts: list[torch.Tensor] = []
-        bs = max(1, batch_size)
-        i = 0
-        while i < len(texts):
-            try:
-                parts.append(self._embed(texts[i : i + bs]))
-            except torch.cuda.OutOfMemoryError:
-                if bs == 1:
-                    raise
-                bs = max(1, bs // 2)
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                continue
-            i += bs
+        parts = run_batched(texts, self._embed, batch_size)
         return torch.cat(parts, dim=0)
 
 
