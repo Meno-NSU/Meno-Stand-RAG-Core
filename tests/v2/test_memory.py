@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -28,7 +29,7 @@ class FakeRouter:
 
 class S:
     v2_history_budget_tokens = 600
-    v2_summary_budget_tokens = 100
+    v2_summary_budget_tokens = 1000
 
 
 def dialogue(n, size=100):
@@ -87,7 +88,8 @@ def test_summary_store_lru_and_key():
 async def test_summarize_call_kwargs_and_truncation():
     r = FakeRouter("Первое предложение. " + "Длинное второе предложение. " * 50)
     older = dialogue(2, 10)
-    out = await summarize(r, object(), older, "прежняя сводка", 100)
+    out, ok = await summarize(r, object(), older, "прежняя сводка", 100)
+    assert ok
     k = r.calls[0]
     assert k["stage"] == "query_rewrite" and k["temperature"] == 0
     assert k["max_tokens"] == 100 and k["timeout"] == 30
@@ -101,7 +103,8 @@ async def test_summarize_failure_falls_back_to_user_questions():
     r = FakeRouter(exc=RuntimeError("down"))
     older = dialogue(3, 10)
     older[0]["content"] = "Расскажи про стипендию " + "x" * 400
-    out = await summarize(r, object(), older, "", 200)
+    out, ok = await summarize(r, object(), older, "", 200)
+    assert not ok
     assert "стипендию" in out or "вопрос номер 1" in out
     assert out.index("вопрос номер 1") < out.index("вопрос номер 2") if "вопрос номер 1" in out else True
     assert estimate_tokens(out) <= 200
@@ -109,7 +112,8 @@ async def test_summarize_failure_falls_back_to_user_questions():
 
 
 async def test_summarize_empty_reply_falls_back():
-    out = await summarize(FakeRouter("  "), object(), dialogue(2, 5), "", 200)
+    out, ok = await summarize(FakeRouter("  "), object(), dialogue(2, 5), "", 200)
+    assert not ok
     assert "вопрос номер 0" in out
 
 
@@ -154,26 +158,94 @@ async def test_precompute_next_swallows_errors():
     await precompute_next(dialogue(40), FakeRouter(), object(), Boom(), S())
 
 
-def test_recall_finds_dorm_exchange():
+def test_recall_dorm_without_literal_word():
     older = [
         {"role": "user", "content": "Как получить место в общежитии НГУ?"},
-        {"role": "assistant", "content": "Про общежития я говорил: места дают первокурсникам."},
+        {"role": "assistant", "content": "Места дают первокурсникам."},
         {"role": "user", "content": "Сколько стоит обучение на ФИТ?"},
         {"role": "assistant", "content": "Стоимость зависит от программы."},
     ]
-    got = recall_old_turns(older, "что ты говорил про общежития?")
-    assert got == older[:2]
+    assert recall_old_turns(older, "что ты говорил про общежития?") == older[:2]
 
 
-def test_recall_needs_two_common_stems_and_orders_chronologically():
-    older = dialogue(3, 5)
-    assert recall_old_turns(older, "совсем другое") == []
-    assert recall_old_turns([], "q") == []
+def test_recall_stipend_and_unrelated():
     older = [
-        {"role": "user", "content": "стипендия аспирантам размер"},
-        {"role": "assistant", "content": "ок"},
-        {"role": "user", "content": "стипендия аспирантам когда выплата"},
-        {"role": "assistant", "content": "ок"},
+        {"role": "user", "content": "Какая стипендия у аспирантов?"},
+        {"role": "assistant", "content": "Размер стипендии зависит от кафедры."},
+        {"role": "user", "content": "Где находится библиотека?"},
+        {"role": "assistant", "content": "Рядом с главным корпусом."},
     ]
-    got = recall_old_turns(older, "размер стипендии аспирантам", k=2)
-    assert got == older
+    assert recall_old_turns(older, "напомни про стипендию из начала") == older[:2]
+    assert recall_old_turns(older, "какая погода завтра") == []
+    assert recall_old_turns([], "стипендия") == []
+
+
+def test_recall_ranks_and_orders_chronologically():
+    older = [
+        {"role": "user", "content": "стипендия аспирантам размер"}, {"role": "assistant", "content": "ок"},
+        {"role": "user", "content": "общежитие"}, {"role": "assistant", "content": "ок"},
+        {"role": "user", "content": "стипендия"}, {"role": "assistant", "content": "ок"},
+    ]
+    got = recall_old_turns(older, "размер стипендии аспирантам и общежитие", k=2)
+    assert got[:2] == older[:2]
+
+
+def prompt_chars(call):
+    return sum(len(m["content"]) for m in call["messages"])
+
+
+async def test_incremental_one_call_with_delta_only():
+    h = dialogue(41)
+    r, store = FakeRouter(), SummaryStore()
+    await precompute_next(h[:80], r, object(), store, S())
+    n0 = len(r.calls)
+    await build_memory(h, "q", r, object(), store, S())
+    assert len(r.calls) == n0 + 1
+    prompt = r.calls[-1]["messages"][1]["content"]
+    assert "Прежняя сводка" in prompt and "Сводка: пользователь спрашивал" in prompt
+    assert "вопрос номер 0 " not in prompt
+
+
+async def test_incremental_when_two_exchanges_move_at_once():
+    h = dialogue(42)
+    r, store = FakeRouter(), SummaryStore()
+    await precompute_next(h[:80], r, object(), store, S())
+    n0 = len(r.calls)
+    m = await build_memory(h, "q", r, object(), store, S())
+    assert len(r.calls) == n0 + 1
+    assert "Прежняя сводка" in r.calls[-1]["messages"][1]["content"]
+    assert m.older + m.recent == h
+
+
+async def test_huge_history_prompts_stay_bounded():
+    h = dialogue(300, 600)
+    r, store = FakeRouter(), SummaryStore()
+    m = await build_memory(h, "q", r, object(), store, S())
+    assert m.summary and len(r.calls) > 1
+    bound = (4 * 1000 + 1000) * 3 + 1500
+    assert max(prompt_chars(c) for c in r.calls) <= bound
+
+
+async def test_fallback_not_cached():
+    r, store = FakeRouter(exc=RuntimeError("x")), SummaryStore()
+    h = dialogue(40)
+    m = await build_memory(h, "q", r, object(), store, S())
+    assert "вопрос номер" in m.summary
+    r.exc = None
+    await build_memory(h, "q", r, object(), store, S())
+    assert len(r.calls) == 2
+
+
+async def test_concurrent_builds_coalesce():
+    class Slow(FakeRouter):
+        async def chat_completion_text(self, **kw):
+            await asyncio.sleep(0.05)
+            return await super().chat_completion_text(**kw)
+
+    h = dialogue(40)
+    r, store = Slow(), SummaryStore()
+    a, b = await asyncio.gather(
+        precompute_next(h, r, object(), store, S()),
+        build_memory(h, "q", r, object(), store, S()),
+    )
+    assert len(r.calls) == 1

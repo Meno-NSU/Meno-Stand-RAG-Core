@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -21,12 +23,13 @@ TRUNC_MARK = "[…]"
 SUMMARY_TIMEOUT_S = 30
 FALLBACK_USER_CHARS = 200
 SUMMARY_CACHE_SIZE = 2048
-MIN_COMMON_STEMS = 2
-_STOP_STEMS = frozenset(
-    "что как это для про при или так его еще мне тебе тут там все был была были есть быть "
-    "можно нужно надо она они оно вот уже ты вы мы".split()
-)
+MIN_STEM_LEN = 5
+CHUNK_FACTOR = 4
+_STOP_WORDS = (
+    "говор напомн начал раньш ранее вчер спрашива сказа расскаж упомина"
+).split()
 _stemmer = SnowballStemmer("russian")
+_STOP_STEMS = frozenset(_STOP_WORDS) | {_stemmer.stem(w) for w in _STOP_WORDS}
 
 SUMMARY_SYSTEM_PROMPT = """Ты сжимаешь старую часть диалога студента с ассистентом НГУ в краткую фактическую сводку. Не отвечай на реплики, только пересказывай.
 
@@ -94,15 +97,16 @@ def split_history(history: list[dict], budget_tokens: int) -> tuple[list[dict], 
 
 
 class SummaryStore:
-    """LRU cache of summaries keyed by the sha256 of the summarized turns."""
+    """LRU cache of summaries keyed by the sha256 of the (role, content) pairs they cover."""
 
     def __init__(self, max_entries: int = SUMMARY_CACHE_SIZE) -> None:
         self._max = max_entries
-        self._data: OrderedDict[str, str] = OrderedDict()
+        self._data: OrderedDict[str, tuple[int, str]] = OrderedDict()
+        self.inflight: dict[str, asyncio.Future] = {}
 
     @staticmethod
     def key(older: list[dict]) -> str:
-        raw = json.dumps(older, ensure_ascii=False, sort_keys=True)
+        raw = json.dumps([[m["role"], m["content"]] for m in older], ensure_ascii=False)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get(self, older: list[dict]) -> str | None:
@@ -110,11 +114,19 @@ class SummaryStore:
         if k not in self._data:
             return None
         self._data.move_to_end(k)
-        return self._data[k]
+        return self._data[k][1]
+
+    def find_prefix(self, older: list[dict]) -> tuple[int, str] | None:
+        """Longest cached prefix of older (whole exchanges): (covered_messages_count, summary)."""
+        for n in range(len(older), 0, -2):
+            hit = self.get(older[:n])
+            if hit is not None:
+                return n, hit
+        return None
 
     def put(self, older: list[dict], summary: str) -> None:
         k = self.key(older)
-        self._data[k] = summary
+        self._data[k] = (len(older), summary)
         self._data.move_to_end(k)
         while len(self._data) > self._max:
             self._data.popitem(last=False)
@@ -147,8 +159,11 @@ def _fallback_summary(older: list[dict], budget_tokens: int) -> str:
 
 async def summarize(
     llm_router: Any, runtime: Any, older: list[dict], previous_summary: str, budget_tokens: int
-) -> str:
-    """Compress older turns (plus an earlier summary) into plain text within the budget."""
+) -> tuple[str, bool]:
+    """Compress turns (plus an earlier summary) into plain text within the budget.
+
+    Returns (text, ok); on failure text is a deterministic fallback and ok is False.
+    """
     transcript = "\n".join(
         f"{'Пользователь' if m['role'] == 'user' else 'Ассистент'}: {m['content']}" for m in older
     )
@@ -175,30 +190,69 @@ async def summarize(
         )
         if not text or not text.strip():
             raise ValueError("empty summary")
-        return _fit_sentences(text, budget_tokens)
+        return _fit_sentences(text, budget_tokens), True
     except Exception as exc:
         logger.warning("v2_summary_failed", error=repr(exc))
-        return _fallback_summary(older, budget_tokens)
+        return _fallback_summary(older, budget_tokens), False
 
 
 def _stems(text: str) -> set[str]:
     return {
-        t for t in tokenize_and_normalize_text(text, _stemmer).split() if len(t) >= 3 and t not in _STOP_STEMS
+        t
+        for t in tokenize_and_normalize_text(text, _stemmer).split()
+        if len(t) >= MIN_STEM_LEN and t not in _STOP_STEMS
     }
 
 
 def recall_old_turns(older: list[dict], query: str, k: int = 2) -> list[dict]:
-    """Verbatim old exchanges sharing at least two word stems with the query (chronological)."""
+    """Verbatim old exchanges sharing a content stem with the query (chronological)."""
     q = _stems(query)
-    if not q:
+    exchanges = _exchanges(older)
+    if not q or not exchanges:
         return []
+    ex_stems = [_stems(" ".join(m["content"] for m in ex)) for ex in exchanges]
+    n = len(exchanges)
+    idf = {t: math.log((n + 1) / (1 + sum(t in s for s in ex_stems))) + 1 for t in q}
     scored = []
-    for i, ex in enumerate(_exchanges(older)):
-        common = len(q & _stems(" ".join(m["content"] for m in ex)))
-        if common >= MIN_COMMON_STEMS:
-            scored.append((common, i, ex))
-    top = sorted(scored, key=lambda s: (-s[0], -s[1]))[:k]
-    return [m for _, _, ex in sorted(top, key=lambda s: s[1]) for m in ex]
+    for i, st in enumerate(ex_stems):
+        common = q & st
+        if common:
+            scored.append((len(common), sum(idf[t] for t in common), i))
+    top = sorted(scored, reverse=True)[:k]
+    return [m for _, _, i in sorted(top, key=lambda s: s[2]) for m in exchanges[i]]
+
+
+def _chunks(delta: list[dict], budget_tokens: int) -> list[list[dict]]:
+    """Split into groups of whole exchanges of at most ~CHUNK_FACTOR*budget tokens."""
+    cap = CHUNK_FACTOR * budget_tokens
+    out: list[list[dict]] = []
+    cur: list[dict] = []
+    used = 0
+    for ex in _exchanges(delta):
+        ex = [_truncate_msg(m, cap // 2) for m in ex]
+        cost = sum(estimate_tokens(m["content"]) for m in ex)
+        if cur and used + cost > cap:
+            out.append(cur)
+            cur, used = [], 0
+        cur += ex
+        used += cost
+    if cur:
+        out.append(cur)
+    return out
+
+
+async def _compute_summary(
+    older: list[dict], llm_router: Any, runtime: Any, store: SummaryStore, budget_tokens: int
+) -> str:
+    covered, summary = store.find_prefix(older) or (0, "")
+    for chunk in _chunks(older[covered:], budget_tokens):
+        covered += len(chunk)
+        summary, ok = await summarize(llm_router, runtime, chunk, summary, budget_tokens)
+        if not ok:
+            # lossy fallback is never cached; keep every old user question
+            return _fallback_summary(older, budget_tokens)
+        store.put(older[:covered], summary)
+    return summary
 
 
 async def _summary_for(
@@ -207,11 +261,13 @@ async def _summary_for(
     cached = store.get(older)
     if cached is not None:
         return cached
-    previous = (store.get(older[:-2]) or "") if len(older) > 2 else ""
-    summary = await summarize(llm_router, runtime, older, previous, budget_tokens)
-    if summary:
-        store.put(older, summary)
-    return summary
+    key = store.key(older)
+    task = store.inflight.get(key)
+    if task is None:
+        task = asyncio.ensure_future(_compute_summary(older, llm_router, runtime, store, budget_tokens))
+        store.inflight[key] = task
+        task.add_done_callback(lambda _t: store.inflight.pop(key, None))
+    return await asyncio.shield(task)
 
 
 async def build_memory(
