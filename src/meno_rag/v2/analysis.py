@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 
@@ -16,6 +17,9 @@ NSU_STEMS = (
     "стипенд", "поступ", "экзамен", "сесси", "расписан", "аспирант", "магистр",
     "бакалавр", "академгород", "деканат", "ректор", "преподава", "студент", "курс", "ции",
 )
+# stems that must be a whole word (otherwise "ции" fires inside "информации", "станции")
+WHOLE_WORD_STEMS = frozenset({"ции"})
+_WORD_RE = re.compile(r"[^\W\d_]+")
 MAX_SHORT_WORDS = 12
 ASSISTANT_CHARS = 600
 RECENT_EXCHANGES = 3
@@ -112,23 +116,36 @@ def _dedup(items: list) -> list[str]:
     return out
 
 
+def _mentions_nsu(question: str) -> bool:
+    """A stem matches a word that starts with it; whole-word stems must equal the word."""
+    for word in _WORD_RE.findall(question.lower()):
+        for stem in NSU_STEMS:
+            whole = stem in WHOLE_WORD_STEMS
+            if (word == stem) if whole else word.startswith(stem):
+                return True
+    return False
+
+
 def _postprocess(data: dict, question: str) -> TurnAnalysis:
     route = data["route"]
-    if route not in ROUTES:
+    if not isinstance(route, str) or route not in ROUTES:
         raise ValueError(f"unknown route {route!r}")
-    if not isinstance(data["subqueries"], list):
-        raise ValueError("subqueries must be a list")
-    standalone = str(data["standalone_question"]).strip() or question
-    if route in ("chitchat", "off_topic"):
-        low = question.lower()
-        if len(question.split()) > MAX_SHORT_WORDS or any(s in low for s in NSU_STEMS):
-            route = "nsu"
+    standalone, subqueries = data["standalone_question"], data["subqueries"]
+    chain, focus = data["chain"], data["focus"]
+    if not isinstance(standalone, str) or not isinstance(focus, str):
+        raise ValueError("standalone_question and focus must be strings")
+    if not isinstance(subqueries, list) or not all(isinstance(q, str) for q in subqueries):
+        raise ValueError("subqueries must be a list of strings")
+    if not isinstance(chain, bool):
+        raise ValueError("chain must be a boolean")
+    if route in ("chitchat", "off_topic") and (len(question.split()) > MAX_SHORT_WORDS or _mentions_nsu(question)):
+        route = "nsu"
     return TurnAnalysis(
         route=route,
-        standalone_question=standalone,
-        subqueries=_dedup(data["subqueries"])[:4],
-        chain=bool(data["chain"]),
-        focus=str(data["focus"]).strip(),
+        standalone_question=standalone.strip() or question,
+        subqueries=_dedup(subqueries)[:4],
+        chain=chain,
+        focus=focus.strip(),
         fallback=False,
     )
 
