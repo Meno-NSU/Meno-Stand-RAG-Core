@@ -208,6 +208,54 @@ class Settings(BaseSettings):
     )
     rag_rewrite_rerank_model: str | None = Field(default=None, validation_alias="RAG_REWRITE_RERANK_MODEL")
 
+    # --- RAG v2 pipeline ---
+    # Serve the legacy pipeline (nsu-stand-faiss-bm25); loads the stand resources.
+    legacy_enabled: bool = Field(default=True, validation_alias="LEGACY_ENABLED")
+    # Serve the v2 pipeline (nsu-kb-2026-11).
+    v2_enabled: bool = Field(default=False, validation_alias="V2_ENABLED")
+    # Directory of the v2 chunk release.
+    v2_kb_dir: str = Field(default="kb/chunks/v1", validation_alias="V2_KB_DIR")
+    # Dense embedder: frida or qwen3.
+    v2_embedder: str = Field(default="frida", validation_alias="V2_EMBEDDER")
+    # Local path of the embedder weights.
+    v2_embedder_path: str = Field(default="", validation_alias="V2_EMBEDDER_PATH")
+    # Directory with the precomputed dense matrices.
+    v2_matrix_dir: str = Field(default="", validation_alias="V2_MATRIX_DIR")
+    # Cross-encoder reranker name.
+    v2_reranker: str = Field(default="bge", validation_alias="V2_RERANKER")
+    # Local path of the reranker weights.
+    v2_reranker_path: str = Field(default="", validation_alias="V2_RERANKER_PATH")
+    # Torch device for v2 models.
+    v2_device: str = Field(default="cuda", validation_alias="V2_DEVICE")
+    # Fraction of GPU memory v2 may use.
+    v2_gpu_mem_fraction: float = Field(default=0.3, validation_alias="V2_GPU_MEM_FRACTION")
+    # Embedder weights dtype on CUDA: bf16 or fp16.
+    v2_embed_dtype: str = Field(default="bf16", validation_alias="V2_EMBED_DTYPE")
+    # Extra LLM check of the answer's sources.
+    v2_sources_llm_check: bool = Field(default=False, validation_alias="V2_SOURCES_LLM_CHECK")
+    # Cross-encoder score above which a chunk counts as relevant.
+    v2_rerank_threshold: float = Field(default=0.3, validation_alias="V2_RERANK_THRESHOLD")
+    # Score above which a chunk is attributed as a source of the answer.
+    v2_attribution_threshold: float = Field(default=0.5, validation_alias="V2_ATTRIBUTION_THRESHOLD")
+    # Token budget for dialog history in the prompt.
+    v2_history_budget_tokens: int = Field(default=5000, validation_alias="V2_HISTORY_BUDGET_TOKENS")
+    # Token budget for the dialog summary.
+    v2_summary_budget_tokens: int = Field(default=800, validation_alias="V2_SUMMARY_BUDGET_TOKENS")
+    # Token budget for retrieved context.
+    v2_context_budget_tokens: int = Field(default=6000, validation_alias="V2_CONTEXT_BUDGET_TOKENS")
+    # Cap on generated answer tokens.
+    v2_max_answer_tokens: int = Field(default=1500, validation_alias="V2_MAX_ANSWER_TOKENS")
+    # Max chunks in the answer context.
+    v2_max_context_chunks: int = Field(default=8, validation_alias="V2_MAX_CONTEXT_CHUNKS")
+    # Max sources shown with an answer.
+    v2_max_sources: int = Field(default=5, validation_alias="V2_MAX_SOURCES")
+    # Max search rounds per question.
+    v2_max_rounds: int = Field(default=3, validation_alias="V2_MAX_ROUNDS")
+    # Candidates per query from each of dense and BM25.
+    v2_candidates_per_query: int = Field(default=50, validation_alias="V2_CANDIDATES_PER_QUERY")
+    # Fused candidates per query sent to the cross-encoder.
+    v2_rerank_top: int = Field(default=40, validation_alias="V2_RERANK_TOP")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

@@ -80,12 +80,12 @@ class FridaEmbedder(_BaseEmbedder):
     doc_prefix = "search_document: "
 
     def __init__(self, tokenizer: Any = None, model: Any = None, *, path: str | None = None,
-                 device: str = "cpu") -> None:
+                 device: str = "cpu", dtype: str | None = None) -> None:
         if tokenizer is None:
             from transformers import AutoTokenizer, T5EncoderModel
 
             tokenizer = AutoTokenizer.from_pretrained(path)
-            model = _to_device(T5EncoderModel.from_pretrained(path, dtype=_dtype(device)), device)
+            model = _to_device(T5EncoderModel.from_pretrained(path, dtype=_resolve_dtype(device, dtype)), device)
         super().__init__(tokenizer, model)
 
     def _pool(self, hidden, mask):
@@ -98,12 +98,12 @@ class Qwen3Embedder(_BaseEmbedder):
     doc_prefix = ""
 
     def __init__(self, tokenizer: Any = None, model: Any = None, *, path: str | None = None,
-                 device: str = "cpu") -> None:
+                 device: str = "cpu", dtype: str | None = None) -> None:
         if tokenizer is None:
             from transformers import AutoModel, AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(path, padding_side="left")
-            model = _to_device(AutoModel.from_pretrained(path, dtype=_dtype(device)), device)
+            model = _to_device(AutoModel.from_pretrained(path, dtype=_resolve_dtype(device, dtype)), device)
         super().__init__(tokenizer, model)
 
     def _pool(self, hidden, mask):
@@ -118,13 +118,26 @@ def _dtype(device: str):
     return torch.float16 if str(device).startswith("cuda") else torch.float32
 
 
+_DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16}
+
+
+def _resolve_dtype(device: str, dtype: str | None):
+    """Weights dtype: bf16/fp16 on CUDA when asked, fp32 on CPU, `_dtype` when unset."""
+    if dtype is not None and dtype not in _DTYPES:
+        raise ValueError(f"unknown dtype {dtype!r}; expected 'bf16' or 'fp16'")
+    if dtype is None or not str(device).startswith("cuda"):
+        return _dtype(device)
+    return _DTYPES[dtype]
+
+
 def _to_device(model, device: str):
     return model.to(device).eval()
 
 
-def load_embedder(name: str, path: str, device: str) -> Embedder:
+def load_embedder(name: str, path: str, device: str, dtype: str | None = None) -> Embedder:
+    _resolve_dtype(device, dtype)  # fail fast on an unknown dtype
     if name == "frida":
-        return FridaEmbedder(path=path, device=device)
+        return FridaEmbedder(path=path, device=device, dtype=dtype)
     if name == "qwen3":
-        return Qwen3Embedder(path=path, device=device)
+        return Qwen3Embedder(path=path, device=device, dtype=dtype)
     raise ValueError(f"unknown embedder {name!r}; expected 'frida' or 'qwen3'")
