@@ -1,0 +1,122 @@
+import asyncio
+import threading
+
+import pytest
+
+from meno_rag.config import Settings
+from meno_rag.v2.kb import Chunk, KbRelease
+from meno_rag.v2.search import SearchService, load_search_service
+
+
+def _release(n=10):
+    chunks = [
+        Chunk(f"c{i}", f"d{i}", f"u{i}", f"t{i}", None, None, None, f"text{i}", f"idx{i}")
+        for i in range(n)
+    ]
+    return KbRelease(chunks=chunks, by_id={c.chunk_id: i for i, c in enumerate(chunks)})
+
+
+class FakeRetriever:
+    def __init__(self, table):
+        self.table = table
+
+    def search(self, query, k):
+        return self.table.get(query, [])[:k]
+
+
+class FakeReranker:
+    """scores[(query, index_text)] -> float; records concurrency and calls."""
+
+    def __init__(self, scores, delay=0.0, fail_on=None):
+        self.scores = scores
+        self.delay = delay
+        self.fail_on = fail_on
+        self.active = 0
+        self.max_active = 0
+        self.calls = []
+        self.lock = threading.Lock()
+
+    def score(self, query, texts, batch_size=32, max_length=512):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            if self.delay:
+                import time
+                time.sleep(self.delay)
+            if self.fail_on == query:
+                raise RuntimeError("boom")
+            self.calls.append((query, list(texts)))
+            return [self.scores.get((query, t), 0.0) for t in texts]
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
+def _service(dense, bm25, reranker, **kw):
+    s = Settings(_env_file=None, **kw)
+    return SearchService(_release(), FakeRetriever(bm25), FakeRetriever(dense), reranker, s)
+
+
+async def test_merge_no_duplicates_ordered_and_coverage():
+    dense = {"qa": [(1, .9), (2, .8)], "qb": [(2, .9), (3, .8)]}
+    bm25 = {"qa": [(2, 5.0)], "qb": [(4, 5.0)]}
+    rr = FakeReranker({("ra", "idx1"): 0.2, ("ra", "idx2"): 0.5, ("rb", "idx2"): 0.9,
+                       ("rb", "idx3"): 0.1, ("rb", "idx4"): 0.6})
+    svc = _service(dense, bm25, rr)
+    res = await svc.search(["qa", "qb"], ["ra", "rb"])
+    assert [c.pos for c in res.candidates] == [2, 4, 1, 3]
+    assert [c.score for c in res.candidates] == [0.9, 0.6, 0.2, 0.1]
+    assert res.candidates[0].chunk.chunk_id == "c2"
+    assert res.coverage == {"qa": 0.5, "qb": 0.9}
+    assert set(res.timings_ms) == {"embed_dense", "bm25", "rrf", "rerank"}
+    assert len(rr.calls) == 2  # one score() per distinct rerank query
+
+
+async def test_empty_query_skipped():
+    rr = FakeReranker({("ra", "idx1"): 0.4})
+    svc = _service({"qa": [(1, .9)]}, {}, rr)
+    res = await svc.search(["qa", "   ", ""], ["ra", "rx", "ry"])
+    assert res.coverage == {"qa": 0.4}
+    assert [q for q, _ in rr.calls] == ["ra"]
+    res = await svc.search(["  "], ["x"])
+    assert res.candidates == [] and res.coverage == {}
+
+
+async def test_rerank_top_limits_candidates():
+    dense = {"q": [(i, 1 - i / 10) for i in range(6)]}
+    rr = FakeReranker({})
+    svc = _service(dense, {}, rr, V2_RERANK_TOP=3)
+    res = await svc.search(["q"], ["q"])
+    assert len(res.candidates) == 3
+
+
+async def test_16_concurrent_searches_serialized():
+    rr = FakeReranker({("q", "idx1"): 0.7}, delay=0.01)
+    svc = _service({"q": [(1, .9)]}, {}, rr)
+    results = await asyncio.wait_for(
+        asyncio.gather(*[svc.search(["q"], ["q"]) for _ in range(16)]), timeout=30)
+    assert len(results) == 16 and all(r.coverage == {"q": 0.7} for r in results)
+    assert rr.max_active == 1
+
+
+async def test_exception_does_not_break_next():
+    rr = FakeReranker({("ok", "idx1"): 0.7}, fail_on="bad")
+    svc = _service({"bad": [(1, .9)], "ok": [(1, .9)]}, {}, rr)
+    with pytest.raises(RuntimeError):
+        await svc.search(["bad"], ["bad"])
+    res = await svc.search(["ok"], ["ok"])
+    assert res.coverage == {"ok": 0.7}
+
+
+async def test_run_gpu():
+    svc = _service({}, {}, FakeReranker({}))
+    assert await svc.run_gpu(lambda a, b: a + b, 1, 2) == 3
+    assert svc.reranker is not None
+
+
+@pytest.mark.parametrize("field", ["V2_EMBEDDER_PATH", "V2_MATRIX_DIR", "V2_RERANKER_PATH"])
+def test_load_search_service_empty_path(field):
+    kw = {"V2_EMBEDDER_PATH": "/x", "V2_MATRIX_DIR": "/y", "V2_RERANKER_PATH": "/z", field: ""}
+    with pytest.raises(ValueError, match=field):
+        load_search_service(Settings(_env_file=None, **kw))
