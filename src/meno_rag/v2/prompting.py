@@ -220,7 +220,11 @@ def build_messages(
     context: str,
     today: date,
 ) -> list[dict]:
-    """System prompt (+ route rules, documents) -> memory block -> recent turns -> the user's question."""
+    """One system message (prompt, route rules, documents, memory block) -> recent turns -> the question.
+
+    Gemma chat templates reject a system message that is not first, so the memory block is
+    appended to the single system message instead of being sent as a second one.
+    """
     if route not in ROUTE_BLOCKS:
         route = "nsu"
     context = context.strip()
@@ -232,10 +236,10 @@ def build_messages(
         parts.append(NO_CONTEXT_BLOCKS[route])
     else:
         parts.append(ROUTE_BLOCKS[route])
-    messages = [{"role": "system", "content": "\n\n".join(parts)}]
     block = _memory_block(memory)
     if block:
-        messages.append({"role": "system", "content": block})
+        parts.append(block)
+    messages = [{"role": "system", "content": "\n\n".join(parts)}]
     for m in memory.recent:
         if m.get("role") in ("user", "assistant") and str(m.get("content", "")).strip():
             messages.append({"role": m["role"], "content": m["content"]})

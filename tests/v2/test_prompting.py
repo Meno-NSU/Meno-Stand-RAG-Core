@@ -137,6 +137,11 @@ def test_routes_without_search_ignore_context(route):
     assert msgs[-1]["content"] == "а сколько платят?"
 
 
+def memory_part(msgs):
+    system = msgs[0]["content"]
+    return system[system.index("Ранее в этом диалоге"):]
+
+
 def test_route_blocks_cover_all_routes_and_differ():
     assert set(ROUTE_BLOCKS) == set(ROUTES)
     blocks = list(ROUTE_BLOCKS.values()) + list(NO_CONTEXT_BLOCKS.values())
@@ -158,9 +163,12 @@ def test_memory_block_with_summary_and_recalled():
                   {"role": "assistant", "content": "Общежития на Пирогова."}],
     )
     msgs = build("nsu", memory=memory)
-    assert [m["role"] for m in msgs] == ["system", "system", "user", "assistant", "user"]
-    block = msgs[1]["content"]
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]
+    system = msgs[0]["content"]
+    assert system.startswith(SYSTEM_PROMPT_V2)
+    block = memory_part(msgs)
     assert block.startswith("Ранее в этом диалоге")
+    assert system.index("(уточнённый)") < system.index(block)
     assert "Пользователь учится на ФИТ." in block
     assert "Пользователь: Где общежитие?\nМенон: Общежития на Пирогова." in block
     assert block.index("Пользователь учится") < block.index("Где общежитие?")
@@ -169,13 +177,14 @@ def test_memory_block_with_summary_and_recalled():
 
 def test_memory_block_only_summary():
     msgs = build("chitchat", memory=DialogueMemory(recent=[], summary="Сводка."))
-    assert [m["role"] for m in msgs] == ["system", "system", "user"]
-    assert "Сводка." in msgs[1]["content"] and "Пользователь:" not in msgs[1]["content"]
+    assert [m["role"] for m in msgs] == ["system", "user"]
+    assert "Сводка." in memory_part(msgs) and "Пользователь:" not in memory_part(msgs)
 
 
 def test_no_memory_no_block():
     msgs = build("nsu", memory=DialogueMemory())
     assert [m["role"] for m in msgs] == ["system", "user"]
+    assert "Ранее в этом диалоге" not in msgs[0]["content"]
 
 
 def test_recent_messages_are_copied_with_roles_only():
@@ -196,12 +205,12 @@ def test_history_budget_not_exceeded():
     recalled = [{"role": "user", "content": "г" * 50_000}, {"role": "assistant", "content": "д" * 50_000}]
     memory = DialogueMemory(recent=recent, older=older, summary="с" * 300, recalled=recalled)
     msgs = build("nsu", memory=memory)
-    role_msgs = msgs[2:-1]
+    role_msgs = msgs[1:-1]
     assert role_msgs == recent
     assert sum(estimate_tokens(m["content"]) for m in role_msgs) <= 600
     # the memory block: summary + recalled, each recalled message capped
-    assert estimate_tokens(msgs[1]["content"]) <= 300 + 2 * 400 + 100
-    assert "[…]" in msgs[1]["content"]
+    assert estimate_tokens(memory_part(msgs)) <= 300 + 2 * 400 + 100
+    assert "[…]" in memory_part(msgs)
     # nothing from older turns leaks in verbatim
     assert "вопрос 0 " not in "".join(m["content"] for m in msgs)
 
