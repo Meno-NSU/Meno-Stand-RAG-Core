@@ -2,8 +2,17 @@ import asyncio
 import json
 from datetime import date
 
-from meno_rag.v2.evidence import JUDGE_SCHEMA, build_judge_messages, fallback_judgement, judge
+from meno_rag.v2.evidence import (
+    JUDGE_MAX_TOKENS,
+    JUDGE_SCHEMA,
+    build_judge_messages,
+    extract_object,
+    fallback_judgement,
+    judge,
+    parse_judgement,
+)
 from meno_rag.v2.kb import Chunk
+from meno_rag.v2.memory import estimate_tokens
 from meno_rag.v2.search import Candidate
 
 TODAY = date(2026, 11, 3)
@@ -38,13 +47,11 @@ class Router:
         return self.reply
 
 
-def reply(docs=(), verdict="sufficient", mode="documents", queries=(), missing="", clarify=""):
-    return json.dumps({
-        "docs": [{"i": i, "same_entity": se, "relevant": rel, "stale": st, "need": need}
-                 for i, rel, st, se, need in docs],
-        "verdict": verdict, "missing": missing, "queries": list(queries), "answer_mode": mode,
-        "clarify_question": clarify,
-    }, ensure_ascii=False)
+def reply(relevant=(), stale=(), other=(), verdict="sufficient", mode="documents", missing="", search_more=False,
+          queries=(), clarify=""):
+    return json.dumps({"relevant": list(relevant), "stale": list(stale), "other_entity": list(other),
+                       "verdict": verdict, "answer_mode": mode, "missing": missing, "search_more": search_more,
+                       "queries": list(queries), "clarify_question": clarify}, ensure_ascii=False)
 
 
 async def run(router, cands=CANDS, needs=(Q,), timeout_s=5.0):
@@ -53,11 +60,20 @@ async def run(router, cands=CANDS, needs=(Q,), timeout_s=5.0):
                        timeout_s=timeout_s, fallback_threshold=0.5)
 
 
+def test_schema_is_compact_index_lists():
+    props = JUDGE_SCHEMA["properties"]
+    assert list(props) == ["relevant", "stale", "other_entity", "verdict", "answer_mode", "missing",
+                           "search_more", "queries", "clarify_question"]
+    for key in ("relevant", "stale", "other_entity"):
+        assert props[key]["items"] == {"type": "integer"} and props[key]["maxItems"] <= 16
+    assert props["queries"]["maxItems"] == 2 and props["search_more"] == {"type": "boolean"}
+
+
 async def test_call_kwargs_and_prompt():
-    r = Router(reply([(2, True, False, True, 1)]))
+    r = Router(reply([2]))
     await run(r)
     k = r.calls[0]
-    assert k["stage"] == "rerank" and k["temperature"] == 0
+    assert k["stage"] == "rerank" and k["temperature"] == 0 and k["max_tokens"] == JUDGE_MAX_TOKENS == 220
     assert k["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
     assert k["response_format"] == {
         "type": "json_schema",
@@ -65,79 +81,111 @@ async def test_call_kwargs_and_prompt():
     }
     assert k["timeout"] == 5.0
     system, user = k["messages"][0]["content"], k["messages"][1]["content"]
-    assert "03.11.2026" in system
-    assert "Однофамилец" in system and "дословно имена" in system and "general_knowledge — только" in system
-    assert f"Вопрос: {Q}" in user and "Реплика пользователя дословно: он хороший преподаватель?" in user
-    assert "Фокус диалога: ММФ" in user and f"1. {Q}" in user
-    # numbered from 1, clean title, type, date or its absence, host
+    assert "03.11.2026" in system and "однофамильце" in system and "search_more — true, только если" in system
+    assert "Отзывов, мнений и оценок людей там обычно нет" in system
+    assert f"Вопрос: {Q}" in user and "Реплика: он хороший преподаватель?" in user and "Фокус диалога: ММФ" in user
+    assert "Нужно узнать" not in user  # the single need equals the question
     assert "[1] НГУ в рейтинге вузов · новость · 01.05.2026 · nsu.ru" in user
     assert "[2] Пальчунов Дмитрий Евгеньевич · сотрудник · дата не указана · nsu.ru" in user
     assert "[3] Отзывы о преподавателях ММФ · новость · 10.02.2024 · vk.com" in user
 
 
-def test_excerpt_is_short_and_without_the_title():
+def test_prompt_with_14_candidates_fits_the_target():
+    long = "Студенты отмечают, что лекции профессора понятные и строгие, а семинары интересные. " * 20
+    title = "Очень длинный заголовок новости НГУ о преподавателях, рейтингах вузов и студенческой жизни"
+    cands = [cand(i, 0.5, title, long, "2025-03-01", f"https://www.nsu.ru/n/news/{i}") for i in range(14)]
+    msgs = build_judge_messages(question="он хороший преподаватель?", standalone=Q,
+                                needs=[Q, "Отзывы студентов о Пальчунове"], dialogue_hint="Фокус диалога: ММФ",
+                                candidates=cands, today=TODAY, tried=["Пальчунов отзывы"])
+    total = sum(estimate_tokens(m["content"]) for m in msgs)
+    assert total <= 1800, total
+    user = msgs[1]["content"]
+    assert "Нужно узнать: 1) Отзывы студентов о Пальчунове" in user and "Уже искали: Пальчунов отзывы" in user
+    excerpt = user.split("\n")[user.split("\n").index(next(x for x in user.split("\n") if x.startswith("[1] "))) + 1]
+    assert 100 <= len(excerpt) <= 300 and excerpt.endswith("…")
+    # few candidates: longer excerpts, capped at 300 chars
+    few = build_judge_messages(question=Q, standalone=Q, needs=[Q], dialogue_hint="", candidates=cands[:2],
+                               today=TODAY)[1]["content"].split("\n")
+    assert max(len(x) for x in few) <= 300
+
+
+def test_excerpt_drops_the_title_and_empty_list_is_marked():
     user = build_judge_messages(question=Q, standalone=Q, needs=[Q], dialogue_hint="", candidates=CANDS,
                                 today=TODAY)[1]["content"]
-    block = user[user.index("[2] "):user.index("[3] ")]
-    excerpt = block.split("\n", 1)[1].strip()
-    assert excerpt.startswith("Профессор ММФ") and excerpt.endswith("…") and len(excerpt) <= 401
+    lines = user.split("\n")
+    excerpt = lines[lines.index(next(x for x in lines if x.startswith("[2] "))) + 1]
+    assert excerpt.startswith("Профессор ММФ") and excerpt.endswith("…")
     assert "(ничего не найдено)" in build_judge_messages(
         question=Q, standalone=Q, needs=[Q], dialogue_hint="", candidates=[], today=TODAY)[1]["content"]
 
 
-async def test_parse_maps_numbers_to_indices_and_ignores_bad_ones():
-    raw = reply([(2, True, False, True, 1), (1, False, False, True, None), (9, True, False, True, 1),
-                 (0, True, False, True, 1), (2, False, False, True, None)],
-                verdict="partial", mode="partial", queries=["Пальчунов отзывы студентов", " ", "Пальчунов отзывы студентов"],
-                missing="отзывы студентов")
+async def test_compact_parse():
+    raw = reply(relevant=[2, 9, 2, 0, "3"], stale=[3, 1], other=[1], verdict="partial", mode="partial",
+                missing=" ".join(["слово"] * 30), search_more=True, queries=["Пальчунов кафедра", " ",
+                                                                            "Пальчунов кафедра", "ещё", "третий"])
     j = await run(Router(f"```json\n{raw}\n```"))
     assert not j.fallback
-    assert j.relevant == [1] and j.rejected == {0}
-    assert j.docs[0].need == 0
-    assert j.queries == ["Пальчунов отзывы студентов"]
-    assert (j.verdict, j.answer_mode, j.missing) == ("partial", "partial", "отзывы студентов")
+    assert j.relevant == [1, 2] and j.other_entity == {0}  # 1-based, unknown/duplicate ignored, other entity out
+    assert j.stale == {2}  # only relevant documents can be stale
+    assert (j.verdict, j.answer_mode) == ("partial", "partial")
+    assert len(j.missing.split()) == 20
+    assert j.search_more and j.queries == ["Пальчунов кафедра", "ещё"]
 
 
-async def test_namesake_is_not_evidence():
-    # relevant=true but about another person: does not count; nothing else -> no_data
-    j = await run(Router(reply([(1, True, False, False, 1)], verdict="insufficient", mode="documents")),
-                  cands=[CANDS[1]])
-    assert j.relevant == [] and j.rejected == {0}
-    assert j.answer_mode == "no_data"
+async def test_search_more_false_drops_queries():
+    j = await run(Router(reply([2], verdict="partial", mode="partial", queries=["отзывы студентов"])))
+    assert not j.search_more and j.queries == []
+    j = await run(Router(reply([2], verdict="partial", mode="partial", search_more=True)))
+    assert not j.search_more  # nothing to search with
 
 
-async def test_stale_marks():
-    j = await run(Router(reply([(1, True, True, True, 1), (2, True, False, True, 1)])))
-    assert j.relevant == [0, 1] and j.stale == {0}
+async def test_other_entity_is_not_evidence():
+    j = await run(Router(reply(relevant=[1], other=[1], verdict="insufficient", mode="documents")), cands=[CANDS[1]])
+    assert j.relevant == [] and j.other_entity == {0} and j.answer_mode == "no_data"
 
 
-async def test_no_data_with_accepted_documents_becomes_partial():
-    j = await run(Router(reply([(2, True, False, True, 1)], verdict="insufficient", mode="no_data")))
-    assert j.answer_mode == "partial"
-
-
-async def test_documents_without_named_docs_uses_unrejected_best_scores():
-    j = await run(Router(reply([(1, False, False, True, None)], verdict="sufficient", mode="documents")))
-    assert j.relevant == [1]  # 0.95 rejected, 0.78 kept, 0.4 below the threshold
-    assert j.answer_mode == "partial" and j.verdict == "partial"
-
-
-async def test_clarify_and_general_knowledge_pass_through():
-    j = await run(Router(reply([(1, True, False, True, 1)], verdict="partial", mode="clarify",
-                               clarify="Вас интересует бакалавриат или магистратура?")))
-    assert j.answer_mode == "clarify" and j.clarify_question == "Вас интересует бакалавриат или магистратура?"
+async def test_mode_reconciliation():
+    j = await run(Router(reply([2], verdict="insufficient", mode="no_data")))
+    assert j.answer_mode == "partial"  # accepted evidence: answer what it covers
+    j = await run(Router(reply([], other=[1], verdict="sufficient", mode="documents")))
+    assert j.relevant == [1] and j.answer_mode == "partial" and j.verdict == "partial"  # best not rejected
+    j = await run(Router(reply([2], verdict="partial", mode="clarify", clarify="Бакалавриат или магистратура?")))
+    assert j.answer_mode == "clarify" and j.clarify_question == "Бакалавриат или магистратура?"
     j = await run(Router(reply([], verdict="insufficient", mode="general_knowledge")))
     assert j.answer_mode == "general_knowledge" and j.relevant == []
 
 
+def test_extract_object_first_complete_and_truncated():
+    assert extract_object('ok {"a": 1} {"b": 2}') == {"a": 1}
+    assert extract_object('{"relevant":[1,2') == {"relevant": [1, 2]}
+    assert extract_object('{"relevant":[1],"verdict":"partial","answer_mode":"partial","missing":"нет отз') == {
+        "relevant": [1], "verdict": "partial", "answer_mode": "partial"}
+    assert extract_object('{"relevant":[1],"verd') == {"relevant": [1]}
+    assert extract_object("no json") is None and extract_object('{"a": tr') is None
+
+
+async def test_truncated_reply_is_repaired_or_falls_back():
+    full = reply([2], verdict="partial", mode="partial", missing="нет отзывов студентов о преподавателе")
+    j = await run(Router(full[: full.index("отзывов")]))  # cut inside "missing"
+    assert not j.fallback and j.relevant == [1] and j.answer_mode == "partial"
+    j = await run(Router(full[: full.index('"answer_mode"') + 5]))  # no answer mode: unusable
+    assert j.fallback and j.relevant == [0, 1] and j.answer_mode == "documents"
+
+
+def test_parse_never_raises():
+    for raw in ("", "null", "[1, 2]", "{", '{"verdict": 5}', "```", None):
+        j = parse_judgement(raw, CANDS, 0.5)
+        assert j.fallback and j.relevant == [0, 1]
+
+
 async def test_failures_fall_back_to_reranker_scores():
     for router in (Router("{not json"), Router(exc=RuntimeError("down")),
-                   Router(json.dumps({"docs": [], "verdict": "maybe", "answer_mode": "documents"})),
+                   Router(json.dumps({"relevant": [], "verdict": "maybe", "answer_mode": "documents"})),
                    Router(reply(), delay=1.0)):
         j = await run(router, timeout_s=0.05)
-        assert j.fallback, router.reply
+        assert j.fallback
         assert j.relevant == [0, 1] and j.verdict == "partial" and j.answer_mode == "documents"
-        assert j.queries == []
+        assert j.queries == [] and not j.search_more
 
 
 def test_fallback_limits_and_no_data():

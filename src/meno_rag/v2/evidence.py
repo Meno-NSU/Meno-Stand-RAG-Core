@@ -1,16 +1,18 @@
-"""Evidence judge: one guided-JSON LLM call that decides which retrieved documents answer the question,
-whether they are enough, what to search next and how the answer should be given."""
+"""Evidence judge: one short guided-JSON LLM call that decides which retrieved documents answer the question,
+whether they are enough, whether searching again can help and how the answer should be given."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from urllib.parse import urlsplit
 
-from meno_rag.v2.analysis import _dedup, _extract_json
+from meno_rag.v2.analysis import _dedup
+from meno_rag.v2.memory import CHARS_PER_TOKEN
 from meno_rag.v2.prompting import _doc_type_label, _format_date
 from meno_rag.v2.search import Candidate
 from meno_rag.v2.sources import clean_title
@@ -20,100 +22,63 @@ logger = logging.getLogger(__name__)
 VERDICTS = ("sufficient", "partial", "insufficient")
 ANSWER_MODES = ("documents", "partial", "clarify", "general_knowledge", "no_data")
 DOC_MODES = ("documents", "partial")
-EXCERPT_CHARS = 400
-MAX_QUERIES = 3
-MAX_DOC_ITEMS = 24
+MAX_INDICES = 16
+MAX_QUERIES = 2
+MISSING_WORDS = 20
 FALLBACK_DOCS = 6
-JUDGE_MAX_TOKENS = 700
+JUDGE_MAX_TOKENS = 220
+PROMPT_TOKENS = 1800  # target size of the whole judge prompt (len/3 estimate)
+MAX_EXCERPT = 300
+MIN_EXCERPT = 100
+TITLE_CHARS = 70
+MAX_REPAIR_TRIES = 200
 
+_INDEX_LIST = {"type": "array", "items": {"type": "integer"}, "maxItems": MAX_INDICES}
 JUDGE_SCHEMA: dict = {
     "type": "object",
     "properties": {
-        "docs": {
-            "type": "array",
-            "maxItems": MAX_DOC_ITEMS,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "i": {"type": "integer"},
-                    "same_entity": {"type": "boolean"},
-                    "relevant": {"type": "boolean"},
-                    "stale": {"type": "boolean"},
-                    "need": {"type": ["integer", "null"]},
-                },
-                "required": ["i", "same_entity", "relevant", "stale", "need"],
-                "additionalProperties": False,
-            },
-        },
+        "relevant": _INDEX_LIST,
+        "stale": _INDEX_LIST,
+        "other_entity": _INDEX_LIST,
         "verdict": {"type": "string", "enum": list(VERDICTS)},
-        "missing": {"type": "string"},
-        "queries": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_QUERIES},
         "answer_mode": {"type": "string", "enum": list(ANSWER_MODES)},
+        "missing": {"type": "string"},
+        "search_more": {"type": "boolean"},
+        "queries": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_QUERIES},
         "clarify_question": {"type": "string"},
     },
-    "required": ["docs", "verdict", "missing", "queries", "answer_mode", "clarify_question"],
+    "required": ["relevant", "stale", "other_entity", "verdict", "answer_mode", "missing", "search_more",
+                 "queries", "clarify_question"],
     "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """Ты проверяешь, хватает ли найденных документов с сайтов НГУ (Новосибирский государственный университет), чтобы ответить на вопрос пользователя. Сам на вопрос не отвечай. Сегодня {today}.
-
-Тебе даны вопрос, пронумерованный список того, что нужно узнать, и документы, найденные поиском по вопросу, этим пунктам и прежним запросам: номер, название, тип, дата, сайт и начало текста.
-
-docs — записи только о документах, которые относятся к вопросу, и о похожих, но неподходящих; остальные пропусти.
-- i — номер документа.
-- same_entity — true, только если документ о том же человеке, подразделении, программе или событии, что имеет в виду пользователь. Однофамилец, другой факультет, другая программа или уровень обучения — false; такой документ не relevant.
-- relevant — true, если документ помогает ответить.
-- stale — true, если вопрос о текущем положении дел, а более свежий документ ему противоречит (сменились руководитель, сроки, правила). Для вопросов о текущем положении предпочитай самые свежие документы с датой.
-- need — номер пункта из «Нужно узнать», который закрывает документ, или null.
-
-verdict — sufficient: документы закрывают все пункты; partial: часть; insufficient: ничего.
-missing — коротко, чего не хватает; "" если всего хватает.
-queries — до трёх новых поисковых запросов, только если verdict не sufficient. Сохраняй в них дословно имена, фамилии, названия и сокращения из вопроса; не обобщай вопрос и не меняй его тему. Не повторяй вопрос, пункты и прежние запросы.
-answer_mode:
-- documents — ответить по документам;
-- partial — ответить по документам на то, что есть, и сказать, чего нет;
-- clarify — вопрос можно понять по-разному (уровень обучения, факультет, год и т. п.), а документы относятся к разным вариантам;
-- general_knowledge — только если вопрос об общих понятиях или навыках (объяснить тему, помочь с текстом или задачей) и не касается конкретных фактов об НГУ, его людях, подразделениях, событиях или правилах;
-- no_data — вопрос о конкретных людях, подразделениях, событиях или правилах, а подходящих документов нет.
-clarify_question — для clarify короткий уточняющий вопрос пользователю, иначе "".
-Ответ — только JSON."""
-
-
-@dataclass
-class DocJudgement:
-    i: int  # 0-based index into the judged candidates
-    relevant: bool
-    need: int | None  # 0-based index into needs
-    stale: bool
-    same_entity: bool
-
-    @property
-    def counts(self) -> bool:
-        """Evidence only when relevant AND about the entity the user means."""
-        return self.relevant and self.same_entity
+SYSTEM_PROMPT = """Ты отбираешь документы сайтов НГУ для ответа на вопрос. Сам не отвечай. Сегодня {today}. Верни JSON:
+relevant — номера документов, которые помогают ответить и говорят о том же человеке, подразделении, программе или событии, что имеет в виду пользователь.
+other_entity — номера документов об однофамильце, другом факультете, программе или уровне обучения.
+stale — номера из relevant, которым противоречит более свежий документ, если вопрос о текущем положении.
+verdict: sufficient — сведений хватает; partial — на часть; insufficient — нет.
+answer_mode: documents; partial — ответить тем, что есть, и сказать, чего нет; clarify — вопрос понятен по-разному, а документы о разных вариантах; general_knowledge — только вопрос об общих понятиях или навыках, не о фактах про НГУ, людей, подразделения, события, правила; no_data — подходящих документов нет.
+missing — чего не хватает, до 20 слов.
+search_more — true, только если недостающее вероятно есть на сайтах НГУ в других словах. Отзывов, мнений и оценок людей там обычно нет; если документы явно этого не касаются — partial и false.
+queries — до 2 запросов, только при search_more; имена и названия из вопроса сохраняй дословно.
+clarify_question — вопрос пользователю для clarify, иначе ""."""
 
 
 @dataclass
 class Judgement:
-    docs: list[DocJudgement]
+    relevant: list[int]  # 0-based indices into the judged candidates, about the entity the user means
     verdict: str
-    missing: str = ""
-    queries: list[str] = field(default_factory=list)
     answer_mode: str = "documents"
+    stale: set[int] = field(default_factory=set)  # subset of relevant
+    other_entity: set[int] = field(default_factory=set)
+    missing: str = ""
+    search_more: bool = False
+    queries: list[str] = field(default_factory=list)
     clarify_question: str = ""
     fallback: bool = False
 
-    @property
-    def relevant(self) -> list[int]:
-        return [d.i for d in self.docs if d.counts]
 
-    @property
-    def stale(self) -> set[int]:
-        return {d.i for d in self.docs if d.counts and d.stale}
-
-    @property
-    def rejected(self) -> set[int]:
-        return {d.i for d in self.docs if not d.counts}
+# --- prompt -------------------------------------------------------------------------------
 
 
 def _host(url: str | None) -> str:
@@ -121,124 +86,176 @@ def _host(url: str | None) -> str:
     return host or "без адреса"
 
 
-def _excerpt(cand: Candidate, title: str) -> str:
+def _cut(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[: max(limit - 1, 1)]
+    return (cut[: cut.rindex(" ")] if " " in cut else cut).rstrip(" ,.:;—-") + "…"
+
+
+def _header(n: int, cand: Candidate) -> str:
+    c = cand.chunk
+    title = _cut(clean_title(c.title) or "без названия", TITLE_CHARS)
+    return f"[{n}] {title} · {_doc_type_label(c.doc_type)} · {_format_date(c.date)} · {_host(c.url)}"
+
+
+def _excerpt(cand: Candidate, limit: int) -> str:
     text = " ".join((cand.chunk.index_text or cand.chunk.text or "").split())
-    raw_title = " ".join((cand.chunk.title or "").split())
-    for head in (raw_title, title):
+    for head in (" ".join((cand.chunk.title or "").split()), clean_title(cand.chunk.title)):
         if head and text.startswith(head):
             text = text[len(head):].lstrip(" .:—-|")
             break
-    if len(text) > EXCERPT_CHARS:
-        cut = text[:EXCERPT_CHARS]
-        text = (cut[: cut.rindex(" ")] if " " in cut else cut) + "…"
-    return text
-
-
-def render_candidates(candidates: list[Candidate]) -> str:
-    blocks = []
-    for n, cand in enumerate(candidates, 1):
-        c = cand.chunk
-        title = clean_title(c.title) or "без названия"
-        header = f"[{n}] {title} · {_doc_type_label(c.doc_type)} · {_format_date(c.date)} · {_host(c.url)}"
-        blocks.append(f"{header}\n{_excerpt(cand, title)}")
-    return "\n\n".join(blocks)
+    return _cut(text, limit)
 
 
 def build_judge_messages(
     *, question: str, standalone: str, needs: list[str], dialogue_hint: str, candidates: list[Candidate],
     today: date, tried: Sequence[str] = (),
 ) -> list[dict]:
-    parts = [f"Вопрос: {standalone.strip() or question.strip()}"]
-    if question.strip() and question.strip() != standalone.strip():
-        parts.append(f"Реплика пользователя дословно: {question.strip()}")
+    """Excerpts share what is left of PROMPT_TOKENS after the fixed parts (MIN_EXCERPT..MAX_EXCERPT chars)."""
+    anchor = standalone.strip() or question.strip()
+    parts = [f"Вопрос: {anchor}"]
+    if question.strip() and question.strip() != anchor:
+        parts.append(f"Реплика: {question.strip()}")
     if dialogue_hint.strip():
         parts.append(dialogue_hint.strip())
-    items = needs or [standalone]
-    parts.append("Нужно узнать:\n" + "\n".join(f"{n}. {q}" for n, q in enumerate(items, 1)))
+    items = [q for q in needs if q.strip() and q.strip() != anchor]
+    if items:
+        parts.append("Нужно узнать: " + "; ".join(f"{n}) {q}" for n, q in enumerate(items, 1)))
     if tried:
-        parts.append("Прежние запросы:\n" + "\n".join(f"- {q}" for q in tried))
-    parts.append("Документы:\n" + (render_candidates(candidates) if candidates else "(ничего не найдено)"))
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT.format(today=f"{today:%d.%m.%Y}")},
-        {"role": "user", "content": "\n\n".join(parts)},
-    ]
+        parts.append("Уже искали: " + "; ".join(tried))
+    system = SYSTEM_PROMPT.format(today=f"{today:%d.%m.%Y}")
+    headers = [_header(n, c) for n, c in enumerate(candidates, 1)]
+    fixed = len(system) + sum(len(p) + 1 for p in parts) + sum(len(h) + 2 for h in headers) + 16
+    per = (PROMPT_TOKENS * CHARS_PER_TOKEN - fixed) // max(len(candidates), 1)
+    per = max(MIN_EXCERPT, min(MAX_EXCERPT, per))
+    docs = "\n".join(f"{h}\n{_excerpt(c, per)}" for h, c in zip(headers, candidates, strict=True))
+    parts.append("Документы:\n" + (docs or "(ничего не найдено)"))
+    return [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(parts)}]
+
+
+# --- parsing ------------------------------------------------------------------------------
+
+
+def _close_prefix(text: str) -> dict | None:
+    """The longest prefix of a (possibly truncated) JSON object that parses once its brackets are closed."""
+    stack: list[str] = []
+    cuts: list[tuple[int, str]] = []  # (end of prefix, closing brackets at that point)
+    in_str = esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+                cuts.append((i + 1, "".join(reversed(stack))))
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack:
+                break
+            stack.pop()
+            cuts.append((i + 1, "".join(reversed(stack))))
+            if not stack:
+                break  # the first complete object ends here
+        elif ch == ",":
+            cuts.append((i, "".join(reversed(stack))))
+        elif ch.isdigit() or ch in "el":  # the end of a number, true, false or null
+            cuts.append((i + 1, "".join(reversed(stack))))
+    for end, closers in reversed(cuts[-MAX_REPAIR_TRIES:]):
+        try:
+            obj = json.loads(text[:end] + closers)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def extract_object(raw: str) -> dict | None:
+    """The first complete JSON object in raw (fences and chatter around it ignored), else the longest
+    prefix of a truncated one that can be closed, else None."""
+    start = raw.find("{")
+    if start < 0:
+        return None
+    text = raw[start:]
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text)
+        if isinstance(obj, dict):
+            return obj
+    except ValueError:
+        pass
+    return _close_prefix(text)
+
+
+def _indices(value, n: int) -> list[int]:
+    """1-based numbers from the prompt -> unique 0-based indices; unknown ones are ignored."""
+    out: list[int] = []
+    for v in value if isinstance(value, list) else []:
+        if isinstance(v, str) and v.strip().isdigit():
+            v = int(v.strip())
+        if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= n and v - 1 not in out:
+            out.append(v - 1)
+    return out
 
 
 def fallback_judgement(
     candidates: list[Candidate], threshold: float, *, exclude: set[int] = frozenset(), limit: int = FALLBACK_DOCS
 ) -> Judgement:
-    """Without a usable judgement: the best cross-encoder candidates above the threshold."""
+    """Without a usable judgement: the best cross-encoder candidates scoring >= threshold."""
     order = sorted(range(len(candidates)), key=lambda i: (-candidates[i].score, candidates[i].pos))
     picked = [i for i in order if i not in exclude and candidates[i].score >= threshold][:limit]
-    docs = [DocJudgement(i, True, None, False, True) for i in picked]
-    return Judgement(docs, "partial", answer_mode="documents" if docs else "no_data", fallback=True)
+    return Judgement(picked, "partial", answer_mode="documents" if picked else "no_data", fallback=True)
 
 
-def _as_bool(value, default: bool) -> bool:
-    return value if isinstance(value, bool) else default
-
-
-def _as_int(value) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value.strip())
-    return None
-
-
-def parse_judgement(raw: str, candidates: list[Candidate], needs: list[str], threshold: float) -> Judgement:
-    data = _extract_json(raw)  # also skips a ```json fence
-    verdict, mode = data.get("verdict"), data.get("answer_mode")
+def parse_judgement(raw: str, candidates: list[Candidate], threshold: float) -> Judgement:
+    """Never raises: an unusable reply gives the fallback judgement."""
+    data = extract_object(raw or "")
+    verdict = data.get("verdict") if data else None
+    mode = data.get("answer_mode") if data else None
     if verdict not in VERDICTS or mode not in ANSWER_MODES:
-        raise ValueError(f"bad verdict/answer_mode {verdict!r}/{mode!r}")
-    docs: list[DocJudgement] = []
-    seen: set[int] = set()
-    items = data.get("docs")
-    for item in items if isinstance(items, list) else []:
-        if not isinstance(item, dict):
-            continue
-        n = _as_int(item.get("i"))
-        if n is None or not 1 <= n <= len(candidates) or n - 1 in seen:
-            continue  # numbers in the prompt start at 1; unknown ones are ignored
-        need = _as_int(item.get("need"))
-        need = need - 1 if need is not None and 1 <= need <= max(len(needs), 1) else None
-        seen.add(n - 1)
-        docs.append(DocJudgement(
-            n - 1,
-            _as_bool(item.get("relevant"), False),
-            need,
-            _as_bool(item.get("stale"), False),
-            _as_bool(item.get("same_entity"), True),
-        ))
+        logger.warning("evidence judge reply unusable, falling back to the top reranker documents: %r",
+                       (raw or "")[:200])
+        return fallback_judgement(candidates, threshold)
+    n = len(candidates)
+    other = set(_indices(data.get("other_entity"), n))
+    relevant = [i for i in _indices(data.get("relevant"), n) if i not in other]
     queries = data.get("queries")
     missing, clarify = data.get("missing"), data.get("clarify_question")
     j = Judgement(
-        docs=docs,
+        relevant=relevant,
         verdict=verdict,
-        missing=missing.strip() if isinstance(missing, str) else "",
-        queries=_dedup(queries if isinstance(queries, list) else [])[:MAX_QUERIES],
         answer_mode=mode,
+        stale=set(_indices(data.get("stale"), n)) & set(relevant),
+        other_entity=other,
+        missing=" ".join(missing.split()[:MISSING_WORDS]) if isinstance(missing, str) else "",
+        search_more=data.get("search_more") is True,
+        queries=_dedup(queries if isinstance(queries, list) else [])[:MAX_QUERIES],
         clarify_question=clarify.strip() if isinstance(clarify, str) else "",
     )
     return _reconcile(j, candidates, threshold)
 
 
 def _reconcile(j: Judgement, candidates: list[Candidate], threshold: float) -> Judgement:
-    """Make the answer mode agree with the documents the judge accepted."""
+    """Make the answer mode and the search decision agree with what the judge accepted."""
     if j.answer_mode in DOC_MODES and not j.relevant:
         # "answer from documents" without naming any: take the best ones it did not reject
-        fb = fallback_judgement(candidates, threshold, exclude=j.rejected)
-        if fb.docs:
-            j.docs = [*j.docs, *fb.docs]
-            j.answer_mode = "partial"
-        else:
-            j.answer_mode = "no_data"
+        fb = fallback_judgement(candidates, threshold, exclude=j.other_entity)
+        j.relevant = fb.relevant
+        j.answer_mode = "partial" if fb.relevant else "no_data"
     elif j.answer_mode == "no_data" and j.relevant:
         j.answer_mode = "partial"  # some accepted evidence: answer what it covers, say what is missing
     if j.verdict == "sufficient" and j.answer_mode in ("no_data", "partial"):
         j.verdict = "partial" if j.relevant else "insufficient"
+    if j.verdict == "sufficient" or not j.queries:
+        j.search_more = False
+    if not j.search_more:
+        j.queries = []
     return j
 
 
@@ -256,6 +273,7 @@ async def judge(
     fallback_threshold: float = 0.5,
     tried: Sequence[str] = (),
 ) -> Judgement:
+    """Never raises: timeouts, transport errors and broken JSON give the fallback judgement."""
     messages = build_judge_messages(
         question=question, standalone=standalone, needs=needs, dialogue_hint=dialogue_hint,
         candidates=candidates, today=today, tried=list(tried),
@@ -277,7 +295,7 @@ async def judge(
             ),
             timeout_s,
         )
-        return parse_judgement(raw, candidates, needs, fallback_threshold)
     except Exception as exc:  # any failure degrades to the cross-encoder ranking
-        logger.warning("evidence judge failed, falling back to reranker scores: %r", exc)
+        logger.warning("evidence judge failed, falling back to the top reranker documents: %r", exc)
         return fallback_judgement(candidates, fallback_threshold)
+    return parse_judgement(str(raw or ""), candidates, fallback_threshold)

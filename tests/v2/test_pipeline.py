@@ -118,18 +118,21 @@ class FakeSearch:
 _SHOWN_RE = re.compile(r"^\[(\d+)\] (.+?) · ", re.M)
 
 
-def judgement(relevant=None, *, stale=(), rejected=(), namesake=(), verdict="sufficient", mode="documents",
-              queries=(), missing="", clarify=""):
-    """A scripted judge reply by chunk id; relevant=None accepts every shown candidate."""
-    return {"relevant": relevant, "stale": list(stale), "rejected": list(rejected), "namesake": list(namesake),
-            "verdict": verdict, "mode": mode, "queries": list(queries), "missing": missing, "clarify": clarify}
+def judgement(relevant=None, *, stale=(), other=(), verdict="sufficient", mode="documents", queries=(),
+              search_more=None, missing="", clarify=""):
+    """A scripted judge reply by chunk id; relevant=None accepts every shown candidate;
+    search_more defaults to "there are queries"."""
+    return {"relevant": relevant, "stale": list(stale), "other": list(other), "verdict": verdict, "mode": mode,
+            "queries": list(queries), "search_more": bool(queries) if search_more is None else search_more,
+            "missing": missing, "clarify": clarify}
 
 
 class FakeLLM:
-    def __init__(self, analysis, answer="Здравствуйте! Чем помочь?", judgements=()):
+    def __init__(self, analysis, answer="Здравствуйте! Чем помочь?", judgements=(), judge_delay=0.0):
         self.analysis = analysis
         self.answer = answer
         self.judgements = list(judgements)
+        self.judge_delay = judge_delay
         self.judged: list[list[str]] = []  # chunk ids shown to the judge, per call
         self.calls: list[dict] = []
 
@@ -142,14 +145,13 @@ class FakeLLM:
         if isinstance(spec, str):
             return spec  # a broken reply
         rel = list(shown) if spec["relevant"] is None else spec["relevant"]
-        docs = [{"i": shown[c], "same_entity": True, "relevant": True, "stale": c in spec["stale"], "need": 1}
-                for c in rel if c in shown]
-        docs += [{"i": shown[c], "same_entity": True, "relevant": False, "stale": False, "need": None}
-                 for c in spec["rejected"] if c in shown]
-        docs += [{"i": shown[c], "same_entity": False, "relevant": True, "stale": False, "need": None}
-                 for c in spec["namesake"] if c in shown]
-        return json.dumps({"docs": docs, "verdict": spec["verdict"], "missing": spec["missing"],
-                           "queries": spec["queries"], "answer_mode": spec["mode"],
+
+        def nums(cids):
+            return [shown[c] for c in cids if c in shown]
+
+        return json.dumps({"relevant": nums(rel), "stale": nums(spec["stale"]), "other_entity": nums(spec["other"]),
+                           "verdict": spec["verdict"], "answer_mode": spec["mode"], "missing": spec["missing"],
+                           "search_more": spec["search_more"], "queries": spec["queries"],
                            "clarify_question": spec["clarify"]}, ensure_ascii=False)
 
     async def chat_completion_text(self, *, runtime, messages, stage="unknown", **kw):
@@ -158,6 +160,8 @@ class FakeLLM:
         if name == "turn_analysis":
             return json.dumps(self.analysis, ensure_ascii=False)
         if name == "evidence_judgement":
+            if self.judge_delay:
+                await asyncio.sleep(self.judge_delay)
             return self._judge(messages)
         if name == "source_check":
             return json.dumps({"keep": [0, 1, 2, 3, 4]})
@@ -253,8 +257,9 @@ async def test_sufficient_first_round_is_single_round():
     assert pipe.search.calls == [(round1, [q, q, q])]  # ranked by the standalone question only
     assert llm.kinds().count("evidence_judgement") == 1
     judge_call = next(c for c in llm.calls if c["kind"] == "evidence_judgement")
-    assert judge_call["stage"] == "rerank" and judge_call["temperature"] == 0 and judge_call["timeout"] == 30
-    assert "1. размер стипендии\n2. общежития НГУ" in judge_call["messages"][-1]["content"]
+    assert judge_call["stage"] == "rerank" and judge_call["temperature"] == 0
+    assert judge_call["timeout"] == pipe.settings.v2_judge_timeout_s == 15 and judge_call["max_tokens"] == 220
+    assert "Нужно узнать: 1) размер стипендии; 2) общежития НГУ" in judge_call["messages"][-1]["content"]
     assert ids(out.context_chunks) == ["stip", "dorm"] and out.answer_mode == "documents"
     assert {r for _, _, r in stages(events) if r is not None} == {1}
     rerank = [e for e in events if e.stage == StageName.RERANK and e.status == StageStatus.COMPLETED]
@@ -286,8 +291,7 @@ async def test_person_question_drifted_reformulation_cannot_take_over():
         analysis(standalone=q, focus="Пальчунов"),
         answer=f"{PALCH} {PALCH_REV}",
         judgements=[
-            judgement(["palch"], rejected=["rank"], verdict="partial", mode="partial",
-                      missing="отзывы студентов", queries=[drift]),
+            judgement(["palch"], verdict="partial", mode="partial", missing="отзывы студентов", queries=[drift]),
             judgement(["palch", "palch_rev"]),
         ],
     )
@@ -299,8 +303,8 @@ async def test_person_question_drifted_reformulation_cannot_take_over():
     assert llm.judged[0] == ["palch", "rank"]
     assert llm.judged[1] == ["palch", "palch_rev"]  # accepted card kept, rejected news not shown again
     judge_prompts = [c["messages"][-1]["content"] for c in llm.calls if c["kind"] == "evidence_judgement"]
-    assert "Фокус диалога: Пальчунов" in judge_prompts[0] and "Прежние запросы" not in judge_prompts[0]
-    assert f"Прежние запросы:\n- {drift}" in judge_prompts[1]
+    assert "Фокус диалога: Пальчунов" in judge_prompts[0] and "Уже искали" not in judge_prompts[0]
+    assert f"Уже искали: {drift}" in judge_prompts[1]
     assert (StageName.RETRIEVAL, StageStatus.COMPLETED, 2) in stages(events)
     assert (StageName.RERANK, StageStatus.COMPLETED, 2) in stages(events)
     assert set(ids(out.context_chunks)) == {"palch", "palch_rev"} and RANK not in out.context
@@ -309,7 +313,8 @@ async def test_person_question_drifted_reformulation_cannot_take_over():
     assert "Пальчунов Дмитрий Евгеньевич · сотрудник" in out.context  # clean title
     rank = next(c for c in out.trace["rerank"]["candidates"] if c["chunk_id"] == "rank")
     assert rank["score"] == 0.35 and not rank["kept"]
-    assert out.trace["v2"]["judgements"][0]["rejected"] == ["rank"]
+    assert out.trace["v2"]["judgements"][0]["relevant"] == ["palch"]
+    assert out.trace["v2"]["judgements"][0]["search_more"] is True
     system = out.qa_messages[0]["content"]
     assert system.endswith(NO_GREETING)  # mid-dialogue: no greeting
     answer = await stream(pipe, out)
@@ -322,7 +327,7 @@ async def test_person_question_drifted_reformulation_cannot_take_over():
 async def test_namesake_documents_mean_no_data_not_general_knowledge():
     q = "Что вы знаете про Анастасию Забродину?"
     llm = FakeLLM(analysis("general", q),
-                  judgements=[judgement([], namesake=["zab"], verdict="insufficient", mode="documents")])
+                  judgements=[judgement([], other=["zab"], verdict="insufficient", mode="documents")])
     pipe = make(llm, {q: [("zab", 0.85)]})
     out, _ = await prepare(pipe, q)
     assert pipe.search.calls and llm.kinds().count("evidence_judgement") == 1  # general route is searched too
@@ -395,6 +400,54 @@ async def test_judge_failure_falls_back_to_reranker_scores():
     assert out.refusal and await stream(pipe, out) == NO_KB_REFUSAL
 
 
+async def test_search_more_false_means_no_second_round():
+    q = "Что говорят про Пальчунова? Хороший ли он преподаватель?"
+    llm = FakeLLM(analysis(standalone=q), answer=PALCH, judgements=[
+        judgement(["palch"], verdict="partial", mode="partial", missing="отзывов студентов нет",
+                  queries=["отзывы студентов о Пальчунове"], search_more=False)])
+    pipe = make(llm, {q: [("palch", 0.78)], "отзывы студентов о Пальчунове": [("palch_rev", 0.9)]})
+    out, events = await prepare(pipe, q)
+    assert len(pipe.search.calls) == 1 and llm.kinds().count("evidence_judgement") == 1
+    assert ids(out.context_chunks) == ["palch"] and out.answer_mode == "partial" and not out.refusal
+    assert "Чего нет в документах: отзывов студентов нет" in out.qa_messages[0]["content"]
+    rerank = next(e for e in events if e.stage == StageName.RERANK and e.status == StageStatus.COMPLETED)
+    assert rerank.detail["search_more"] is False and rerank.detail["queries"] == []
+
+
+async def test_judge_timeout_still_answers_from_top_reranker_documents():
+    q = "Кто декан ММФ НГУ?"
+    llm = FakeLLM(analysis(standalone=q), answer=DEAN_NEW, judge_delay=0.5)
+    pipe = make(llm, {q: [("dean_new", 0.8), ("dean_old", 0.6), ("fit", 0.3)]}, v2_judge_timeout_s=0.05)
+    out, events = await prepare(pipe, q)
+    assert set(ids(out.context_chunks)) == {"dean_new", "dean_old"}  # >= 0.5, the rest dropped
+    assert out.answer_mode == "documents" and not out.refusal
+    rerank = next(e for e in events if e.stage == StageName.RERANK and e.status == StageStatus.COMPLETED)
+    assert rerank.detail["fallback"] is True and len(pipe.search.calls) == 1
+    assert await stream(pipe, out) == DEAN_NEW + " "  # generated, not refused
+    assert "stream" in llm.kinds()
+
+
+async def test_truncated_judge_reply_falls_back_and_answers():
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM(analysis(standalone=q), judgements=['{"relevant":[1],"stale":[],"other_entity":[],"verd'])
+    pipe = make(llm, {q: [("stip", 0.9), ("dorm", 0.2)]})
+    out, _ = await prepare(pipe, q)
+    assert ids(out.context_chunks) == ["stip"] and out.answer_mode == "documents" and not out.refusal
+
+
+async def test_budget_stops_further_rounds():
+    q = "Стипендия и общежитие ФИТ"
+    plan = [judgement(["stip"], verdict="partial", mode="partial", queries=["общежития ФИТ"])] * 3
+    table = {q: [("stip", 0.8)], "общежития ФИТ": [("dorm", 0.7)]}
+    pipe = make(FakeLLM(analysis(standalone=q), judgements=plan, judge_delay=0.06), table, v2_judge_budget_s=0.1)
+    out, _ = await prepare(pipe, q, trace=True)
+    assert len(pipe.search.calls) == 1 and out.trace["v2"]["rounds"] == 1  # round 2 would not fit the budget
+    assert ids(out.context_chunks) == ["stip"] and out.answer_mode == "partial"
+    pipe = make(FakeLLM(analysis(standalone=q), judgements=plan, judge_delay=0.06), table, v2_judge_budget_s=5)
+    await prepare(pipe, q)
+    assert len(pipe.search.calls) == 2  # enough budget: the second round runs
+
+
 async def test_failed_later_round_keeps_the_previous_judgement():
     q = "Какой размер стипендии в НГУ?"
     llm = FakeLLM(analysis(standalone=q), judgements=[
@@ -436,7 +489,7 @@ async def test_loop_stops_at_max_rounds():
 async def test_general_knowledge_without_documents_appends_note():
     q = "Что такое производная?"
     llm = FakeLLM(analysis("general", q), answer="Производная — это скорость изменения функции.",
-                  judgements=[judgement([], rejected=["fit"], verdict="insufficient", mode="general_knowledge")] * 2)
+                  judgements=[judgement([], verdict="insufficient", mode="general_knowledge")] * 2)
     pipe = make(llm, {q: [("fit", 0.05)]})
     out, _ = await prepare(pipe, q)
     assert out.general_note and not out.refusal and out.context_chunks == [] and out.answer_mode == "general_knowledge"
@@ -449,7 +502,7 @@ async def test_general_knowledge_without_documents_appends_note():
 
 async def test_trace_is_readable_by_benchmark_runner():
     q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q), judgements=[judgement(["stip", "dorm"], rejected=["fit"])])
+    llm = FakeLLM(analysis(standalone=q), judgements=[judgement(["stip", "dorm"])])
     pipe = make(llm, {q: [("stip", 0.9), ("dorm", 0.5), ("fit", 0.1)]})
     out, _ = await prepare(pipe, q, trace=True)
     t = out.trace
@@ -465,7 +518,7 @@ async def test_trace_is_readable_by_benchmark_runner():
                        "timings_ms", "sources_debug"}
     assert v2["route"] == "nsu" and v2["rounds"] == 1 and v2["standalone_question"] == q
     assert v2["needs"] == [q] and v2["answer_mode"] == "documents"
-    assert v2["judgements"][0]["relevant"] == ["stip", "dorm"] and v2["judgements"][0]["rejected"] == ["fit"]
+    assert v2["judgements"][0]["relevant"] == ["stip", "dorm"] and v2["judgements"][0]["other_entity"] == []
     assert {"query_rewrite", "retrieval", "rerank", "context_assembly"} <= set(v2["timings_ms"])
     answer = await stream(pipe, out)
     await pipe.finalize_sources(out, STIP)
@@ -520,7 +573,7 @@ async def test_schedule_block_is_judged_and_becomes_context_and_source():
     q = "Какое расписание у группы 26201 в понедельник?"
     answer = f"{BLOCK.text[:40]} — первая пара."
     sched = FakeSchedule([BLOCK])
-    llm = FakeLLM(analysis(standalone=q), answer=answer, judgements=[judgement(["schedule"], rejected=["fit"])])
+    llm = FakeLLM(analysis(standalone=q), answer=answer, judgements=[judgement(["schedule"])])
     pipe = make(llm, {q: [("fit", 0.2), ("dorm", 0.1)]}, schedule=sched)
     out, _ = await prepare(pipe, "а в понедельник?", trace=True)
     assert sched.calls == [(q, TODAY)]

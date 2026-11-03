@@ -38,8 +38,8 @@ logger = structlog.get_logger(__name__)
 
 TZ = ZoneInfo("Asia/Novosibirsk")
 ANALYSIS_TIMEOUT_S = 20
-JUDGE_TIMEOUT_S = 30
-MAX_NEW_QUERIES = 3
+MIN_JUDGE_TIMEOUT_S = 1.0  # the first round always gets a judge call, even when search ate the budget
+MAX_NEW_QUERIES = 2
 MIN_NEW_CANDIDATES = 6  # slots for unseen documents in every round after the first
 TRACE_CANDIDATES = 50
 SCHEDULE_DOC_TYPE = "schedule_or_calendar"
@@ -263,12 +263,15 @@ class V2Pipeline:
         return outcome
 
     async def _evidence_rounds(self, an: TurnAnalysis, question: str, today: date, runtime: PipelineRuntime, emit):
-        """Search -> judge, repeated while the judge asks for more and offers new queries.
+        """Search -> judge, repeated only while the judge says searching again can help (search_more),
+        offers new queries and another round still fits V2_JUDGE_BUDGET_S.
 
         Every candidate is scored by the cross-encoder against the standalone question only: queries from
         the analysis or the judge add recall but never decide the ranking.
         """
         s = self.settings
+        started = time.perf_counter()
+        slowest = 0.0  # the longest search + judge round so far, seconds
         standalone = an.standalone_question
         loop = _Evidence()
         schedule_cands: list[Candidate] = []
@@ -285,6 +288,10 @@ class V2Pipeline:
         round_queries = _dedup([standalone, *an.needs])
         first = len(round_queries)  # the question and the needs are already in the judge prompt
         while round_queries:
+            elapsed = time.perf_counter() - started
+            if loop.rounds and elapsed + slowest > s.v2_judge_budget_s:
+                logger.info("v2_judge_budget_stop", rounds=loop.rounds, elapsed_s=round(elapsed, 2))
+                break
             loop.rounds += 1
             rnd = loop.rounds
             loop.queries += round_queries
@@ -306,6 +313,8 @@ class V2Pipeline:
                 break  # nothing new to judge: keep the previous judgement
             await emit(StageName.RERANK, StageStatus.STARTED, None, {"round": rnd})
             t1 = time.perf_counter()
+            remaining = s.v2_judge_budget_s - (t1 - started)
+            timeout = min(s.v2_judge_timeout_s, max(remaining, MIN_JUDGE_TIMEOUT_S))
             j = await judge(
                 self.llm_router,
                 runtime.generation,
@@ -315,8 +324,8 @@ class V2Pipeline:
                 dialogue_hint=hint,
                 candidates=cands,
                 today=today,
-                timeout_s=JUDGE_TIMEOUT_S,
-                fallback_threshold=s.v2_rerank_threshold,
+                timeout_s=timeout,
+                fallback_threshold=s.v2_judge_fallback_score,
                 tried=loop.queries[first:],
             )
             await emit(
@@ -324,15 +333,19 @@ class V2Pipeline:
                 StageStatus.COMPLETED,
                 _ms(t1),
                 {"round": rnd, "candidates": len(cands), "relevant": len(j.relevant), "stale": len(j.stale),
-                 "verdict": j.verdict, "answer_mode": j.answer_mode, "queries": j.queries, "fallback": j.fallback},
+                 "verdict": j.verdict, "answer_mode": j.answer_mode, "search_more": j.search_more,
+                 "queries": j.queries, "fallback": j.fallback},
             )
+            slowest = max(slowest, time.perf_counter() - t0)
             loop.log.append(_judgement_log(rnd, j, cands))
+            if j.fallback:
+                logger.warning("v2_judge_fallback", round=rnd, relevant=len(j.relevant), answer_mode=j.answer_mode)
             if j.fallback and loop.judgement is not None and not loop.judgement.fallback:
                 break  # a failed later round must not throw away a real judgement
             loop.judgement, loop.shown = j, cands
             relevant = [cands[i] for i in j.relevant]
             judged |= {c.pos for c in cands}
-            if j.verdict == "sufficient" or loop.rounds >= s.v2_max_rounds:
+            if j.verdict == "sufficient" or not j.search_more or loop.rounds >= s.v2_max_rounds:
                 break
             tried = {q.casefold() for q in loop.queries}
             round_queries = [q for q in j.queries if q.casefold() not in tried][:MAX_NEW_QUERIES]
@@ -580,12 +593,13 @@ def _judgement_log(rnd: int, j: Judgement, cands: list[Candidate]) -> dict:
         "verdict": j.verdict,
         "answer_mode": j.answer_mode,
         "missing": j.missing,
+        "search_more": j.search_more,
         "queries": list(j.queries),
         "clarify_question": j.clarify_question,
         "fallback": j.fallback,
         "candidates": ids,
         "relevant": [ids[i] for i in j.relevant],
         "stale": [ids[i] for i in sorted(j.stale)],
-        "rejected": [ids[i] for i in sorted(j.rejected)],
+        "other_entity": [ids[i] for i in sorted(j.other_entity)],
     }
 

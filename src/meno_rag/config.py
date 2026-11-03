@@ -245,10 +245,16 @@ class Settings(BaseSettings):
     v2_embed_dtype: str = Field(default="bf16", validation_alias="V2_EMBED_DTYPE")
     # Extra LLM check of the answer's sources.
     v2_sources_llm_check: bool = Field(default=False, validation_alias="V2_SOURCES_LLM_CHECK")
-    # Cross-encoder score a chunk needs when the evidence judge fails (fallback only).
+    # Not used by the v2 answer pipeline since the evidence judge (kept so older .env files still load).
     v2_rerank_threshold: float = Field(default=0.5, validation_alias="V2_RERANK_THRESHOLD")
     # Candidates (best cross-encoder score vs the standalone question) shown to the evidence judge.
     v2_judge_candidates: int = Field(default=14, validation_alias="V2_JUDGE_CANDIDATES")
+    # Timeout of one evidence-judge call, seconds.
+    v2_judge_timeout_s: float = Field(default=15.0, validation_alias="V2_JUDGE_TIMEOUT_S")
+    # Wall-clock budget of all search + judge rounds of one question, seconds.
+    v2_judge_budget_s: float = Field(default=20.0, validation_alias="V2_JUDGE_BUDGET_S")
+    # Cross-encoder score a candidate needs to be used when the judge fails (timeout, broken JSON).
+    v2_judge_fallback_score: float = Field(default=0.5, validation_alias="V2_JUDGE_FALLBACK_SCORE")
     # Score above which a chunk is attributed as a source of the answer.
     v2_attribution_threshold: float = Field(default=0.5, validation_alias="V2_ATTRIBUTION_THRESHOLD")
     # Token budget for dialog history in the prompt.
