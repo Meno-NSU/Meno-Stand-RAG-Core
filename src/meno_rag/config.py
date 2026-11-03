@@ -233,12 +233,18 @@ class Settings(BaseSettings):
     v2_qdrant_url: str = Field(default="http://127.0.0.1:6433", validation_alias="V2_QDRANT_URL")
     # Collection or alias (normally an alias such as nsu_kb_current).
     v2_qdrant_collection: str = Field(default="nsu_kb_current", validation_alias="V2_QDRANT_COLLECTION")
+    # BM25 backend: "bm25s" (the release's prebuilt index, in process memory) or "qdrant" (the collection's
+    # "bm25" sparse vector; needs V2_VECTOR_BACKEND=qdrant and a collection loaded with --kb).
+    v2_lexical_backend: str = Field(default="bm25s", validation_alias="V2_LEXICAL_BACKEND")
     # Cross-encoder reranker name.
     v2_reranker: str = Field(default="bge", validation_alias="V2_RERANKER")
     # Local path of the reranker weights.
     v2_reranker_path: str = Field(default="", validation_alias="V2_RERANKER_PATH")
     # Torch device for v2 models.
     v2_device: str = Field(default="cuda", validation_alias="V2_DEVICE")
+    # Device of the query embedder when it should differ from V2_DEVICE (e.g. "cpu" to leave the GPU to a bigger
+    # reranker); empty = V2_DEVICE. Only with V2_VECTOR_BACKEND=qdrant (the matrix backend keeps vectors on V2_DEVICE).
+    v2_embed_device: str = Field(default="", validation_alias="V2_EMBED_DEVICE")
     # Fraction of GPU memory v2 may use.
     v2_gpu_mem_fraction: float = Field(default=0.3, validation_alias="V2_GPU_MEM_FRACTION")
     # Embedder weights dtype on CUDA: bf16 or fp16.
@@ -247,6 +253,12 @@ class Settings(BaseSettings):
     v2_sources_llm_check: bool = Field(default=False, validation_alias="V2_SOURCES_LLM_CHECK")
     # Cross-encoder score above which a chunk counts as relevant.
     v2_rerank_threshold: float = Field(default=0.3, validation_alias="V2_RERANK_THRESHOLD")
+    # Best BM25 hits of the standalone question added to the first round's candidates even when the fusion ranked
+    # them low (names in lists, abbreviations); 0 = off (the original v2 candidate set).
+    v2_lexical_slots: int = Field(default=0, validation_alias="V2_LEXICAL_SLOTS")
+    # A lexical-slot candidate is evidence below V2_RERANK_THRESHOLD when it contains the rarest question stem
+    # (or its indexed inflection forms) occurring in at most this many chunks; 0 = off. Needs the bm25s backend.
+    v2_rare_term_max_df: int = Field(default=1000, validation_alias="V2_RARE_TERM_MAX_DF")
     # Score above which a chunk is attributed as a source of the answer.
     v2_attribution_threshold: float = Field(default=0.5, validation_alias="V2_ATTRIBUTION_THRESHOLD")
     # Token budget for dialog history in the prompt.
