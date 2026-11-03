@@ -73,6 +73,15 @@ REFORMULATE_SYSTEM = (
 _WORD_RE = re.compile(r"[^\W_]+")
 
 
+# question words that never name the topic; formal KB text rarely contains them, so they would pass as rare
+CONVERSATIONAL_WORDS = (
+    "знаешь", "знаете", "расскажи", "расскажите", "подскажи", "подскажите", "скажи", "скажите", "объясни",
+    "хочу", "хотел", "хотела", "интересно", "можно", "нужно", "какой", "какая", "какое", "какие", "который",
+    "такой", "такая", "такое", "говорят", "посоветуй", "посоветуйте", "пожалуйста", "спасибо", "привет",
+    "здравствуйте", "ты", "вы", "тебе", "вам", "мне", "меня", "что", "кто", "про",
+)
+
+
 def _today() -> date:
     return datetime.now(TZ).date()
 
@@ -319,9 +328,8 @@ class V2Pipeline:
                 # the question's best BM25 hits, scored even when the fusion dropped them; the rare term's
                 # indexed inflection forms join its BM25 query («Солихова» also searches «солих»)
                 kw = {"lexical_top": s.v2_lexical_slots, "lexical_for": 1}
-                extra = tuple(f for f in forms if f != rare)
-                if extra:
-                    kw["lexical_extra"] = extra
+                if forms:  # slots from the rare term alone: the question's other words would outweigh it
+                    kw["lexical_tokens"] = tuple(forms)
             result = await self.search.search(round_queries, round_queries, **kw)
             if kw and rare:
                 forced = [c for c in getattr(result, "lexical_top", [])
@@ -370,10 +378,13 @@ class V2Pipeline:
         limit = self.settings.v2_rare_term_max_df
         if limit <= 0 or not all(hasattr(bm25, a) for a in ("doc_freq", "tokens", "variants")):
             return "", []
+        stop = {st for w in CONVERSATIONAL_WORDS for st in bm25.tokens(w)}
         best, best_forms, best_df = "", [], limit + 1
         for t in dict.fromkeys(bm25.tokens(text)):
+            if t in stop:
+                continue  # «знаешь», «расскажи»: rare in formal KB text, says nothing about the topic
             forms = bm25.variants(t) if len(t) >= 5 else ([t] if bm25.doc_freq(t) else [])
-            df = sum(bm25.doc_freq(f) or 0 for f in forms)
+            df = (bm25.doc_freq(forms[0]) or 0) if forms else 0  # the most specific form decides the rarity
             if forms and 0 < df < best_df:
                 best, best_forms, best_df = t, forms, df
         return best, best_forms

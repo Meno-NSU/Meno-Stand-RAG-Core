@@ -20,8 +20,9 @@ class FakeRetriever:
     def __init__(self, table):
         self.table = table
 
-    def search(self, query, k):
-        return self.table.get(query, [])[:k]
+    def search(self, query, k, extra=()):
+        key = query if not extra else (" ".join(extra) if not query else f"{query} +{' '.join(extra)}")
+        return self.table.get(key, [])[:k]
 
 
 class FakeReranker:
@@ -164,3 +165,13 @@ async def test_lexical_top_for_several_queries_round_robin():
     svc = _service(dense, bm25, FakeReranker({}), V2_RERANK_TOP=1)
     res = await svc.search(["q", "q2"], ["q", "q"], lexical_top=3, lexical_for=2)
     assert [c.pos for c in res.lexical_top] == [7, 9, 2, 4]  # rank 1 of each query first, no duplicates
+
+
+async def test_lexical_tokens_take_the_slots_from_a_search_of_those_tokens_alone():
+    dense = {"q": [(1, .9)]}
+    bm25 = {"q": [(2, 5.0)], "солихов солих": [(7, 3.0), (8, 1.0)]}
+    rr = FakeReranker({("q", "idx7"): 0.02, ("q", "idx8"): 0.01, ("q", "idx1"): 0.8, ("q", "idx2"): 0.6})
+    svc = _service(dense, bm25, rr)
+    res = await svc.search(["q"], ["q"], lexical_top=2, lexical_tokens=("солихов", "солих"))
+    assert [c.pos for c in res.lexical_top] == [7, 8]  # the name's own BM25 hits, not the question's
+    assert {7, 8} <= {c.pos for c in res.candidates}

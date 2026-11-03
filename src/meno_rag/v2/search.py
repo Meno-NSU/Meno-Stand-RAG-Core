@@ -54,17 +54,20 @@ class SearchService:
 
     async def search(
         self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1,
-        lexical_extra: tuple[str, ...] = (),
+        lexical_extra: tuple[str, ...] = (), lexical_tokens: tuple[str, ...] = (),
     ) -> SearchResult:
         """lexical_top > 0 also returns the top BM25 hits of the first lexical_for queries, scored even when
-        RRF dropped them. lexical_extra: index tokens added to the first query's BM25 search."""
+        RRF dropped them. lexical_extra: index tokens added to the first query's BM25 search.
+        lexical_tokens: the slots come instead from a BM25 search of these index tokens alone (e.g. a rare
+        name and its inflection forms, which the question's other words would outweigh)."""
         return await self.run_gpu(
-            self._search_sync, list(queries), list(rerank_queries), lexical_top, lexical_for, tuple(lexical_extra)
+            self._search_sync, list(queries), list(rerank_queries), lexical_top, lexical_for, tuple(lexical_extra),
+            tuple(lexical_tokens),
         )
 
     def _search_sync(
         self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1,
-        lexical_extra: tuple[str, ...] = (),
+        lexical_extra: tuple[str, ...] = (), lexical_tokens: tuple[str, ...] = (),
     ) -> SearchResult:
         s = self.settings
         t = {"embed_dense": 0.0, "bm25": 0.0, "rrf": 0.0, "rerank": 0.0}
@@ -89,7 +92,11 @@ class SearchService:
             fused = timed("rrf", lambda: rrf([dense_hits, bm25_hits], limit=s.v2_rerank_top))
             kept = [p for p, _ in fused[: s.v2_rerank_top]]
             if lexical_top > 0 and len(per_query) < lexical_for:
-                top = [p for p, _ in bm25_hits[:lexical_top]]
+                if lexical_tokens:
+                    hits = timed("bm25", lambda: self.bm25.search("", lexical_top, lexical_tokens))
+                    top = [p for p, _ in hits[:lexical_top]]
+                else:
+                    top = [p for p, _ in bm25_hits[:lexical_top]]
                 lexical_lists.append(top)
                 have = set(kept)
                 kept += [p for p in top if p not in have]  # rare exact terms the fusion ranked low

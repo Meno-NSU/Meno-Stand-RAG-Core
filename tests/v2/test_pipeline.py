@@ -92,7 +92,8 @@ class FakeSearch:
             for cid, sc in self.table.get(q, []):
                 best[cid] = max(best.get(cid, sc), sc)
                 coverage[q] = max(coverage[q], sc)
-        lex = self.lexical.get(queries[0], [])[: kw.get("lexical_top", 0)] if queries else []
+        key = " ".join(kw["lexical_tokens"]) if kw.get("lexical_tokens") else (queries[0] if queries else "")
+        lex = self.lexical.get(key, [])[: kw.get("lexical_top", 0)]
         for cid, sc in lex:
             best[cid] = max(best.get(cid, sc), sc)
         cands = [Candidate(POS[c], CHUNKS[c], s) for c, s in sorted(best.items(), key=lambda p: -p[1])]
@@ -487,7 +488,7 @@ Q_PERSON = "Что ты знаешь про Руслана Солихова?"
 def _person_pipe(df, **settings):
     llm = FakeLLM(analysis(standalone=Q_PERSON), answer=STAFF)
     pipe = make(llm, {Q_PERSON: [("stip", 0.1), ("dorm", 0.1)]}, **settings)
-    pipe.search.lexical = {Q_PERSON: [("staff", 0.02), ("dorm", 0.1)]}
+    pipe.search.lexical = {"солихов": [("staff", 0.02)], Q_PERSON: [("dorm", 0.1)]}
     pipe.search.bm25 = FakeBm25(df)
     return pipe
 
@@ -503,7 +504,7 @@ async def test_rare_term_match_is_evidence_below_the_threshold():
     pipe = _person_pipe({"солихов": 3}, V2_LEXICAL_SLOTS=4)
     out, events = await prepare(pipe, Q_PERSON)
     first = pipe.search.kwargs[0]
-    assert first["lexical_top"] == 4 and first["lexical_extra"] == ("солихов",)  # the indexed form
+    assert first["lexical_top"] == 4 and first["lexical_tokens"] == ("солихов",)  # the indexed form alone
     assert [c.chunk.chunk_id for c in out.context_chunks] == ["staff"] and not out.refusal
     ctx = [e.detail for e in events if e.stage == StageName.CONTEXT_ASSEMBLY and e.detail][0]
     assert ctx["rare_term_chunks"] == 1
@@ -541,3 +542,11 @@ async def test_general_question_about_a_kb_named_entity_is_answered_from_documen
 async def test_general_question_without_a_rare_term_keeps_the_general_rules():
     out, nsu_block, general_block = await _general_person({})
     assert general_block and not nsu_block
+
+
+async def test_conversational_words_are_never_the_rare_term():
+    pipe = _person_pipe({"знаешь": 3, "солихов": 40}, V2_LEXICAL_SLOTS=4)
+    assert pipe._rarest_term("Что ты знаешь про Руслана Солихова?")[0] == "солихова"
+    pipe = _person_pipe({"солихов": 40, "солих": 2}, V2_LEXICAL_SLOTS=4)  # shorter form's df does not decide
+    rare, forms = pipe._rarest_term("Солихова")
+    assert rare == "солихова" and forms == ["солихов", "солих"]
