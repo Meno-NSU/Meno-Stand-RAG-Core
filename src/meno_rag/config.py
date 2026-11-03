@@ -213,6 +213,13 @@ class Settings(BaseSettings):
     legacy_enabled: bool = Field(default=True, validation_alias="LEGACY_ENABLED")
     # Serve the v2 pipeline (nsu-kb-2026-11).
     v2_enabled: bool = Field(default=False, validation_alias="V2_ENABLED")
+    # Model entries offering the v2 pipeline: "base_id=display name;...".
+    v2_model_aliases: str = Field(
+        default="meno-lite=Менон 1.1 (meno-lite);gemma-4-12B-it=Менон 1.1 (Gemma 4)",
+        validation_alias="V2_MODEL_ALIASES",
+    )
+    # Where v2 is offered in the UI: models | kb | both.
+    v2_expose_as: str = Field(default="models", validation_alias="V2_EXPOSE_AS")
     # Directory of the v2 chunk release.
     v2_kb_dir: str = Field(default="kb/chunks/v1", validation_alias="V2_KB_DIR")
     # Dense embedder: frida or qwen3.

@@ -143,8 +143,9 @@ def _events(r):
     return out
 
 
-def test_kb_list_per_flags(make_client):
+def test_kb_list_per_flags(make_client, monkeypatch):
     c, _ = make_client()
+    monkeypatch.setattr(c.app.state.settings, "v2_expose_as", "both")
     body = c.get("/v1/knowledge-bases").json()
     assert [(k["id"], k["name"], k["available"]) for k in body["data"]] == [
         (LEGACY_KB_ID, "База НГУ (июль 2026) · прежний поиск", True),

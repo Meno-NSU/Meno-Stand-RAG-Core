@@ -54,7 +54,14 @@ from meno_rag.llm.router import LLMRouter
 from meno_rag.llm.status import InMemoryModelStatusStore, ModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest
-from meno_rag.api.knowledge_bases import LEGACY_KB_ID, V2_KB_ID, default_kb_id, knowledge_bases
+from meno_rag.api.knowledge_bases import (
+    LEGACY_KB_ID,
+    V2_KB_ID,
+    default_kb_id,
+    knowledge_bases,
+    split_virtual_model,
+    virtual_model_entries,
+)
 from meno_rag.stand.pipeline import PipelineRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
 from meno_rag.stand.search import vectorize_search_query
@@ -574,6 +581,9 @@ async def list_models(request: Request):
             }
         ]
 
+    if getattr(request.app.state, "v2_pipeline", None) is not None:
+        merged.extend(virtual_model_entries(settings, merged))
+
     current_user = await auth.resolve_optional_user(request)
     if settings.auth_enabled and current_user is None:
         for entry in merged:
@@ -701,7 +711,10 @@ def _select_pipeline(app: FastAPI, kb_id: str | None) -> tuple[Any, str]:
 async def list_knowledge_bases(request: Request):
     settings: Settings = request.app.state.settings
     pipelines = _pipelines(request.app.state)
-    kbs = knowledge_bases(settings)
+    kbs = [
+        kb for kb in knowledge_bases(settings)
+        if kb.id != V2_KB_ID or settings.v2_expose_as in ("kb", "both") or not settings.legacy_enabled
+    ]
     default_id = default_kb_id(settings)
     default_engine = next((kb.rag_engine_id for kb in kbs if kb.id == default_id), RAG_ENGINE_ID)
     return {
@@ -737,7 +750,9 @@ def _record_preflight_failure(code: str, *, bench: bool) -> None:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(payload: ChatCompletionRequest, request: Request, response: Response):
-    pipeline, kb_id = _select_pipeline(request.app, payload.knowledge_base_id)
+    base_model, virtual = split_virtual_model(payload.model)
+    # «Менон 1.1» model entries always run the v2 pipeline, whatever base the client sent.
+    pipeline, kb_id = _select_pipeline(request.app, V2_KB_ID if virtual else payload.knowledge_base_id)
     if pipeline is None and (kb_id or not any(p is not None for p in _pipelines(request.app.state).values())):
         return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
 
@@ -771,7 +786,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
     try:
         settings: Settings = request.app.state.settings
         try:
-            runtime = await _resolve_runtime(request.app, payload.model)
+            runtime = await _resolve_runtime(request.app, base_model if virtual else payload.model)
         except ValueError as exc:
             _record_preflight_failure("model_not_found", bench=bench)
             return _error_response(400, str(exc), "model_not_found", param="model")
@@ -878,6 +893,13 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             admission.release()
 
 
+def _public_model(payload: ChatCompletionRequest, runtime: PipelineRuntime) -> str:
+    """Model id shown to the client and stored: the virtual id for «Менон 1.1» entries."""
+    if payload.model and split_virtual_model(payload.model)[1]:
+        return payload.model
+    return runtime.generation.model_id
+
+
 async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> PipelineRuntime:
     settings: Settings = app.state.settings
     return await resolve_pipeline_runtime(
@@ -933,7 +955,7 @@ async def _non_stream_response(
                 database=database,
                 run_id=completion_id,
                 session_id=session_id,
-                model=runtime.generation.model_id,
+                model=_public_model(payload, runtime),
                 generation_model=runtime.generation.model_id,
                 core_model=runtime.core.model_id,
                 endpoint=runtime.generation.base_url,
@@ -1005,7 +1027,7 @@ async def _non_stream_response(
         "id": completion_id,
         "object": "chat.completion",
         "created": created_ts,
-        "model": runtime.generation.model_id,
+        "model": _public_model(payload, runtime),
         "choices": [
             {
                 "index": 0,
@@ -1087,7 +1109,7 @@ async def _stream_response(
             openai_chunk(
                 completion_id=completion_id,
                 created=created_ts,
-                model=runtime.generation.model_id,
+                model=_public_model(payload, runtime),
                 delta={"role": "assistant"},
             )
         )
@@ -1115,7 +1137,7 @@ async def _stream_response(
                 openai_chunk(
                     completion_id=completion_id,
                     created=created_ts,
-                    model=runtime.generation.model_id,
+                    model=_public_model(payload, runtime),
                     delta={"content": token},
                 )
             )
@@ -1136,7 +1158,7 @@ async def _stream_response(
         done_chunk = openai_chunk(
             completion_id=completion_id,
             created=created_ts,
-            model=runtime.generation.model_id,
+            model=_public_model(payload, runtime),
             delta={},
             finish_reason="stop",
         )
@@ -1172,7 +1194,7 @@ async def _stream_response(
                 database=database,
                 run_id=completion_id,
                 session_id=session_id,
-                model=runtime.generation.model_id,
+                model=_public_model(payload, runtime),
                 generation_model=runtime.generation.model_id,
                 core_model=runtime.core.model_id,
                 endpoint=runtime.generation.base_url,
@@ -1220,7 +1242,7 @@ async def _stream_response(
         err_chunk = openai_chunk(
             completion_id=completion_id,
             created=created_ts,
-            model=runtime.generation.model_id,
+            model=_public_model(payload, runtime),
             delta={},
             finish_reason="error",
         )
@@ -1470,7 +1492,7 @@ async def _persist_failure(
             session,
             run_id=run_id,
             session_id=session_id,
-            model=runtime.generation.model_id,
+            model=_public_model(payload, runtime),
             generation_model=runtime.generation.model_id,
             core_model=runtime.core.model_id,
             endpoint=runtime.generation.base_url,

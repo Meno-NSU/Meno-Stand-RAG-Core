@@ -47,3 +47,49 @@ def knowledge_bases(settings: Settings) -> list[KnowledgeBase]:
 def default_kb_id(settings: Settings) -> str:
     """The legacy base if enabled, else the v2 one."""
     return LEGACY_KB_ID if settings.legacy_enabled else V2_KB_ID
+
+
+V2_MODEL_SUFFIX = "@menon-1.1"
+
+
+def virtual_model_id(base_id: str) -> str:
+    return f"{base_id}{V2_MODEL_SUFFIX}"
+
+
+def split_virtual_model(model_id: str | None) -> tuple[str | None, bool]:
+    """``(base_id, True)`` for a «Менон 1.1» virtual id, else ``(model_id, False)``."""
+    if model_id and model_id.endswith(V2_MODEL_SUFFIX) and len(model_id) > len(V2_MODEL_SUFFIX):
+        return model_id[: -len(V2_MODEL_SUFFIX)], True
+    return model_id, False
+
+
+def parse_model_aliases(raw: str) -> list[tuple[str, str]]:
+    """``base_id=display name;...`` -> [(base_id, display name)]."""
+    out = []
+    for part in raw.split(";"):
+        base, sep, name = part.partition("=")
+        if sep and base.strip() and name.strip():
+            out.append((base.strip(), name.strip()))
+    return out
+
+
+def virtual_model_entries(settings: Settings, models: list[dict]) -> list[dict]:
+    """Copies of the base model entries, offered as the v2 pipeline («Менон 1.1»)."""
+    if not settings.v2_enabled or settings.v2_expose_as not in ("models", "both"):
+        return []
+    by_id = {m["id"]: m for m in models}
+    entries = []
+    for base_id, display in parse_model_aliases(settings.v2_model_aliases):
+        base = by_id.get(base_id)
+        if base is None:
+            continue
+        entries.append(
+            {
+                **base,
+                "id": virtual_model_id(base_id),
+                "display_name": display,
+                "pipeline": "v2",
+                "knowledge_base_id": V2_KB_ID,
+            }
+        )
+    return entries
