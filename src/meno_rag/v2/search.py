@@ -14,6 +14,7 @@ from meno_rag.v2.embed import load_embedder
 from meno_rag.v2.fusion import rrf
 from meno_rag.v2.kb import Chunk, KbRelease, load_release
 from meno_rag.v2.lexical import Bm25Retriever
+from meno_rag.v2.qdrant_store import QdrantRetriever, QdrantStore
 from meno_rag.v2.rerank import load_reranker
 
 logger = structlog.get_logger(__name__)
@@ -101,11 +102,16 @@ class SearchService:
 def load_search_service(settings) -> SearchService:
     import torch
 
-    for env, val in (
+    backend = settings.v2_vector_backend
+    if backend not in ("matrix", "qdrant"):
+        raise ValueError(f"V2_VECTOR_BACKEND must be matrix|qdrant, got {backend!r}")
+    required = [
         ("V2_EMBEDDER_PATH", settings.v2_embedder_path),
-        ("V2_MATRIX_DIR", settings.v2_matrix_dir),
         ("V2_RERANKER_PATH", settings.v2_reranker_path),
-    ):
+    ]
+    required.insert(1, ("V2_MATRIX_DIR", settings.v2_matrix_dir) if backend == "matrix"
+                    else ("V2_QDRANT_COLLECTION", settings.v2_qdrant_collection))
+    for env, val in required:
         if not val or not str(val).strip():
             raise ValueError(f"{env} is empty: required to load the v2 search service")
     device = settings.v2_device
@@ -120,6 +126,17 @@ def load_search_service(settings) -> SearchService:
     embedder = load_embedder(
         settings.v2_embedder, settings.v2_embedder_path, device, dtype=settings.v2_embed_dtype
     )
-    matrix = load_matrix(settings.v2_matrix_dir, device, expected_n=len(release.chunks))
+    if backend == "qdrant":
+        store = QdrantStore(settings.v2_qdrant_url)
+        n = store.count(settings.v2_qdrant_collection)
+        if n != len(release.chunks):
+            raise ValueError(
+                f"Qdrant collection {settings.v2_qdrant_collection!r} has {n} points, "
+                f"release has {len(release.chunks)} chunks"
+            )
+        dense = QdrantRetriever(store, settings.v2_qdrant_collection, embedder)
+    else:
+        matrix = load_matrix(settings.v2_matrix_dir, device, expected_n=len(release.chunks))
+        dense = DenseRetriever(matrix, embedder)
     reranker = load_reranker(settings.v2_reranker, settings.v2_reranker_path, device)
-    return SearchService(release, bm25, DenseRetriever(matrix, embedder), reranker, settings)
+    return SearchService(release, bm25, dense, reranker, settings)

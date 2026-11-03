@@ -12,6 +12,7 @@ from pathlib import Path
 import torch
 
 from meno_rag.v2.dense import DenseRetriever, load_matrix
+from meno_rag.v2.qdrant_store import QdrantRetriever, QdrantStore
 from meno_rag.v2.embed import load_embedder
 from meno_rag.v2.fusion import rrf
 from meno_rag.v2.kb import load_release
@@ -109,6 +110,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--timings", required=True)
     ap.add_argument("--model-path", action="append", default=[], type=_kv, metavar="NAME=PATH")
     ap.add_argument("--matrix-dir", action="append", default=[], type=_kv, metavar="NAME=DIR")
+    ap.add_argument("--dense-backend", choices=("matrix", "qdrant"), default="matrix")
+    ap.add_argument("--qdrant-url", default="http://127.0.0.1:6433")
+    ap.add_argument("--qdrant-collection", default=None, help="collection or alias (qdrant backend)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--mem-fraction", type=float, default=None)
     ap.add_argument("--limit", type=int, default=None)
@@ -122,7 +126,10 @@ def main(argv: list[str] | None = None) -> None:
     for n in needed:
         if n not in model_paths:
             ap.error(f"--model-path {n}=PATH is required for config {cfg.name}")
-    if cfg.emb and cfg.emb not in matrix_dirs:
+    qdrant = args.dense_backend == "qdrant"
+    if qdrant and cfg.emb and not args.qdrant_collection:
+        ap.error("--qdrant-collection is required with --dense-backend qdrant")
+    if cfg.emb and not qdrant and cfg.emb not in matrix_dirs:
         ap.error(f"--matrix-dir {cfg.emb}=DIR is required for config {cfg.name}")
 
     cuda = args.device.startswith("cuda")
@@ -137,7 +144,13 @@ def main(argv: list[str] | None = None) -> None:
         bm25 = Bm25Retriever(release, Path(args.kb) / "ragcore" / "knowledge" / "bm25")
     if cfg.emb:
         embedder = load_embedder(cfg.emb, model_paths[cfg.emb], args.device)
-        dense_matrix = load_matrix(matrix_dirs[cfg.emb], args.device, expected_n=len(release.chunks))
+        if qdrant:
+            store = QdrantStore(args.qdrant_url)
+            n = store.count(args.qdrant_collection)
+            if n != len(release.chunks):
+                ap.error(f"qdrant collection has {n} points, release has {len(release.chunks)} chunks")
+        else:
+            dense_matrix = load_matrix(matrix_dirs[cfg.emb], args.device, expected_n=len(release.chunks))
     if cfg.rerank:
         reranker = load_reranker(cfg.rerank, model_paths[cfg.rerank], args.device)
 
@@ -162,7 +175,10 @@ def main(argv: list[str] | None = None) -> None:
             dense_hits = bm25_hits = None
             if embedder is not None:
                 vec = timer.run("embed", lambda: embedder.encode_queries([query]), gpu=True)
-                retr = DenseRetriever(dense_matrix, _Cached(vec))
+                if qdrant:
+                    retr = QdrantRetriever(store, args.qdrant_collection, _Cached(vec))
+                else:
+                    retr = DenseRetriever(dense_matrix, _Cached(vec))
                 dense_hits = timer.run("dense", lambda: retr.search(query, CAND_K), gpu=True)
             if bm25 is not None:
                 bm25_hits = timer.run("bm25", lambda: bm25.search(query, CAND_K))

@@ -221,6 +221,11 @@ class Settings(BaseSettings):
     v2_embedder_path: str = Field(default="", validation_alias="V2_EMBEDDER_PATH")
     # Directory with the precomputed dense matrices.
     v2_matrix_dir: str = Field(default="", validation_alias="V2_MATRIX_DIR")
+    # Dense backend: "matrix" (exact, in GPU memory) or "qdrant".
+    v2_vector_backend: str = Field(default="matrix", validation_alias="V2_VECTOR_BACKEND")
+    v2_qdrant_url: str = Field(default="http://127.0.0.1:6433", validation_alias="V2_QDRANT_URL")
+    # Collection or alias (normally an alias such as nsu_kb_current).
+    v2_qdrant_collection: str = Field(default="nsu_kb_current", validation_alias="V2_QDRANT_COLLECTION")
     # Cross-encoder reranker name.
     v2_reranker: str = Field(default="bge", validation_alias="V2_RERANKER")
     # Local path of the reranker weights.
