@@ -513,3 +513,31 @@ async def test_without_a_rare_term_low_scored_slots_stay_out():
     pipe = _person_pipe({}, V2_LEXICAL_SLOTS=4)  # every stem is common
     out, _ = await prepare(pipe, Q_PERSON)
     assert out.refusal and out.context_chunks == []
+
+
+def test_system_prompt_forbids_unprompted_greetings():
+    from meno_rag.v2.prompting import SYSTEM_PROMPT_V2
+
+    assert "Не здоровайся и не представляйся" in SYSTEM_PROMPT_V2
+
+
+async def _general_person(df):
+    from meno_rag.v2.prompting import ROUTE_BLOCKS
+
+    llm = FakeLLM(analysis("general", Q_PERSON), answer=STAFF)
+    pipe = make(llm, {Q_PERSON: [("staff", 0.9), ("dorm", 0.1)]}, V2_LEXICAL_SLOTS=4)
+    pipe.search.bm25 = FakeBm25(df)
+    out, _ = await prepare(pipe, Q_PERSON)
+    system = out.qa_messages[0]["content"]
+    return out, ROUTE_BLOCKS["nsu"].splitlines()[0] in system, ROUTE_BLOCKS["general"].splitlines()[0] in system
+
+
+async def test_general_question_about_a_kb_named_entity_is_answered_from_documents():
+    out, nsu_block, general_block = await _general_person({"солихов": 3})
+    assert nsu_block and not general_block and not out.general_note
+    assert [c.chunk.chunk_id for c in out.context_chunks] == ["staff"]
+
+
+async def test_general_question_without_a_rare_term_keeps_the_general_rules():
+    out, nsu_block, general_block = await _general_person({})
+    assert general_block and not nsu_block

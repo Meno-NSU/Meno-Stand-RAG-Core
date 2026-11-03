@@ -209,8 +209,9 @@ class V2Pipeline:
         coverage: dict[str, float] = {}
         rounds = 0
         forced: list[Candidate] = []
+        forms: list[str] = []
         if searched:
-            ranked, queries, coverage, rounds, forced = await self._search_rounds(an, today, runtime, emit)
+            ranked, queries, coverage, rounds, forced, forms = await self._search_rounds(an, today, runtime, emit)
 
         context, kept = "", []
         if searched:
@@ -228,9 +229,15 @@ class V2Pipeline:
         refusal = an.route == "nsu" and not kept
         general_note = an.route == "general" and not kept
 
+        # a "general" question about something the KB documents name by its rarest term (a person, a
+        # platform, a program) is answered from those documents only, not from the model's memory
+        prompt_route = an.route
+        if an.route == "general" and forms and any(self._has_term(c.chunk, forms) for c in kept):
+            prompt_route = "nsu"
+
         def build(ctx: str) -> list[dict]:
             return build_messages(
-                an.route,
+                prompt_route,
                 question=question,
                 standalone_question=an.standalone_question,
                 memory=memory,
@@ -354,7 +361,7 @@ class V2Pipeline:
             aims = {q: (uncovered[min(i, len(uncovered) - 1)] if uncovered else None) for i, q in enumerate(new)}
 
         ranked = [*schedule_cands, *sorted(best.values(), key=lambda c: (-c.score, c.pos))]
-        return ranked, all_queries, coverage, rounds, forced
+        return ranked, all_queries, coverage, rounds, forced, forms
 
     def _rarest_term(self, text: str) -> tuple[str, list[str]]:
         """The question stem whose index forms (itself + shorter inflection variants) occur in the fewest
