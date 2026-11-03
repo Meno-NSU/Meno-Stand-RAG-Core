@@ -7,6 +7,8 @@ from collections.abc import Callable
 import httpx
 import numpy as np
 
+from meno_rag.v2.sparse import SPARSE_NAME, Bm25Encoder
+
 
 class QdrantError(RuntimeError):
     pass
@@ -32,13 +34,16 @@ class QdrantStore:
         body = self._req("GET", f"/collections/{name}", ok_404=True)
         return None if body is None else body["result"]
 
-    def create_collection(self, name: str, dim: int, *, on_disk: bool = True) -> None:
+    def create_collection(self, name: str, dim: int, *, on_disk: bool = True, sparse: bool = False) -> None:
+        """sparse=True adds the BM25 sparse vector (modifier idf) next to the unnamed dense one."""
         existing = self.get_collection(name)
         if existing is not None:
-            vectors = existing["config"]["params"]["vectors"]
-            have = vectors["size"]
+            params = existing["config"]["params"]
+            have = params["vectors"]["size"]
             if have != dim:
                 raise ValueError(f"collection {name!r} exists with dim {have}, requested {dim}")
+            if sparse and SPARSE_NAME not in (params.get("sparse_vectors") or {}):
+                raise ValueError(f"collection {name!r} exists without the {SPARSE_NAME!r} sparse vector")
             return
         body = {
             "vectors": {"size": dim, "distance": "Dot", "on_disk": on_disk},
@@ -46,7 +51,12 @@ class QdrantStore:
             "on_disk_payload": True,
             "quantization_config": {"scalar": {"type": "int8", "quantile": 0.99, "always_ram": True}},
         }
+        if sparse:
+            body["sparse_vectors"] = {SPARSE_NAME: {"modifier": "idf", "index": {"on_disk": False}}}
         self._req("PUT", f"/collections/{name}", json=body)
+
+    def upsert_points(self, name: str, points: list[dict]) -> None:
+        self._req("PUT", f"/collections/{name}/points", params={"wait": "true"}, json={"points": points})
 
     def upsert_matrix(
         self,
@@ -115,6 +125,35 @@ class QdrantStore:
         out = [(int(p["id"]), float(p["score"])) for p in pts]
         out.sort(key=lambda t: -t[1])
         return out
+
+
+    def search_sparse(self, name_or_alias: str, indices: list[int], values: list[float], k: int,
+                      using: str = SPARSE_NAME) -> list[tuple[int, float]]:
+        if not indices or k <= 0:
+            return []
+        body = {"query": {"indices": indices, "values": values}, "using": using, "limit": k,
+                "with_payload": False, "with_vector": False}
+        res = self._req("POST", f"/collections/{name_or_alias}/points/query", json=body)
+        out = [(int(p["id"]), float(p["score"])) for p in res["result"]["points"] if p["score"] > 0]
+        out.sort(key=lambda t: -t[1])
+        return out
+
+
+class QdrantBm25Retriever:
+    """BM25 over the collection's sparse vector; same interface as Bm25Retriever."""
+
+    def __init__(self, store: QdrantStore, collection: str, encoder: Bm25Encoder | None = None) -> None:
+        self.store = store
+        self.collection = collection
+        self.encoder = encoder or Bm25Encoder()
+
+    def search(self, query: str, k: int) -> list[tuple[int, float]]:
+        ids, vals = self.encoder.query(query)
+        return self.store.search_sparse(self.collection, ids, vals, k)
+
+    def idf(self, token: str) -> float:
+        """Qdrant does not expose document frequencies: snippets fall back to plain term counts."""
+        return 1.0
 
 
 class QdrantRetriever:

@@ -233,6 +233,9 @@ class Settings(BaseSettings):
     v2_qdrant_url: str = Field(default="http://127.0.0.1:6433", validation_alias="V2_QDRANT_URL")
     # Collection or alias (normally an alias such as nsu_kb_current).
     v2_qdrant_collection: str = Field(default="nsu_kb_current", validation_alias="V2_QDRANT_COLLECTION")
+    # BM25 backend: "bm25s" (the release's prebuilt index, in process memory) or "qdrant" (the collection's
+    # "bm25" sparse vector; needs V2_VECTOR_BACKEND=qdrant and a collection loaded with --kb).
+    v2_lexical_backend: str = Field(default="bm25s", validation_alias="V2_LEXICAL_BACKEND")
     # Cross-encoder reranker name.
     v2_reranker: str = Field(default="bge", validation_alias="V2_RERANKER")
     # Local path of the reranker weights.
@@ -245,8 +248,14 @@ class Settings(BaseSettings):
     v2_embed_dtype: str = Field(default="bf16", validation_alias="V2_EMBED_DTYPE")
     # Extra LLM check of the answer's sources.
     v2_sources_llm_check: bool = Field(default=False, validation_alias="V2_SOURCES_LLM_CHECK")
-    # Not used by the v2 answer pipeline since the evidence judge (kept so older .env files still load).
+    # How the v2 pipeline decides which found chunks are evidence: "judge" (LLM evidence judge, rounds)
+    # or "rerank" (one search, no extra LLM call: cross-encoder threshold + rare-term matches).
+    v2_evidence: str = Field(default="judge", validation_alias="V2_EVIDENCE")
+    # V2_EVIDENCE=rerank: a candidate is evidence when its cross-encoder score reaches this ...
     v2_rerank_threshold: float = Field(default=0.5, validation_alias="V2_RERANK_THRESHOLD")
+    # ... or when it contains the rarest question term found in at most this many chunks (0 = off;
+    # needs the bm25s lexical backend, which knows document frequencies).
+    v2_rare_term_max_df: int = Field(default=1000, validation_alias="V2_RARE_TERM_MAX_DF")
     # Max candidates shown to the evidence judge per round.
     v2_judge_candidates: int = Field(default=14, validation_alias="V2_JUDGE_CANDIDATES")
     # ... of them: best cross-encoder score vs the standalone question.

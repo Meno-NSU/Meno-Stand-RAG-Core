@@ -14,7 +14,8 @@ from meno_rag.v2.embed import load_embedder
 from meno_rag.v2.fusion import rrf
 from meno_rag.v2.kb import Chunk, KbRelease, load_release
 from meno_rag.v2.lexical import Bm25Retriever
-from meno_rag.v2.qdrant_store import QdrantRetriever, QdrantStore
+from meno_rag.v2.qdrant_store import QdrantBm25Retriever, QdrantRetriever, QdrantStore
+from meno_rag.v2.sparse import SPARSE_NAME
 from meno_rag.v2.rerank import load_reranker
 
 logger = structlog.get_logger(__name__)
@@ -129,6 +130,11 @@ def load_search_service(settings) -> SearchService:
     backend = settings.v2_vector_backend
     if backend not in ("matrix", "qdrant"):
         raise ValueError(f"V2_VECTOR_BACKEND must be matrix|qdrant, got {backend!r}")
+    lexical = settings.v2_lexical_backend
+    if lexical not in ("bm25s", "qdrant"):
+        raise ValueError(f"V2_LEXICAL_BACKEND must be bm25s|qdrant, got {lexical!r}")
+    if lexical == "qdrant" and backend != "qdrant":
+        raise ValueError("V2_LEXICAL_BACKEND=qdrant needs V2_VECTOR_BACKEND=qdrant")
     required = [
         ("V2_EMBEDDER_PATH", settings.v2_embedder_path),
         ("V2_RERANKER_PATH", settings.v2_reranker_path),
@@ -146,7 +152,7 @@ def load_search_service(settings) -> SearchService:
             torch.cuda.set_per_process_memory_fraction(settings.v2_gpu_mem_fraction)
     kb = Path(settings.v2_kb_dir)
     release = load_release(kb)
-    bm25 = Bm25Retriever(release, kb / "ragcore" / "knowledge" / "bm25")
+    bm25 = Bm25Retriever(release, kb / "ragcore" / "knowledge" / "bm25") if lexical == "bm25s" else None
     embedder = load_embedder(
         settings.v2_embedder, settings.v2_embedder_path, device, dtype=settings.v2_embed_dtype
     )
@@ -159,6 +165,14 @@ def load_search_service(settings) -> SearchService:
                 f"release has {len(release.chunks)} chunks"
             )
         dense = QdrantRetriever(store, settings.v2_qdrant_collection, embedder)
+        if lexical == "qdrant":
+            info = store.get_collection(settings.v2_qdrant_collection) or {}
+            if SPARSE_NAME not in ((info.get("config") or {}).get("params") or {}).get("sparse_vectors", {}):
+                raise ValueError(
+                    f"Qdrant collection {settings.v2_qdrant_collection!r} has no {SPARSE_NAME!r} sparse vector "
+                    "(load it with qdrant_load --kb)"
+                )
+            bm25 = QdrantBm25Retriever(store, settings.v2_qdrant_collection)
     else:
         matrix = load_matrix(settings.v2_matrix_dir, device, expected_n=len(release.chunks))
         dense = DenseRetriever(matrix, embedder)
