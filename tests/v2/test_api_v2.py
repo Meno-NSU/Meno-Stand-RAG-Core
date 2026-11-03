@@ -225,3 +225,28 @@ def test_db_row_has_v2_kb_id(make_client):
 
     # History is stored unconditionally (no improvement consent needed): user + assistant rows.
     assert with_db(db_path, _read) == [V2_KB_ID, V2_KB_ID]
+
+
+async def test_judge_model_resolved_per_request_with_fallback(monkeypatch):
+    from meno_rag.api import main as main_mod
+    from meno_rag.config import Settings
+
+    judge_rt = ModelRuntime(model_id="gemma-4-12B-it", base_url="http://judge/v1")
+    asked = []
+
+    async def resolve(app, model):
+        asked.append(model)
+        if model == "missing":
+            raise ValueError("unknown model")
+        return PipelineRuntime.uniform(judge_rt)
+
+    monkeypatch.setattr(main_mod, "_resolve_runtime", resolve)
+
+    def app(model):
+        return SimpleNamespace(state=SimpleNamespace(settings=Settings(_env_file=None, V2_JUDGE_MODEL=model)))
+
+    assert await main_mod._judge_kwargs(app("gemma-4-12B-it"), V2_KB_ID) == {"judge_runtime": judge_rt}
+    assert await main_mod._judge_kwargs(app("gemma-4-12B-it"), LEGACY_KB_ID) == {}  # legacy pipeline untouched
+    assert await main_mod._judge_kwargs(app(""), V2_KB_ID) == {}  # unset: the generation model
+    assert await main_mod._judge_kwargs(app("missing"), V2_KB_ID) == {}  # unresolvable: falls back
+    assert asked == ["gemma-4-12B-it", "missing"]

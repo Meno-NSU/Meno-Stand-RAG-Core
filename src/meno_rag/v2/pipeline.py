@@ -16,7 +16,7 @@ from pydantic import Field, PrivateAttr
 
 from meno_rag.api.events import StageEvent, StageName, StageStatus
 from meno_rag.schemas import ChatMessage, PipelineOutcome
-from meno_rag.stand.pipeline import PipelineRuntime, StageSink, extract_question_and_history
+from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StageSink, extract_question_and_history
 from meno_rag.stand.sampling import QaSampling
 from meno_rag.v2.analysis import TurnAnalysis, _dedup, analyze
 from meno_rag.v2.evidence import Judgement, judge
@@ -143,13 +143,17 @@ class V2Pipeline:
         runtime: PipelineRuntime,
         stage_sink: StageSink | None = None,
         capture_trace: bool = False,
+        judge_runtime: ModelRuntime | None = None,
     ) -> V2Outcome:
+        """judge_runtime (V2_JUDGE_MODEL, resolved by the API) runs the turn analysis and the evidence judge;
+        None means the generation model."""
         s = self.settings
         today = self.today_fn()
+        planner = judge_runtime or runtime.generation
         question, history = extract_question_and_history(messages)
         original_question = question
         question = cap_text(question, s.v2_history_budget_tokens // 4)
-        model_id = runtime.generation.model_id
+        model_id = planner.model_id
         timings: dict[str, float] = {}
         durations: dict[str, float] = {}
         details: dict[str, dict[str, Any]] = {}
@@ -173,7 +177,7 @@ class V2Pipeline:
         t1 = time.perf_counter()
         an = await analyze(
             self.llm_router,
-            runtime.generation,
+            planner,
             question=question,
             recent=memory.recent,
             summary=memory.summary,
@@ -192,7 +196,7 @@ class V2Pipeline:
         searched = an.route in SEARCH_ROUTES
         loop = _Evidence()
         if searched:
-            loop = await self._evidence_rounds(an, question, today, runtime, emit)
+            loop = await self._evidence_rounds(an, question, today, planner, emit)
         j = loop.judgement
         mode = j.answer_mode if j is not None else ""
 
@@ -235,8 +239,8 @@ class V2Pipeline:
             while kept and self._answer_room(qa_messages) < ENOUGH_ANSWER_ROOM:
                 context, kept = assemble_context(chosen, s.v2_context_budget_tokens, len(kept) - 1, stale=stale)
                 qa_messages = build(context)
-        if searched and mode in ("documents", "partial") and not kept:
-            mode = "no_data"
+        if searched and not kept and mode != "general_knowledge":
+            mode = "no_data"  # without approved documents only a general-knowledge answer may be generated
         refusal = searched and mode == "no_data"
         general_note = searched and mode == "general_knowledge" and not kept
         trace = None
@@ -262,7 +266,7 @@ class V2Pipeline:
         outcome._runtime = runtime
         return outcome
 
-    async def _evidence_rounds(self, an: TurnAnalysis, question: str, today: date, runtime: PipelineRuntime, emit):
+    async def _evidence_rounds(self, an: TurnAnalysis, question: str, today: date, planner: ModelRuntime, emit):
         """Search -> judge, repeated only while the judge says searching again can help (search_more),
         offers new queries and another round still fits V2_JUDGE_BUDGET_S.
 
@@ -297,7 +301,10 @@ class V2Pipeline:
             loop.queries += round_queries
             await emit(StageName.RETRIEVAL, StageStatus.STARTED, None, {"round": rnd})
             t0 = time.perf_counter()
-            result = await self.search.search(round_queries, [standalone] * len(round_queries))
+            result = await self.search.search(
+                round_queries, [standalone] * len(round_queries),
+                lexical_top=s.v2_judge_candidates_dense + s.v2_judge_candidates_lexical,
+            )
             await emit(
                 StageName.RETRIEVAL,
                 StageStatus.COMPLETED,
@@ -308,7 +315,7 @@ class V2Pipeline:
             for c in result.candidates:
                 if c.pos not in loop.pool or c.score > loop.pool[c.pos].score:
                     loop.pool[c.pos] = c
-            cands = self._judge_candidates(result.candidates, schedule_cands, relevant, judged)
+            cands = self._judge_candidates(result, schedule_cands, relevant, judged)
             if loop.judgement is not None and all(c.pos in judged for c in cands):
                 break  # nothing new to judge: keep the previous judgement
             await emit(StageName.RERANK, StageStatus.STARTED, None, {"round": rnd})
@@ -317,7 +324,7 @@ class V2Pipeline:
             timeout = min(s.v2_judge_timeout_s, max(remaining, MIN_JUDGE_TIMEOUT_S))
             j = await judge(
                 self.llm_router,
-                runtime.generation,
+                planner,
                 question=question,
                 standalone=standalone,
                 needs=an.needs,
@@ -351,14 +358,22 @@ class V2Pipeline:
             round_queries = [q for q in j.queries if q.casefold() not in tried][:MAX_NEW_QUERIES]
         return loop
 
-    def _judge_candidates(self, found, schedule_cands, relevant, judged) -> list[Candidate]:
-        """Accepted documents of earlier rounds + the best unseen ones, by cross-encoder score."""
-        n = self.settings.v2_judge_candidates
-        keep = sorted(relevant, key=_by_score)[: self.settings.v2_max_context_chunks]
-        have = {c.pos for c in keep}
-        fresh = [c for c in [*schedule_cands, *found] if c.pos not in judged and c.pos not in have]
-        room = max(n - len(keep), MIN_NEW_CANDIDATES if judged else n)
-        return sorted([*keep, *fresh[:room]], key=_by_score)
+    def _judge_candidates(self, result, schedule_cands, relevant, judged) -> list[Candidate]:
+        """Approved documents of earlier rounds + unseen ones: the best cross-encoder scores, then the best
+        BM25 hits not taken yet, so exact rare-term matches (names in lists, tables) reach the judge too."""
+        s = self.settings
+        keep = sorted(relevant, key=_by_score)[: s.v2_max_context_chunks]
+        taken = {c.pos for c in keep} | judged
+        room = max(s.v2_judge_candidates - len(keep), MIN_NEW_CANDIDATES if judged else s.v2_judge_candidates)
+        n_lexical = min(s.v2_judge_candidates_lexical, room)
+        n_dense = min(s.v2_judge_candidates_dense, room - n_lexical)
+        dense = [c for c in [*schedule_cands, *result.candidates] if c.pos not in taken]
+        picked = dense[:n_dense]
+        taken |= {c.pos for c in picked}
+        lexical = [c for c in getattr(result, "lexical_top", []) if c.pos not in taken][:n_lexical]
+        taken |= {c.pos for c in lexical}
+        fill = [c for c in dense[n_dense:] if c.pos not in taken][: max(room - len(picked) - len(lexical), 0)]
+        return sorted([*keep, *picked, *lexical, *fill], key=_by_score)
 
     @staticmethod
     def _trace(an, loop: _Evidence, kept, mode, timings) -> dict:
@@ -406,6 +421,9 @@ class V2Pipeline:
         return out
 
     def _gen_kwargs(self, outcome: V2Outcome, max_tokens, temperature) -> dict:
+        # a searched turn is generated from approved documents, or as an explicit general-knowledge answer
+        assert outcome.route not in SEARCH_ROUTES or outcome.context_chunks or outcome.answer_mode == (
+            "general_knowledge"), "v2: generation without approved documents outside general_knowledge"
         sampling = QaSampling()
         return {
             "messages": outcome.qa_messages,

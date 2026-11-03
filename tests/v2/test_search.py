@@ -143,3 +143,16 @@ def test_gpu_fraction_only_without_legacy(monkeypatch, legacy, expected):
     with pytest.raises(Stop):
         load_search_service(s)
     assert calls == expected
+
+
+async def test_lexical_top_scores_bm25_hits_that_fusion_dropped():
+    dense = {"q": [(1, .9), (2, .8)], "q2": [(3, .9)]}
+    bm25 = {"q": [(7, 9.0), (2, 5.0), (8, 1.0)], "q2": [(9, 5.0)]}
+    rr = FakeReranker({("q", "idx7"): 0.05, ("q", "idx1"): 0.8, ("q", "idx2"): 0.6, ("q", "idx8"): 0.01})
+    svc = _service(dense, bm25, rr, V2_RERANK_TOP=2)  # fusion keeps two positions per query
+    res = await svc.search(["q", "q2"], ["q", "q"], lexical_top=3)
+    assert [c.pos for c in res.lexical_top] == [7, 2, 8]  # BM25 order of the first query only (not q2's 9)
+    assert [c.score for c in res.lexical_top] == [0.05, 0.6, 0.01]  # cross-encoder vs the rerank query
+    assert 8 in {c.pos for c in res.candidates}  # BM25 rank 3: fusion alone would have dropped it
+    plain = await svc.search(["q", "q2"], ["q", "q"])
+    assert plain.lexical_top == []

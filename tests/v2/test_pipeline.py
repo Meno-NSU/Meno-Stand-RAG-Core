@@ -4,6 +4,8 @@ import re
 from datetime import date
 from typing import Any
 
+import pytest
+
 from meno_rag.api.events import StageName, StageStatus
 from meno_rag.config import Settings
 from meno_rag.schemas import ChatMessage
@@ -32,6 +34,7 @@ DEAN_OLD = "Деканом механико-математического фа�
 DEAN_NEW = "Исполняющим обязанности декана ММФ назначен Петров Пётр Петрович."
 BACH = "На ФИТ открыто новое направление бакалавриата «Искусственный интеллект»."
 MAG = "На ФИТ открыта новая магистерская программа «Анализ данных»."
+GROUPS = "Группа 22215: Иванов А. А., Петров Б. Б., Солихов Руслан Махмаднабиевич, Сидоров В. В."
 
 
 def _chunk(cid, title, date_, doc_type, text, url=None):
@@ -51,6 +54,7 @@ CHUNKS = {
     "dean_new": _chunk("dean_new", "Назначен и. о. декана ММФ", "2026-10-21", "news", DEAN_NEW),
     "bach": _chunk("bach", "Новое направление бакалавриата ФИТ", "2026-03-01", "program_page", BACH),
     "mag": _chunk("mag", "Новая магистерская программа ФИТ", "2026-04-01", "program_page", MAG),
+    "groups": _chunk("groups", "Бакалавриат - 4 курс", "2026-09-01", "web_page", GROUPS),
 }
 POS = {cid: i for i, cid in enumerate(CHUNKS)}
 
@@ -90,19 +94,24 @@ class FakeReranker:
 
 
 class FakeSearch:
-    """table: query -> [(chunk_id, score)]; rr: (rerank query, chunk_id) -> score overriding the table's."""
+    """table: query -> [(chunk_id, score)]; rr: (rerank query, chunk_id) -> score overriding the table's;
+    lexical: query -> [(chunk_id, cross-encoder score)] in BM25 order (only the first query's are returned)."""
 
-    def __init__(self, table, rr=None):
+    def __init__(self, table, rr=None, lexical=None):
         self.table = table
         self.rr = rr or {}
+        self.lexical = lexical or {}
         self.calls: list[tuple[list[str], list[str]]] = []
+        self.lexical_top: list[int] = []
         self.reranker = FakeReranker()
 
     async def run_gpu(self, fn, *args):
         return fn(*args)
 
-    async def search(self, queries, rerank_queries):
+    async def search(self, queries, rerank_queries, lexical_top=0):
         self.calls.append((list(queries), list(rerank_queries)))
+        self.lexical_top.append(lexical_top)
+        lex = self.lexical.get(queries[0], [])[:lexical_top] if queries and lexical_top else []
         best: dict[str, float] = {}
         coverage: dict[str, float] = {}
         for q, rq in zip(queries, rerank_queries, strict=True):
@@ -111,8 +120,12 @@ class FakeSearch:
                 sc = self.rr.get((rq, cid), sc)
                 best[cid] = max(best.get(cid, sc), sc)
                 coverage[q] = max(coverage[q], sc)
+        for cid, sc in lex:
+            best[cid] = max(best.get(cid, sc), sc)
         cands = [Candidate(POS[c], CHUNKS[c], s) for c, s in sorted(best.items(), key=lambda p: -p[1])]
-        return SearchResult(cands, coverage, {"embed_dense": 1.0, "bm25": 1.0, "rrf": 0.1, "rerank": 2.0})
+        by_id = {c.chunk.chunk_id: c for c in cands}
+        return SearchResult(cands, coverage, {"embed_dense": 1.0, "bm25": 1.0, "rrf": 0.1, "rerank": 2.0},
+                            [by_id[cid] for cid, _ in lex])
 
 
 _SHOWN_RE = re.compile(r"^\[(\d+)\] (.+?) · ", re.M)
@@ -156,7 +169,7 @@ class FakeLLM:
 
     async def chat_completion_text(self, *, runtime, messages, stage="unknown", **kw):
         name = ((kw.get("response_format") or {}).get("json_schema") or {}).get("name")
-        self.calls.append({"kind": name or stage, "stage": stage, "messages": messages, **kw})
+        self.calls.append({"kind": name or stage, "stage": stage, "messages": messages, "runtime": runtime, **kw})
         if name == "turn_analysis":
             return json.dumps(self.analysis, ensure_ascii=False)
         if name == "evidence_judgement":
@@ -170,7 +183,7 @@ class FakeLLM:
         return "Пользователь спрашивал о стипендиях и общежитиях."  # dialogue summary
 
     async def stream_chat_completion(self, *, runtime, messages, stage="unknown", **kw):
-        self.calls.append({"kind": "stream", "messages": messages, **kw})
+        self.calls.append({"kind": "stream", "messages": messages, "runtime": runtime, **kw})
         for word in self.answer.split(" "):
             await asyncio.sleep(0)
             yield word + " "
@@ -194,9 +207,9 @@ def analysis(route="nsu", standalone="Какой размер стипендии
             "focus": focus}
 
 
-def make(llm, table=None, schedule=None, rr=None, **settings):
+def make(llm, table=None, schedule=None, rr=None, lexical=None, **settings):
     s = Settings(_env_file=None, **settings)
-    pipe = V2Pipeline(search=FakeSearch(table or {}, rr), llm_router=llm, settings=s, summary_store=SummaryStore(),
+    pipe = V2Pipeline(search=FakeSearch(table or {}, rr, lexical), llm_router=llm, settings=s, summary_store=SummaryStore(),
                       docs={}, schedule=schedule)
     pipe.today_fn = lambda: TODAY
     return pipe
@@ -206,14 +219,14 @@ def msgs(question, history=()):
     return [ChatMessage(role=r, content=c) for r, c in history] + [ChatMessage(role="user", content=question)]
 
 
-async def prepare(pipe, question="сколько платят стипендию?", history=(), trace=False):
+async def prepare(pipe, question="сколько платят стипендию?", history=(), trace=False, **kw):
     events = []
 
     async def sink(ev):
         events.append(ev)
 
     out = await pipe.prepare(messages=msgs(question, history), runtime=RUNTIME, stage_sink=sink,
-                             capture_trace=trace)
+                             capture_trace=trace, **kw)
     return out, events
 
 
@@ -398,6 +411,72 @@ async def test_judge_failure_falls_back_to_reranker_scores():
     pipe = make(FakeLLM(analysis(standalone=q), judgements=["{oops"]), {q: [("dorm", 0.4)]})
     out, _ = await prepare(pipe, q)
     assert out.refusal and await stream(pipe, out) == NO_KB_REFUSAL
+
+
+async def test_lexical_hit_with_low_reranker_score_reaches_the_judge():
+    q = "Кто такой Солихов Руслан Махмаднабиевич?"
+    others = [c for c in CHUNKS if c != "groups"]
+    dense = [(c, 0.6 - i / 100) for i, c in enumerate(others)] + [("groups", 0.02)]  # a list chunk ranks low
+    lexical = {q: [("groups", 0.02), ("stip", 0.6)]}
+    small = {"v2_judge_candidates": 8, "v2_judge_candidates_dense": 6, "v2_judge_candidates_lexical": 2}
+    llm = FakeLLM(analysis(standalone=q), answer=GROUPS, judgements=[judgement(["groups"])])
+    pipe = make(llm, {q: dense}, lexical=lexical, **small)
+    out, _ = await prepare(pipe, q)
+    assert pipe.search.lexical_top == [8]  # dense + lexical quota requested from BM25
+    assert len(llm.judged[0]) == 8 and "groups" in llm.judged[0]
+    assert llm.judged[0][:6] == others[:6]  # the best reranker scores still come first
+    assert ids(out.context_chunks) == ["groups"] and "Солихов Руслан Махмаднабиевич" in out.context
+    # without the lexical quota the low-scored list chunk never reaches the judge
+    llm = FakeLLM(analysis(standalone=q), judgements=[judgement([])])
+    pipe = make(llm, {q: dense}, lexical=lexical, **{**small, "v2_judge_candidates_lexical": 0,
+                                                       "v2_judge_candidates_dense": 8})
+    out, _ = await prepare(pipe, q)
+    assert "groups" not in llm.judged[0] and out.refusal
+
+
+async def test_judge_runtime_runs_analysis_and_judge_generation_keeps_its_model():
+    q = "Какой размер стипендии в НГУ?"
+    judge_rt = ModelRuntime(model_id="gemma-4-12B-it", base_url="http://judge")
+    llm = FakeLLM(analysis(standalone=q), answer=STIP)
+    pipe = make(llm, {q: [("stip", 0.9)]})
+    out, events = await prepare(pipe, q, judge_runtime=judge_rt)
+    by_kind = {c["kind"]: c["runtime"] for c in llm.calls}
+    assert by_kind["turn_analysis"] is judge_rt and by_kind["evidence_judgement"] is judge_rt
+    rerank = next(e for e in events if e.stage == StageName.RERANK and e.status == StageStatus.COMPLETED)
+    assert rerank.model_id == "gemma-4-12B-it"
+    await stream(pipe, out)
+    assert next(c for c in llm.calls if c["kind"] == "stream")["runtime"] is RUNTIME.generation
+    # not configured: everything on the generation model
+    llm = FakeLLM(analysis(standalone=q))
+    await prepare(make(llm, {q: [("stip", 0.9)]}), q)
+    assert {c["runtime"].model_id for c in llm.calls if c["kind"] in ("turn_analysis", "evidence_judgement")} == {
+        "gemma"}
+
+
+@pytest.mark.parametrize("mode", ["documents", "partial", "clarify"])
+async def test_judge_approves_nothing_means_no_data_without_generation(mode):
+    q = "Что такое nsuhw?"
+    llm = FakeLLM(analysis(standalone=q), judgements=[judgement([], verdict="insufficient", mode=mode,
+                                                                clarify="Что именно вас интересует?")])
+    pipe = make(llm, {q: [("fit", 0.9), ("rank", 0.8)]})  # high reranker scores, but nothing approved
+    out, _ = await prepare(pipe, q)
+    assert out.refusal and out.answer_mode == "no_data" and out.context_chunks == [] and out.context == ""
+    assert await stream(pipe, out) == NO_KB_REFUSAL
+    assert await pipe.generate_text(outcome=out, runtime=RUNTIME) == NO_KB_REFUSAL
+    assert "stream" not in llm.kinds() and "generation" not in llm.kinds()
+
+
+async def test_generation_without_documents_only_for_general_knowledge():
+    q = "Какой размер стипендии в НГУ?"
+    pipe = make(FakeLLM(analysis(standalone=q)), {q: [("stip", 0.9)]})
+    out, _ = await prepare(pipe, q)
+    out.context_chunks, out.refusal = [], False  # a broken state: documents mode without documents
+    with pytest.raises(AssertionError):
+        await pipe.generate_text(outcome=out, runtime=RUNTIME)
+    with pytest.raises(AssertionError):
+        await stream(pipe, out)
+    out.answer_mode = "general_knowledge"
+    assert await pipe.generate_text(outcome=out, runtime=RUNTIME)
 
 
 async def test_search_more_false_means_no_second_round():
@@ -640,10 +719,13 @@ async def test_prompt_plus_answer_fits_model_context():
     for ctx_limit, expect_drop in ((16384, False), (6800, True)):
         pipe = make(FakeLLM(analysis(standalone=q)), table, v2_model_context_tokens=ctx_limit)
         out, _ = await prepare(pipe, huge, history=history)
+        assert (len(out.context_chunks) < 3) == expect_drop
+        if not out.context_chunks:  # no room for any document: the verbatim refusal, nothing is generated
+            assert out.refusal and await pipe.generate_text(outcome=out, runtime=RUNTIME) == NO_KB_REFUSAL
+            continue
         used = sum(estimate_tokens(m["content"]) for m in out.qa_messages)
         mt = pipe._gen_kwargs(out, None, None)["max_tokens"]
         assert used + mt <= ctx_limit
-        assert (len(out.context_chunks) < 3) == expect_drop
 
 
 # --- leak guard ----------------------------------------------------------------------------

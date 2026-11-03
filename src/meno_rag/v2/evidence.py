@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 VERDICTS = ("sufficient", "partial", "insufficient")
 ANSWER_MODES = ("documents", "partial", "clarify", "general_knowledge", "no_data")
-DOC_MODES = ("documents", "partial")
 MAX_INDICES = 16
 MAX_QUERIES = 2
 MISSING_WORDS = 20
@@ -204,12 +203,10 @@ def _indices(value, n: int) -> list[int]:
     return out
 
 
-def fallback_judgement(
-    candidates: list[Candidate], threshold: float, *, exclude: set[int] = frozenset(), limit: int = FALLBACK_DOCS
-) -> Judgement:
-    """Without a usable judgement: the best cross-encoder candidates scoring >= threshold."""
+def fallback_judgement(candidates: list[Candidate], threshold: float, limit: int = FALLBACK_DOCS) -> Judgement:
+    """Only when the judge gave no usable verdict at all: the best cross-encoder candidates >= threshold."""
     order = sorted(range(len(candidates)), key=lambda i: (-candidates[i].score, candidates[i].pos))
-    picked = [i for i in order if i not in exclude and candidates[i].score >= threshold][:limit]
+    picked = [i for i in order if candidates[i].score >= threshold][:limit]
     return Judgement(picked, "partial", answer_mode="documents" if picked else "no_data", fallback=True)
 
 
@@ -238,18 +235,18 @@ def parse_judgement(raw: str, candidates: list[Candidate], threshold: float) -> 
         queries=_dedup(queries if isinstance(queries, list) else [])[:MAX_QUERIES],
         clarify_question=clarify.strip() if isinstance(clarify, str) else "",
     )
-    return _reconcile(j, candidates, threshold)
+    return _reconcile(j)
 
 
-def _reconcile(j: Judgement, candidates: list[Candidate], threshold: float) -> Judgement:
-    """Make the answer mode and the search decision agree with what the judge accepted."""
-    if j.answer_mode in DOC_MODES and not j.relevant:
-        # "answer from documents" without naming any: take the best ones it did not reject
-        fb = fallback_judgement(candidates, threshold, exclude=j.other_entity)
-        j.relevant = fb.relevant
-        j.answer_mode = "partial" if fb.relevant else "no_data"
+def _reconcile(j: Judgement) -> Judgement:
+    """Make the answer mode and the search decision agree with what the judge approved.
+
+    Only approved documents are evidence: with none, the answer is general knowledge when the judge chose
+    that, otherwise no data (never "the best documents it did not reject")."""
+    if not j.relevant and j.answer_mode != "general_knowledge":
+        j.answer_mode = "no_data"
     elif j.answer_mode == "no_data" and j.relevant:
-        j.answer_mode = "partial"  # some accepted evidence: answer what it covers, say what is missing
+        j.answer_mode = "partial"  # some approved evidence: answer what it covers, say what is missing
     if j.verdict == "sufficient" and j.answer_mode in ("no_data", "partial"):
         j.verdict = "partial" if j.relevant else "insufficient"
     if j.verdict == "sufficient" or not j.queries:

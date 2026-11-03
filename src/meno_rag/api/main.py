@@ -914,6 +914,19 @@ async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> Pipelin
     )
 
 
+async def _judge_kwargs(app: FastAPI, kb_id: str) -> dict[str, Any]:
+    """V2_JUDGE_MODEL resolved once per request for the v2 pipeline; on any failure the generation model."""
+    model = (app.state.settings.v2_judge_model or "").strip()
+    if kb_id != V2_KB_ID or not model:
+        return {}
+    try:
+        runtime = await _resolve_runtime(app, model)
+    except Exception as exc:  # the judge falls back to the generation model, the request goes on
+        logger.warning("v2_judge_model_unresolved", model=model, error=repr(exc))
+        return {}
+    return {"judge_runtime": runtime.generation}
+
+
 async def _non_stream_response(
     *,
     request: Request,
@@ -941,7 +954,10 @@ async def _non_stream_response(
     if not bench:
         metrics_mod.inc_chat_in_flight()
     try:
-        outcome = await pipeline.prepare(messages=payload.messages, runtime=runtime, capture_trace=capture_trace)
+        judge_kw = await _judge_kwargs(request.app, kb_id)
+        outcome = await pipeline.prepare(
+            messages=payload.messages, runtime=runtime, capture_trace=capture_trace, **judge_kw
+        )
         gen_started = time.perf_counter()
         answer = await pipeline.generate_text(
             outcome=outcome, runtime=runtime, max_tokens=max_tokens, temperature=temperature
@@ -1086,8 +1102,11 @@ async def _stream_response(
     async def sink(event: StageEvent) -> None:
         await stage_queue.put(event)
 
+    judge_kw = await _judge_kwargs(request.app, kb_id)
     prepare_task = asyncio.create_task(
-        pipeline.prepare(messages=payload.messages, runtime=runtime, stage_sink=sink, capture_trace=capture_trace)
+        pipeline.prepare(
+            messages=payload.messages, runtime=runtime, stage_sink=sink, capture_trace=capture_trace, **judge_kw
+        )
     )
     outcome = None
     try:

@@ -147,8 +147,11 @@ async def test_other_entity_is_not_evidence():
 async def test_mode_reconciliation():
     j = await run(Router(reply([2], verdict="insufficient", mode="no_data")))
     assert j.answer_mode == "partial"  # accepted evidence: answer what it covers
-    j = await run(Router(reply([], other=[1], verdict="sufficient", mode="documents")))
-    assert j.relevant == [1] and j.answer_mode == "partial" and j.verdict == "partial"  # best not rejected
+    # nothing approved: no data, never "the best documents it did not reject"
+    for mode in ("documents", "partial", "clarify", "no_data"):
+        j = await run(Router(reply([], other=[1], verdict="sufficient", mode=mode, clarify="Какой факультет?")))
+        assert j.relevant == [] and j.answer_mode == "no_data" and j.verdict == "insufficient", mode
+        assert not j.fallback
     j = await run(Router(reply([2], verdict="partial", mode="clarify", clarify="Бакалавриат или магистратура?")))
     assert j.answer_mode == "clarify" and j.clarify_question == "Бакалавриат или магистратура?"
     j = await run(Router(reply([], verdict="insufficient", mode="general_knowledge")))

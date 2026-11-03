@@ -247,8 +247,14 @@ class Settings(BaseSettings):
     v2_sources_llm_check: bool = Field(default=False, validation_alias="V2_SOURCES_LLM_CHECK")
     # Not used by the v2 answer pipeline since the evidence judge (kept so older .env files still load).
     v2_rerank_threshold: float = Field(default=0.5, validation_alias="V2_RERANK_THRESHOLD")
-    # Candidates (best cross-encoder score vs the standalone question) shown to the evidence judge.
+    # Max candidates shown to the evidence judge per round.
     v2_judge_candidates: int = Field(default=14, validation_alias="V2_JUDGE_CANDIDATES")
+    # ... of them: best cross-encoder score vs the standalone question.
+    v2_judge_candidates_dense: int = Field(default=10, validation_alias="V2_JUDGE_CANDIDATES_DENSE")
+    # ... plus the best BM25 hits of the question not already taken (exact rare terms, lists, tables).
+    v2_judge_candidates_lexical: int = Field(default=4, validation_alias="V2_JUDGE_CANDIDATES_LEXICAL")
+    # Model id for the turn analysis and the evidence judge; empty = the generation model.
+    v2_judge_model: str = Field(default="", validation_alias="V2_JUDGE_MODEL")
     # Timeout of one evidence-judge call, seconds.
     v2_judge_timeout_s: float = Field(default=15.0, validation_alias="V2_JUDGE_TIMEOUT_S")
     # Wall-clock budget of all search + judge rounds of one question, seconds.

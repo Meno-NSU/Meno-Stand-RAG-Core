@@ -28,7 +28,8 @@ def test_defaults(monkeypatch):
     assert s.v2_gpu_mem_fraction == 0.3 and s.v2_embed_dtype == "bf16"
     assert s.v2_sources_llm_check is False
     assert s.v2_rerank_threshold == 0.5 and s.v2_attribution_threshold == 0.5
-    assert s.v2_judge_candidates == 14
+    assert (s.v2_judge_candidates, s.v2_judge_candidates_dense, s.v2_judge_candidates_lexical) == (14, 10, 4)
+    assert s.v2_judge_model == ""
     assert (s.v2_judge_timeout_s, s.v2_judge_budget_s, s.v2_judge_fallback_score) == (15.0, 20.0, 0.5)
     assert (s.v2_history_budget_tokens, s.v2_summary_budget_tokens) == (5000, 800)
     assert (s.v2_context_budget_tokens, s.v2_max_answer_tokens) == (6000, 1500)
