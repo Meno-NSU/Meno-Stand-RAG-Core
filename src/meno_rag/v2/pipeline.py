@@ -32,6 +32,7 @@ from meno_rag.v2.memory import (
 )
 from meno_rag.v2.prompting import PROMPT_GUARD_TEXT, SEARCH_ROUTES, LeakGuard, assemble_context, build_messages
 from meno_rag.v2.search import Candidate
+from meno_rag.v2.snippets import query_terms, snippet
 from meno_rag.v2.sources import attribute, llm_check, to_sources
 
 logger = structlog.get_logger(__name__)
@@ -46,6 +47,7 @@ SCHEDULE_DOC_TYPE = "schedule_or_calendar"
 ANSWER_MARGIN_TOKENS = 256
 MIN_ANSWER_ROOM = 256
 ENOUGH_ANSWER_ROOM = 512
+ATTRIBUTION_CHARS = 1500  # what the cross-encoder reads of a chunk (512 tokens) when attributing sources
 
 NO_KB_REFUSAL = (
     "В документах НГУ, которые у меня есть, нет ответа на этот вопрос. Уточнить можно на сайте nsu.ru "
@@ -199,6 +201,11 @@ class V2Pipeline:
             loop = await self._evidence_rounds(an, question, today, planner, emit)
         j = loop.judgement
         mode = j.answer_mode if j is not None else ""
+        if mode == "general_knowledge" and an.route != "general":
+            # the two LLM decisions must agree: only a question routed as general may be answered from
+            # general knowledge; an NSU question gets its approved documents or the refusal
+            logger.info("v2_general_knowledge_needs_general_route", route=an.route, approved=len(j.relevant))
+            mode = "partial" if j.relevant else "no_data"
 
         context, kept, chosen, stale = "", [], [], frozenset()
         if searched:
@@ -287,6 +294,7 @@ class V2Pipeline:
                 blocks = []
             schedule_cands = [_schedule_candidate(i, b) for i, b in enumerate(blocks)]
         hint = f"Фокус диалога: {an.focus}" if an.focus else ""
+        terms = query_terms([standalone, *an.needs], self._idf())  # for query-biased judge excerpts
         relevant: list[Candidate] = []  # accepted by the latest judgement
         judged: set[int] = set()  # positions the judge has already seen
         round_queries = _dedup([standalone, *an.needs])
@@ -304,6 +312,7 @@ class V2Pipeline:
             result = await self.search.search(
                 round_queries, [standalone] * len(round_queries),
                 lexical_top=s.v2_judge_candidates_dense + s.v2_judge_candidates_lexical,
+                lexical_for=1 if loop.rounds == 1 else len(round_queries),  # the question / every judge query
             )
             await emit(
                 StageName.RETRIEVAL,
@@ -334,6 +343,7 @@ class V2Pipeline:
                 timeout_s=timeout,
                 fallback_threshold=s.v2_judge_fallback_score,
                 tried=loop.queries[first:],
+                terms=terms,
             )
             await emit(
                 StageName.RERANK,
@@ -544,7 +554,10 @@ class V2Pipeline:
         )
         if not blocked:
             try:
-                used = await attribute(answer, outcome.context_chunks, self._rerank_call, s.v2_attribution_threshold)
+                answer_terms = query_terms([answer], self._idf())
+                texts = [_focus(c.chunk.text, answer_terms) for c in outcome.context_chunks]
+                used = await attribute(answer, outcome.context_chunks, self._rerank_call, s.v2_attribution_threshold,
+                                       texts=texts)
                 debug["used"] = [
                     {"chunk_id": c.chunk.chunk_id, "url": c.chunk.url, "score": round(float(sc), 4)} for c, sc in used
                 ]
@@ -563,6 +576,10 @@ class V2Pipeline:
             outcome.trace["v2"]["sources_debug"] = debug
         return sources
 
+    def _idf(self):
+        """IDF of a stem from the BM25 index, when the search service has one."""
+        return getattr(getattr(self.search, "bm25", None), "idf", None)
+
     async def _rerank_call(self, groups: list[tuple[str, list[str]]]) -> list[list[float]]:
         """All (sentence, chunk texts) groups scored inside ONE executor job."""
         reranker = self.search.reranker
@@ -575,6 +592,13 @@ class V2Pipeline:
 
 def _ms(t0: float) -> float:
     return round((time.perf_counter() - t0) * 1000, 2)
+
+
+def _focus(text: str, terms: dict[str, float]) -> str:
+    """A long chunk cut to the part the cross-encoder should read: the window matching the terms, else the head."""
+    if len(text) <= ATTRIBUTION_CHARS:
+        return text
+    return snippet(text, terms, ATTRIBUTION_CHARS) or text[:ATTRIBUTION_CHARS]
 
 
 def _by_score(c: Candidate):

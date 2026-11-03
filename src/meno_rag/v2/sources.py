@@ -59,11 +59,14 @@ async def attribute(
     context_chunks: list[Candidate],
     reranker_call: RerankerCall,
     threshold: float,
+    texts: list[str] | None = None,
 ) -> list[tuple[Candidate, float]]:
+    """texts: what to score per chunk (e.g. the part of a long chunk the answer draws on); default chunk.text."""
     sentences = split_sentences(answer)
     if not sentences or not context_chunks:
         return []
-    texts = [c.chunk.text for c in context_chunks]
+    if texts is None or len(texts) != len(context_chunks):
+        texts = [c.chunk.text for c in context_chunks]
     best = [0.0] * len(context_chunks)
     all_scores = await reranker_call([(sentence, texts) for sentence in sentences])
     for scores in all_scores:

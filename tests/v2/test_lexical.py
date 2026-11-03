@@ -38,3 +38,10 @@ def test_top_hit(retriever):
 def test_empty_query(retriever):
     assert retriever.search("", 5) == []
     assert retriever.search("?!...", 5) == []
+
+
+def test_idf_from_the_index(retriever):
+    stem = SnowballStemmer("russian")
+    common, rare = stem.stem("студентам"), stem.stem("деканат")
+    assert retriever.idf(rare) > retriever.idf(common) > 1.0  # "студентам" is in two of four texts
+    assert retriever.idf("несуществующийтокен") >= retriever.idf(rare)

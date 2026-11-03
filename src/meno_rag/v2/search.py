@@ -32,7 +32,8 @@ class SearchResult:
     candidates: list[Candidate]
     coverage: dict[str, float]
     timings_ms: dict[str, float]
-    # the first query's best BM25 hits in BM25 order (cross-encoder scored), when lexical_top > 0
+    # best BM25 hits of the first `lexical_for` queries (cross-encoder scored), round-robin by BM25 rank,
+    # when lexical_top > 0
     lexical_top: list[Candidate] = field(default_factory=list)
 
 
@@ -50,11 +51,18 @@ class SearchService:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, fn, *args)
 
-    async def search(self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0) -> SearchResult:
-        """lexical_top > 0 also returns the first query's top BM25 hits, scored even when RRF dropped them."""
-        return await self.run_gpu(self._search_sync, list(queries), list(rerank_queries), lexical_top)
+    async def search(
+        self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1
+    ) -> SearchResult:
+        """lexical_top > 0 also returns the top BM25 hits of the first lexical_for queries, scored even when
+        RRF dropped them."""
+        return await self.run_gpu(
+            self._search_sync, list(queries), list(rerank_queries), lexical_top, lexical_for
+        )
 
-    def _search_sync(self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0) -> SearchResult:
+    def _search_sync(
+        self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1
+    ) -> SearchResult:
         s = self.settings
         t = {"embed_dense": 0.0, "bm25": 0.0, "rrf": 0.0, "rerank": 0.0}
 
@@ -66,7 +74,7 @@ class SearchService:
 
         # query index -> (query, rerank query, kept positions)
         per_query: list[tuple[str, str, list[int]]] = []
-        lexical: list[int] = []
+        lexical_lists: list[list[int]] = []
         for i, q in enumerate(queries):
             if not q or not q.strip():
                 continue
@@ -76,10 +84,11 @@ class SearchService:
             bm25_hits = timed("bm25", lambda: self.bm25.search(q, k))
             fused = timed("rrf", lambda: rrf([dense_hits, bm25_hits], limit=s.v2_rerank_top))
             kept = [p for p, _ in fused[: s.v2_rerank_top]]
-            if lexical_top > 0 and not per_query:
-                lexical = [p for p, _ in bm25_hits[:lexical_top]]
+            if lexical_top > 0 and len(per_query) < lexical_for:
+                top = [p for p, _ in bm25_hits[:lexical_top]]
+                lexical_lists.append(top)
                 have = set(kept)
-                kept += [p for p in lexical if p not in have]  # rare exact terms the fusion ranked low
+                kept += [p for p in top if p not in have]  # rare exact terms the fusion ranked low
             per_query.append((q, rq, kept))
 
         # one score() call per distinct rerank query, all in this single job
@@ -106,6 +115,11 @@ class SearchService:
         order = sorted(best, key=lambda p: (-best[p], p))
         cands = [Candidate(p, self.release.chunks[p], best[p]) for p in order]
         by_pos = {c.pos: c for c in cands}
+        lexical: list[int] = []
+        for rank in range(max((len(x) for x in lexical_lists), default=0)):
+            for top in lexical_lists:  # round-robin: every query gets its best hits in first
+                if rank < len(top) and top[rank] not in lexical:
+                    lexical.append(top[rank])
         return SearchResult(cands, coverage, t, [by_pos[p] for p in lexical if p in by_pos])
 
 

@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from meno_rag.api.events import StageName, StageStatus
 from meno_rag.config import Settings
@@ -95,7 +96,8 @@ class FakeReranker:
 
 class FakeSearch:
     """table: query -> [(chunk_id, score)]; rr: (rerank query, chunk_id) -> score overriding the table's;
-    lexical: query -> [(chunk_id, cross-encoder score)] in BM25 order (only the first query's are returned)."""
+    lexical: query -> [(chunk_id, cross-encoder score)] in BM25 order, returned round-robin for the first
+    `lexical_for` queries."""
 
     def __init__(self, table, rr=None, lexical=None):
         self.table = table
@@ -103,15 +105,22 @@ class FakeSearch:
         self.lexical = lexical or {}
         self.calls: list[tuple[list[str], list[str]]] = []
         self.lexical_top: list[int] = []
+        self.lexical_for: list[int] = []
         self.reranker = FakeReranker()
 
     async def run_gpu(self, fn, *args):
         return fn(*args)
 
-    async def search(self, queries, rerank_queries, lexical_top=0):
+    async def search(self, queries, rerank_queries, lexical_top=0, lexical_for=1):
         self.calls.append((list(queries), list(rerank_queries)))
         self.lexical_top.append(lexical_top)
-        lex = self.lexical.get(queries[0], [])[:lexical_top] if queries and lexical_top else []
+        self.lexical_for.append(lexical_for)
+        lists = [self.lexical.get(q, [])[:lexical_top] for q in queries[:lexical_for]] if lexical_top else []
+        lex: list[tuple[str, float]] = []
+        for rank in range(max((len(x) for x in lists), default=0)):
+            for top in lists:
+                if rank < len(top) and top[rank][0] not in {c for c, _ in lex}:
+                    lex.append(top[rank])
         best: dict[str, float] = {}
         coverage: dict[str, float] = {}
         for q, rq in zip(queries, rerank_queries, strict=True):
@@ -432,6 +441,86 @@ async def test_lexical_hit_with_low_reranker_score_reaches_the_judge():
                                                        "v2_judge_candidates_dense": 8})
     out, _ = await prepare(pipe, q)
     assert "groups" not in llm.judged[0] and out.refusal
+
+
+async def test_judge_sees_the_part_of_a_long_chunk_that_matches_the_question():
+    q = "Что вы знаете про Руслана Солихова?"
+    names = ", ".join(f"Студентов Иван{i} Петрович" for i in range(120))
+    long_text = f"Бакалавриат, 4 курс, списки групп. {names}, Солихов Руслан Махмаднабиевич, Ильин Пётр Ильич."
+    assert long_text.index("Солихов") > 2000
+    chunk = _chunk("long", "ПИиКН - распределение по дисциплинам по выбору", "2026-09-01", "web_page", long_text)
+    CHUNKS["long"], POS["long"] = chunk, len(POS)
+    try:
+        llm = FakeLLM(analysis(standalone=q), answer="Солихов Руслан Махмаднабиевич учится на 4 курсе.",
+                      judgements=[judgement(["long"])])
+        pipe = make(llm, {q: [("long", 0.1), ("fit", 0.3)]})
+        out, _ = await prepare(pipe, q)
+        prompt = next(c for c in llm.calls if c["kind"] == "evidence_judgement")["messages"][-1]["content"]
+        assert "Солихов Руслан Махмаднабиевич" in prompt and "Бакалавриат, 4 курс" not in prompt
+        assert ids(out.context_chunks) == ["long"]
+    finally:
+        del CHUNKS["long"], POS["long"]
+
+
+async def test_lexical_slots_run_for_every_judge_query_in_later_rounds():
+    q = "Где сдавать домашние задания по дискретной математике?"
+    table = {q: [("fit", 0.5)], "nsuhw": [("stip", 0.4)], "домашние задания ФИТ": [("dorm", 0.4)]}
+    lexical = {q: [("fit", 0.5)], "nsuhw": [("rank", 0.01)], "домашние задания ФИТ": [("bach", 0.01)]}
+    llm = FakeLLM(analysis(standalone=q), judgements=[
+        judgement([], verdict="insufficient", mode="no_data", queries=["nsuhw", "домашние задания ФИТ"]),
+        judgement(["rank"])])
+    pipe = make(llm, table, lexical=lexical)
+    out, _ = await prepare(pipe, q)
+    assert pipe.search.lexical_for == [1, 2]  # round 1: the question; round 2: both judge queries
+    assert {"rank", "bach"} <= set(llm.judged[1])  # lexical-only hits of both queries reach the judge
+    assert len(llm.judged[1]) <= pipe.settings.v2_judge_candidates
+    assert ids(out.context_chunks) == ["rank"]
+
+
+async def test_general_knowledge_only_for_general_routes():
+    q = "Когда и как проходит посвящение на ФИТ НГУ?"
+    llm = FakeLLM(analysis("nsu", q), answer="Посвящение проходит в Томске.",
+                  judgements=[judgement([], verdict="insufficient", mode="general_knowledge")])
+    pipe = make(llm, {q: [("fit", 0.4)]})
+    with capture_logs() as logs:
+        out, _ = await prepare(pipe, q)
+    assert out.refusal and out.answer_mode == "no_data" and not out.general_note
+    assert any(e["event"] == "v2_general_knowledge_needs_general_route" and e["route"] == "nsu" for e in logs)
+    assert await stream(pipe, out) == NO_KB_REFUSAL and "stream" not in llm.kinds()
+    # approved documents of an NSU question are used, not general knowledge
+    llm = FakeLLM(analysis("nsu", q), judgements=[judgement(["fit"], verdict="partial", mode="general_knowledge")])
+    out, _ = await prepare(make(llm, {q: [("fit", 0.4)]}), q)
+    assert out.answer_mode == "partial" and ids(out.context_chunks) == ["fit"] and not out.general_note
+    # a general route keeps its general-knowledge answer
+    q2 = "Что такое производная?"
+    llm = FakeLLM(analysis("general", q2), judgements=[judgement([], verdict="insufficient", mode="general_knowledge")])
+    out, _ = await prepare(make(llm, {q2: [("fit", 0.1)]}), q2)
+    assert out.general_note and out.answer_mode == "general_knowledge" and not out.refusal
+
+
+async def test_attribution_reads_the_part_of_a_long_chunk_the_answer_uses():
+    names = ", ".join(f"Студентов Иван{i} Петрович" for i in range(120))
+    text = f"Списки групп. {names}, Солихов Руслан Махмаднабиевич — группа 22215, Ильин Пётр Ильич."
+    chunk = _chunk("long2", "Бакалавриат - 4 курс", "2026-09-01", "web_page", text)
+    CHUNKS["long2"], POS["long2"] = chunk, len(POS)
+    try:
+        q = "Кто такой Солихов Руслан Махмаднабиевич?"
+        answer = "Солихов Руслан Махмаднабиевич учится в группе 22215 на четвёртом курсе."
+        pipe = make(FakeLLM(analysis(standalone=q), answer=answer, judgements=[judgement(["long2"])]),
+                    {q: [("long2", 0.2)]})
+        seen = []
+
+        async def rerank_call(groups):
+            seen.extend(texts[0] for _, texts in groups)
+            return [[0.9] for _ in groups]
+
+        pipe._rerank_call = rerank_call
+        out, _ = await prepare(pipe, q)
+        sources = await pipe.finalize_sources(out, answer)
+        assert sources and sources[0]["source_url"] == "https://nsu.ru/long2"
+        assert seen and all("Солихов Руслан" in t and len(t) <= 1500 for t in seen)
+    finally:
+        del CHUNKS["long2"], POS["long2"]
 
 
 async def test_judge_runtime_runs_analysis_and_judge_generation_keeps_its_model():

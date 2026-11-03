@@ -15,6 +15,7 @@ from meno_rag.v2.analysis import _dedup
 from meno_rag.v2.memory import CHARS_PER_TOKEN
 from meno_rag.v2.prompting import _doc_type_label, _format_date
 from meno_rag.v2.search import Candidate
+from meno_rag.v2.snippets import snippet
 from meno_rag.v2.sources import clean_title
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,12 @@ def _header(n: int, cand: Candidate) -> str:
     return f"[{n}] {title} · {_doc_type_label(c.doc_type)} · {_format_date(c.date)} · {_host(c.url)}"
 
 
-def _excerpt(cand: Candidate, limit: int) -> str:
+def _excerpt(cand: Candidate, limit: int, terms: dict[str, float] | None = None) -> str:
+    """The window of the chunk that best matches the question terms; the head when nothing matches."""
+    if terms:
+        focused = snippet(cand.chunk.text or "", terms, limit)
+        if focused:
+            return focused
     text = " ".join((cand.chunk.index_text or cand.chunk.text or "").split())
     for head in (" ".join((cand.chunk.title or "").split()), clean_title(cand.chunk.title)):
         if head and text.startswith(head):
@@ -109,9 +115,10 @@ def _excerpt(cand: Candidate, limit: int) -> str:
 
 def build_judge_messages(
     *, question: str, standalone: str, needs: list[str], dialogue_hint: str, candidates: list[Candidate],
-    today: date, tried: Sequence[str] = (),
+    today: date, tried: Sequence[str] = (), terms: dict[str, float] | None = None,
 ) -> list[dict]:
-    """Excerpts share what is left of PROMPT_TOKENS after the fixed parts (MIN_EXCERPT..MAX_EXCERPT chars)."""
+    """Excerpts share what is left of PROMPT_TOKENS after the fixed parts (MIN_EXCERPT..MAX_EXCERPT chars);
+    with terms (snippets.query_terms of the question and needs) each excerpt is the best-matching window."""
     anchor = standalone.strip() or question.strip()
     parts = [f"Вопрос: {anchor}"]
     if question.strip() and question.strip() != anchor:
@@ -128,7 +135,7 @@ def build_judge_messages(
     fixed = len(system) + sum(len(p) + 1 for p in parts) + sum(len(h) + 2 for h in headers) + 16
     per = (PROMPT_TOKENS * CHARS_PER_TOKEN - fixed) // max(len(candidates), 1)
     per = max(MIN_EXCERPT, min(MAX_EXCERPT, per))
-    docs = "\n".join(f"{h}\n{_excerpt(c, per)}" for h, c in zip(headers, candidates, strict=True))
+    docs = "\n".join(f"{h}\n{_excerpt(c, per, terms)}" for h, c in zip(headers, candidates, strict=True))
     parts.append("Документы:\n" + (docs or "(ничего не найдено)"))
     return [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(parts)}]
 
@@ -269,11 +276,12 @@ async def judge(
     timeout_s: float,
     fallback_threshold: float = 0.5,
     tried: Sequence[str] = (),
+    terms: dict[str, float] | None = None,
 ) -> Judgement:
     """Never raises: timeouts, transport errors and broken JSON give the fallback judgement."""
     messages = build_judge_messages(
         question=question, standalone=standalone, needs=needs, dialogue_hint=dialogue_hint,
-        candidates=candidates, today=today, tried=list(tried),
+        candidates=candidates, today=today, tried=list(tried), terms=terms,
     )
     try:
         raw = await asyncio.wait_for(

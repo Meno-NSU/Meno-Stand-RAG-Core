@@ -156,3 +156,11 @@ async def test_lexical_top_scores_bm25_hits_that_fusion_dropped():
     assert 8 in {c.pos for c in res.candidates}  # BM25 rank 3: fusion alone would have dropped it
     plain = await svc.search(["q", "q2"], ["q", "q"])
     assert plain.lexical_top == []
+
+
+async def test_lexical_top_for_several_queries_round_robin():
+    dense = {"q": [(1, .9)], "q2": [(3, .9)]}
+    bm25 = {"q": [(7, 9.0), (2, 5.0)], "q2": [(9, 5.0), (7, 4.0), (4, 1.0)]}
+    svc = _service(dense, bm25, FakeReranker({}), V2_RERANK_TOP=1)
+    res = await svc.search(["q", "q2"], ["q", "q"], lexical_top=3, lexical_for=2)
+    assert [c.pos for c in res.lexical_top] == [7, 9, 2, 4]  # rank 1 of each query first, no duplicates

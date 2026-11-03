@@ -196,3 +196,24 @@ def test_fallback_limits_and_no_data():
     assert fallback_judgement(many, 0.5).relevant == [0, 1, 2, 3, 4, 5]
     low = fallback_judgement([cand(0, 0.3, "x")], 0.5)
     assert low.relevant == [] and low.answer_mode == "no_data" and low.fallback
+
+
+def test_query_biased_excerpts_in_the_prompt():
+    from meno_rag.v2.snippets import query_terms
+
+    q = "Что вы знаете про Руслана Солихова?"
+    filler = "Список студентов группы, распределение по дисциплинам по выбору. " * 40
+    text = filler + "Солихов Руслан Махмаднабиевич, группа 22215. " + filler
+    cands = [cand(i, 0.5, f"Бакалавриат - {i} курс", text, "2026-09-01") for i in range(14)]
+    terms = query_terms([q])
+    msgs = build_judge_messages(question=q, standalone=q, needs=[q], dialogue_hint="", candidates=cands,
+                                today=TODAY, terms=terms)
+    assert sum(estimate_tokens(m["content"]) for m in msgs) <= 1800
+    lines = msgs[1]["content"].split("\n")
+    excerpts = [lines[i + 1] for i, x in enumerate(lines) if x.startswith("[")]
+    assert len(excerpts) == 14 and all("Солихов Руслан" in e and len(e) <= 300 for e in excerpts)
+    # nothing matches: the head of the chunk
+    head = build_judge_messages(question="Кто декан ММФ?", standalone="Кто декан ММФ?", needs=[],
+                                dialogue_hint="", candidates=CANDS[:1], today=TODAY,
+                                terms=query_terms(["Кто декан ММФ?"]))[1]["content"]
+    assert "НГУ вошёл в топ-10" in head
