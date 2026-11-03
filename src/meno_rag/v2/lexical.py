@@ -17,8 +17,9 @@ class Bm25Retriever:
         self._stemmer = SnowballStemmer("russian")
         self._index = bm25s.BM25.load(str(index_dir), load_corpus=False)
 
-    def search(self, query: str, k: int) -> list[tuple[int, float]]:
-        tokens = tokenize_and_normalize_text(query, self._stemmer).split()
+    def search(self, query: str, k: int, extra_tokens: tuple[str, ...] = ()) -> list[tuple[int, float]]:
+        """extra_tokens: index tokens (already stems) added to the query's own, e.g. inflection variants."""
+        tokens = tokenize_and_normalize_text(query, self._stemmer).split() + list(extra_tokens)
         n = len(self.release.chunks)
         if not tokens or n == 0 or k <= 0:
             return []
@@ -29,6 +30,13 @@ class Bm25Retriever:
 
     def tokens(self, text: str) -> list[str]:
         return tokenize_and_normalize_text(text or "", self._stemmer).split()
+
+    def variants(self, token: str, min_len: int = 5) -> list[str]:
+        """Index tokens that are the token or a prefix of it at most 3 chars shorter (>= min_len chars):
+        Snowball stems «Солихова» to «солихов» but «Солихов» to «солих»."""
+        vocab = getattr(self._index, "vocab_dict", None) or {}
+        out = [token[:n] for n in range(max(min_len, len(token) - 3), len(token)) if token[:n] in vocab]
+        return ([token] if token in vocab else []) + out[::-1]
 
     def doc_freq(self, token: str) -> int | None:
         """Number of chunks containing an index token; None if the index cannot tell."""

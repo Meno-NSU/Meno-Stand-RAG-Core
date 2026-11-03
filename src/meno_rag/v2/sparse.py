@@ -43,7 +43,7 @@ class Bm25Encoder:
         ids = sorted(tf)
         return ids, [tf[i] / (tf[i] + norm) for i in ids]
 
-    def query(self, text: str) -> tuple[list[int], list[float]]:
-        tf = Counter(term_id(t) for t in self.tokens(text))
+    def query(self, text: str, extra_tokens: tuple[str, ...] = ()) -> tuple[list[int], list[float]]:
+        tf = Counter(term_id(t) for t in [*self.tokens(text), *extra_tokens])
         ids = sorted(tf)
         return ids, [float(tf[i]) for i in ids]

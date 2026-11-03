@@ -111,8 +111,9 @@ class FakeSearch:
     async def run_gpu(self, fn, *args):
         return fn(*args)
 
-    async def search(self, queries, rerank_queries, lexical_top=0, lexical_for=1):
+    async def search(self, queries, rerank_queries, lexical_top=0, lexical_for=1, lexical_extra=()):
         self.calls.append((list(queries), list(rerank_queries)))
+        self.lexical_extra = list(lexical_extra)
         self.lexical_top.append(lexical_top)
         self.lexical_for.append(lexical_for)
         lists = [self.lexical.get(q, [])[:lexical_top] for q in queries[:lexical_for]] if lexical_top else []
@@ -864,6 +865,10 @@ class FakeBm25:
     def doc_freq(self, token):
         return self.df.get(token, 5000)
 
+    def variants(self, token, min_len=5):
+        vocab = {t for t, df in self.df.items() if df}
+        return [token[:n] for n in range(len(token), max(min_len, len(token) - 3) - 1, -1) if token[:n] in vocab]
+
     def idf(self, token):
         return 1.0
 
@@ -914,3 +919,16 @@ async def test_rerank_evidence_rare_term_matches_take_at_most_half_of_the_contex
     pipe = make(FakeLLM(analysis(standalone=q)), {q: dense}, lexical={q: [("groups", 0.02)]}, **RERANK)
     out, _ = await prepare(pipe, q)
     assert "groups" not in ids(out.context_chunks)
+
+
+async def test_rerank_evidence_matches_an_inflected_surname():
+    q = "Что ты знаешь про Руслана Солихова?"
+    others = [c for c in CHUNKS if c != "groups"]
+    dense = [(c, 0.1) for c in others] + [("groups", 0.02)]
+    pipe = make(FakeLLM(analysis(standalone=q), answer=GROUPS), {q: dense}, lexical={q: [("groups", 0.02)]},
+                **RERANK)
+    pipe.search.bm25 = FakeBm25({"солихов": 3})  # the index has the nominative form only
+    out, events = await prepare(pipe, q)
+    assert pipe.search.lexical_extra == ["солихов"]  # BM25 also searches the indexed form
+    assert ids(out.context_chunks) == ["groups"] and not out.refusal
+    assert [e.detail for e in events if e.stage == StageName.RERANK][0]["rare_term"] == "солихова"

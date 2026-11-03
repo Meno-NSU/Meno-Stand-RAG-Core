@@ -63,6 +63,39 @@ def collect(args) -> None:
                 print(f"{n}/{len(items)}", file=sys.stderr, flush=True)
 
 
+def parity(args) -> None:
+    """bm25s vs the Qdrant sparse vector on the same queries: top-k overlap, doc-level R@10, latency."""
+    import time
+
+    from meno_rag.v2.kb import load_release
+    from meno_rag.v2.lexical import Bm25Retriever
+    from meno_rag.v2.qdrant_store import QdrantBm25Retriever, QdrantStore
+
+    kb = Path(args.kb)
+    release = load_release(kb)
+    a = Bm25Retriever(release, kb / "ragcore" / "knowledge" / "bm25")
+    b = QdrantBm25Retriever(QdrantStore(args.qdrant_url), args.qdrant_collection)
+    qmap = {}
+    if args.queries:
+        qmap = {r["item_key"]: (r.get("queries") or []) for r in map(json.loads, open(args.queries))}
+    items = [i for i in map(json.loads, open(args.items)) if i.get("answerable") and _gold(i)]
+    ov10 = ov50 = hit_a = hit_b = 0.0
+    ta = tb = 0.0
+    for it in items:
+        q = (qmap.get(it["id"]) or [it["question"]])[0]
+        t0 = time.perf_counter(); ra = [p for p, _ in a.search(q, 50)]; ta += time.perf_counter() - t0
+        t0 = time.perf_counter(); rb = [p for p, _ in b.search(q, 50)]; tb += time.perf_counter() - t0
+        ov10 += len(set(ra[:10]) & set(rb[:10])) / 10
+        ov50 += len(set(ra) & set(rb)) / 50
+        gold = set(_gold(it))
+        hit_a += any(release.chunks[p].doc_id in gold for p in ra[:10])
+        hit_b += any(release.chunks[p].doc_id in gold for p in rb[:10])
+    n = len(items)
+    print(f"items {n} | top-10 overlap {ov10 / n:.3f} top-50 overlap {ov50 / n:.3f} | "
+          f"R@10 bm25s {hit_a / n:.3f} qdrant {hit_b / n:.3f} | ms/query bm25s {ta / n * 1000:.1f} "
+          f"qdrant {tb / n * 1000:.1f}")
+
+
 def wrrf(lists: list[list[int]], weights: list[float], k: int = 60) -> list[int]:
     total: dict[int, float] = {}
     for lst, w in zip(lists, weights):
@@ -132,6 +165,12 @@ def main(argv=None) -> None:
     c.add_argument("--device", default="cuda")
     c.add_argument("--mem-fraction", type=float, default=None)
     c.add_argument("--k", type=int, default=100)
+    pa = sub.add_parser("parity")
+    pa.add_argument("--kb", required=True)
+    pa.add_argument("--items", required=True)
+    pa.add_argument("--queries", default=None)
+    pa.add_argument("--qdrant-url", default="http://127.0.0.1:6433")
+    pa.add_argument("--qdrant-collection", required=True)
     e = sub.add_parser("eval")
     e.add_argument("--cache", required=True)
     e.add_argument("--also", nargs=3, type=float, action="append", default=[],
@@ -139,7 +178,7 @@ def main(argv=None) -> None:
     args = ap.parse_args(argv)
     if args.cmd == "eval":
         args.also = [(w, int(c), int(d)) for w, c, d in args.also]
-    (collect if args.cmd == "collect" else evaluate)(args)
+    {"collect": collect, "parity": parity, "eval": evaluate}[args.cmd](args)
 
 
 if __name__ == "__main__":

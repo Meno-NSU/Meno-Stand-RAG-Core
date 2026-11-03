@@ -51,3 +51,17 @@ def test_doc_freq_and_tokens(retriever):
     toks = retriever.tokens("Стипендия")
     assert toks and retriever.doc_freq(toks[0]) >= 1
     assert retriever.doc_freq("zzzнесуществующее") == 0
+
+
+def test_variants_are_indexed_prefixes(retriever):
+    tok = retriever.tokens("Стипендия")[0]
+    assert retriever.variants(tok)[0] == tok
+    assert retriever.variants(tok + "ов") == [tok]  # an unindexed longer form finds the indexed one
+    assert retriever.variants("zzzzzz") == []
+
+
+def test_search_with_extra_tokens(retriever):
+    tok = retriever.tokens("Стипендия")[0]
+    assert all(p != 0 for p, _ in retriever.search("расписание", 5))
+    assert retriever.search("расписание", 5, (tok,))[0][0] in (0, 1)
+    assert 0 in [p for p, _ in retriever.search("расписание", 5, (tok,))]

@@ -147,8 +147,8 @@ class QdrantBm25Retriever:
         self.collection = collection
         self.encoder = encoder or Bm25Encoder()
 
-    def search(self, query: str, k: int) -> list[tuple[int, float]]:
-        ids, vals = self.encoder.query(query)
+    def search(self, query: str, k: int, extra_tokens: tuple[str, ...] = ()) -> list[tuple[int, float]]:
+        ids, vals = self.encoder.query(query, extra_tokens)
         return self.store.search_sparse(self.collection, ids, vals, k)
 
     def idf(self, token: str) -> float:

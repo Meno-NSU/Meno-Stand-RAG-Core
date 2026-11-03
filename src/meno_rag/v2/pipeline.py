@@ -32,7 +32,7 @@ from meno_rag.v2.memory import (
 )
 from meno_rag.v2.prompting import PROMPT_GUARD_TEXT, SEARCH_ROUTES, LeakGuard, assemble_context, build_messages
 from meno_rag.v2.search import Candidate
-from meno_rag.v2.snippets import query_terms, snippet
+from meno_rag.v2.snippets import query_terms, snippet, stems_match
 from meno_rag.v2.sources import attribute, llm_check, to_sources
 
 logger = structlog.get_logger(__name__)
@@ -385,11 +385,14 @@ class V2Pipeline:
         loop.rounds = 1
         queries = _dedup([standalone, *an.needs])
         loop.queries = list(queries)
+        rare, forms = self._rarest_term(standalone)
         await emit(StageName.RETRIEVAL, StageStatus.STARTED, None, {"round": 1})
         t0 = time.perf_counter()
+        extra = tuple(f for f in forms if f != rare)  # inflection variants the question's own stem misses
+        kw = {"lexical_extra": extra} if extra else {}
         result = await self.search.search(
             queries, [standalone] * len(queries),
-            lexical_top=s.v2_judge_candidates_dense + s.v2_judge_candidates_lexical, lexical_for=1,
+            lexical_top=s.v2_judge_candidates_dense + s.v2_judge_candidates_lexical, lexical_for=1, **kw,
         )
         await emit(StageName.RETRIEVAL, StageStatus.COMPLETED, _ms(t0),
                    {"round": 1, "queries": queries, "candidates": len(result.candidates),
@@ -397,11 +400,9 @@ class V2Pipeline:
         for c in result.candidates:
             loop.pool[c.pos] = c
         cands = self._judge_candidates(result, self._schedule_candidates(an, today), [], set())
-        rare = self._rarest_term(standalone)
         lexical = {c.pos for c in getattr(result, "lexical_top", [])}
         by_score = [i for i, c in enumerate(cands) if c.score >= s.v2_rerank_threshold]
-        by_term = [i for i, c in enumerate(cands)
-                   if i not in by_score and rare and rare in self._chunk_terms(c.chunk)]
+        by_term = [i for i, c in enumerate(cands) if i not in by_score and rare and self._has_term(c.chunk, forms)]
         # rare-term matches keep up to half of the context even when many chunks pass the threshold
         by_term = by_term[: s.v2_max_context_chunks // 2]
         relevant = sorted(by_score[: s.v2_max_context_chunks - len(by_term)] + by_term)
@@ -418,21 +419,24 @@ class V2Pipeline:
         loop.log.append(_judgement_log(1, j, cands))
         return loop
 
-    def _rarest_term(self, text: str) -> str:
-        """The question stem found in the fewest chunks (0 < df <= V2_RARE_TERM_MAX_DF), or ''."""
+    def _rarest_term(self, text: str) -> tuple[str, list[str]]:
+        """The question stem whose index forms (itself + shorter inflection variants) occur in the fewest
+        chunks, 0 < df <= V2_RARE_TERM_MAX_DF, with those forms; ('', []) if none."""
         bm25 = getattr(self.search, "bm25", None)
         limit = self.settings.v2_rare_term_max_df
-        if limit <= 0 or not hasattr(bm25, "doc_freq") or not hasattr(bm25, "tokens"):
-            return ""
-        best, best_df = "", limit + 1
+        if limit <= 0 or not all(hasattr(bm25, a) for a in ("doc_freq", "tokens", "variants")):
+            return "", []
+        best, best_forms, best_df = "", [], limit + 1
         for t in dict.fromkeys(bm25.tokens(text)):
-            df = bm25.doc_freq(t)
-            if df and df < best_df:
-                best, best_df = t, df
-        return best
+            forms = bm25.variants(t) if len(t) >= 5 else ([t] if bm25.doc_freq(t) else [])
+            df = sum(bm25.doc_freq(f) or 0 for f in forms)
+            if forms and 0 < df < best_df:
+                best, best_forms, best_df = t, forms, df
+        return best, best_forms
 
-    def _chunk_terms(self, chunk: Chunk) -> set[str]:
-        return set(self.search.bm25.tokens(chunk.index_text))
+    def _has_term(self, chunk: Chunk, forms: list[str]) -> bool:
+        toks = set(self.search.bm25.tokens(chunk.index_text))
+        return bool(toks & set(forms)) or any(stems_match(u, forms[0]) for u in toks if len(u) >= 5)
 
     def _judge_candidates(self, result, schedule_cands, relevant, judged) -> list[Candidate]:
         """Approved documents of earlier rounds + unseen ones: the best cross-encoder scores, then the best

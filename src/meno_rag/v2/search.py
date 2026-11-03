@@ -53,16 +53,18 @@ class SearchService:
         return await loop.run_in_executor(self._executor, fn, *args)
 
     async def search(
-        self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1
+        self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1,
+        lexical_extra: tuple[str, ...] = (),
     ) -> SearchResult:
         """lexical_top > 0 also returns the top BM25 hits of the first lexical_for queries, scored even when
-        RRF dropped them."""
+        RRF dropped them. lexical_extra: index tokens added to the first query's BM25 search."""
         return await self.run_gpu(
-            self._search_sync, list(queries), list(rerank_queries), lexical_top, lexical_for
+            self._search_sync, list(queries), list(rerank_queries), lexical_top, lexical_for, tuple(lexical_extra)
         )
 
     def _search_sync(
-        self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1
+        self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1,
+        lexical_extra: tuple[str, ...] = (),
     ) -> SearchResult:
         s = self.settings
         t = {"embed_dense": 0.0, "bm25": 0.0, "rrf": 0.0, "rerank": 0.0}
@@ -82,7 +84,8 @@ class SearchService:
             rq = rerank_queries[i] if i < len(rerank_queries) and rerank_queries[i].strip() else q
             k = s.v2_candidates_per_query
             dense_hits = timed("embed_dense", lambda: self.dense.search(q, k))
-            bm25_hits = timed("bm25", lambda: self.bm25.search(q, k))
+            extra = lexical_extra if not per_query and lexical_extra else ()
+            bm25_hits = timed("bm25", lambda: self.bm25.search(q, k, extra) if extra else self.bm25.search(q, k))
             fused = timed("rrf", lambda: rrf([dense_hits, bm25_hits], limit=s.v2_rerank_top))
             kept = [p for p, _ in fused[: s.v2_rerank_top]]
             if lexical_top > 0 and len(per_query) < lexical_for:

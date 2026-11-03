@@ -42,7 +42,7 @@ def _is_exact(raw: str) -> bool:
             or sum(ch.isupper() for ch in raw) >= 2)
 
 
-def _stems_match(a: str, b: str) -> bool:
+def stems_match(a: str, b: str) -> bool:
     """Equal stems, or one a short extension of the other: Snowball gives «солих» for «Солихов» but
     «солихов» for «Солихова»."""
     if a == b:
@@ -66,7 +66,7 @@ class _Matcher:
             keys = {f"x:{low}"} & self.terms.keys()
             stem = _stem(low)
             if len(stem) >= MIN_STEM:
-                keys |= {f"s:{q}" for q in self.stems if _stems_match(stem, q)}
+                keys |= {f"s:{q}" for q in self.stems if stems_match(stem, q)}
             hit = self._cache[low] = frozenset(keys)
         return hit
 
