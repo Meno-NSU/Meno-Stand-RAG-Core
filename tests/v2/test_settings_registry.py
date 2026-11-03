@@ -27,7 +27,8 @@ def test_defaults(monkeypatch):
     assert (s.v2_embedder, s.v2_reranker, s.v2_device) == ("frida", "bge", "cuda")
     assert s.v2_gpu_mem_fraction == 0.3 and s.v2_embed_dtype == "bf16"
     assert s.v2_sources_llm_check is False
-    assert s.v2_rerank_threshold == 0.3 and s.v2_attribution_threshold == 0.5
+    assert s.v2_rerank_threshold == 0.5 and s.v2_attribution_threshold == 0.5
+    assert s.v2_judge_candidates == 14
     assert (s.v2_history_budget_tokens, s.v2_summary_budget_tokens) == (5000, 800)
     assert (s.v2_context_budget_tokens, s.v2_max_answer_tokens) == (6000, 1500)
     assert (s.v2_max_context_chunks, s.v2_max_sources, s.v2_max_rounds) == (8, 5, 3)

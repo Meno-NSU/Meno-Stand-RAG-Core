@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import date
 from typing import Any
 
@@ -10,9 +11,10 @@ from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime
 from meno_rag.v2.kb import Chunk
 from meno_rag.v2.memory import SummaryStore, estimate_tokens
 from meno_rag.v2.pipeline import GENERAL_NOTE, LEAK_REPLACEMENT, NO_KB_REFUSAL, V2Outcome, V2Pipeline
-from meno_rag.v2.prompting import PROMPT_GUARD_TEXT
+from meno_rag.v2.prompting import MODE_NOTES, NO_GREETING, PROMPT_GUARD_TEXT
 from meno_rag.v2.schedule import ScheduleBlock
 from meno_rag.v2.search import Candidate, SearchResult
+from meno_rag.v2.sources import clean_title
 
 TODAY = date(2026, 11, 2)
 RUNTIME = PipelineRuntime.uniform(ModelRuntime(model_id="gemma", base_url="http://llm"))
@@ -22,11 +24,33 @@ ALLOWED_STATUSES = {v for k, v in vars(StageStatus).items() if k.isupper()}
 STIP = "Академическая стипендия в НГУ составляет 3000 рублей в месяц."
 DORM = "Общежития НГУ расположены на улице Пирогова в Академгородке."
 FIT = "Факультет информационных технологий готовит программистов и аналитиков."
+PALCH = "Пальчунов Дмитрий Евгеньевич — профессор ММФ, заведующий кафедрой, читает курсы по логике."
+PALCH_REV = "Студенты отмечают, что лекции Дмитрия Евгеньевича Пальчунова понятные и строгие."
+RANK = "НГУ вошёл в десятку рейтинга вузов по качеству преподавания."
+ZAB = "Анастасия Забродина — телеведущая федерального канала."
+DEAN_OLD = "Деканом механико-математического факультета является Иванов Иван Иванович."
+DEAN_NEW = "Исполняющим обязанности декана ММФ назначен Петров Пётр Петрович."
+BACH = "На ФИТ открыто новое направление бакалавриата «Искусственный интеллект»."
+MAG = "На ФИТ открыта новая магистерская программа «Анализ данных»."
+
+
+def _chunk(cid, title, date_, doc_type, text, url=None):
+    return Chunk(cid, f"d-{cid}", url or f"https://nsu.ru/{cid}", title, date_, doc_type, None, text, text)
+
+
 CHUNKS = {
-    "stip": Chunk("stip", "d-stip", "https://nsu.ru/stip", "Стипендии", "2026-09-01", "regulation", None, STIP, STIP),
-    "dorm": Chunk("dorm", "d-dorm", "https://nsu.ru/dorm", "Общежития", "2025-05-10", "housing_or_campus", None,
-                  DORM, DORM),
-    "fit": Chunk("fit", "d-fit", "https://nsu.ru/fit", "ФИТ", None, "faculty_card", None, FIT, FIT),
+    "stip": _chunk("stip", "Стипендии", "2026-09-01", "regulation", STIP),
+    "dorm": _chunk("dorm", "Общежития", "2025-05-10", "housing_or_campus", DORM),
+    "fit": _chunk("fit", "ФИТ", None, "faculty_card", FIT),
+    "palch": _chunk("palch", "Пальчунов Дмитрий Евгеньевич | НГУ", None, "person_card", PALCH),
+    "palch_rev": _chunk("palch_rev", "Отзывы о преподавателях ММФ", "2025-03-01", "news", PALCH_REV),
+    "rank": _chunk("rank", "НГУ в рейтинге вузов", "2026-06-01", "news", RANK),
+    "zab": _chunk("zab", "Забродина Анастасия, телеведущая", "2024-01-01", "web_page", ZAB,
+                  url="https://tv.example/zab"),
+    "dean_old": _chunk("dean_old", "Механико-математический факультет", "2023-02-01", "faculty_card", DEAN_OLD),
+    "dean_new": _chunk("dean_new", "Назначен и. о. декана ММФ", "2026-10-21", "news", DEAN_NEW),
+    "bach": _chunk("bach", "Новое направление бакалавриата ФИТ", "2026-03-01", "program_page", BACH),
+    "mag": _chunk("mag", "Новая магистерская программа ФИТ", "2026-04-01", "program_page", MAG),
 }
 POS = {cid: i for i, cid in enumerate(CHUNKS)}
 
@@ -66,10 +90,11 @@ class FakeReranker:
 
 
 class FakeSearch:
-    """table: query -> [(chunk_id, score)]; coverage = best score per query."""
+    """table: query -> [(chunk_id, score)]; rr: (rerank query, chunk_id) -> score overriding the table's."""
 
-    def __init__(self, table):
+    def __init__(self, table, rr=None):
         self.table = table
+        self.rr = rr or {}
         self.calls: list[tuple[list[str], list[str]]] = []
         self.reranker = FakeReranker()
 
@@ -80,30 +105,60 @@ class FakeSearch:
         self.calls.append((list(queries), list(rerank_queries)))
         best: dict[str, float] = {}
         coverage: dict[str, float] = {}
-        for q in queries:
+        for q, rq in zip(queries, rerank_queries, strict=True):
             coverage[q] = 0.0
             for cid, sc in self.table.get(q, []):
+                sc = self.rr.get((rq, cid), sc)
                 best[cid] = max(best.get(cid, sc), sc)
                 coverage[q] = max(coverage[q], sc)
         cands = [Candidate(POS[c], CHUNKS[c], s) for c, s in sorted(best.items(), key=lambda p: -p[1])]
         return SearchResult(cands, coverage, {"embed_dense": 1.0, "bm25": 1.0, "rrf": 0.1, "rerank": 2.0})
 
 
+_SHOWN_RE = re.compile(r"^\[(\d+)\] (.+?) · ", re.M)
+
+
+def judgement(relevant=None, *, stale=(), rejected=(), namesake=(), verdict="sufficient", mode="documents",
+              queries=(), missing="", clarify=""):
+    """A scripted judge reply by chunk id; relevant=None accepts every shown candidate."""
+    return {"relevant": relevant, "stale": list(stale), "rejected": list(rejected), "namesake": list(namesake),
+            "verdict": verdict, "mode": mode, "queries": list(queries), "missing": missing, "clarify": clarify}
+
+
 class FakeLLM:
-    def __init__(self, analysis, answer="Здравствуйте! Чем помочь?", reformulations=()):
+    def __init__(self, analysis, answer="Здравствуйте! Чем помочь?", judgements=()):
         self.analysis = analysis
         self.answer = answer
-        self.reformulations = list(reformulations)
+        self.judgements = list(judgements)
+        self.judged: list[list[str]] = []  # chunk ids shown to the judge, per call
         self.calls: list[dict] = []
+
+    def _judge(self, messages) -> str:
+        titles = {clean_title(c.title): cid for cid, c in CHUNKS.items()}
+        titles[BLOCK.title] = "schedule"
+        shown = {titles.get(t, t): int(n) for n, t in _SHOWN_RE.findall(messages[-1]["content"])}
+        self.judged.append(list(shown))
+        spec = self.judgements.pop(0) if self.judgements else judgement()
+        if isinstance(spec, str):
+            return spec  # a broken reply
+        rel = list(shown) if spec["relevant"] is None else spec["relevant"]
+        docs = [{"i": shown[c], "same_entity": True, "relevant": True, "stale": c in spec["stale"], "need": 1}
+                for c in rel if c in shown]
+        docs += [{"i": shown[c], "same_entity": True, "relevant": False, "stale": False, "need": None}
+                 for c in spec["rejected"] if c in shown]
+        docs += [{"i": shown[c], "same_entity": False, "relevant": True, "stale": False, "need": None}
+                 for c in spec["namesake"] if c in shown]
+        return json.dumps({"docs": docs, "verdict": spec["verdict"], "missing": spec["missing"],
+                           "queries": spec["queries"], "answer_mode": spec["mode"],
+                           "clarify_question": spec["clarify"]}, ensure_ascii=False)
 
     async def chat_completion_text(self, *, runtime, messages, stage="unknown", **kw):
         name = ((kw.get("response_format") or {}).get("json_schema") or {}).get("name")
-        self.calls.append({"kind": name or stage, "messages": messages, **kw})
+        self.calls.append({"kind": name or stage, "stage": stage, "messages": messages, **kw})
         if name == "turn_analysis":
             return json.dumps(self.analysis, ensure_ascii=False)
-        if name == "search_queries":
-            return json.dumps({"queries": self.reformulations.pop(0) if self.reformulations else []},
-                              ensure_ascii=False)
+        if name == "evidence_judgement":
+            return self._judge(messages)
         if name == "source_check":
             return json.dumps({"keep": [0, 1, 2, 3, 4]})
         if stage == StageName.GENERATION:
@@ -130,14 +185,14 @@ class FakeSchedule:
         return list(self.blocks)
 
 
-def analysis(route="nsu", standalone="Какой размер стипендии в НГУ?", subqueries=(), chain=False):
-    return {"route": route, "standalone_question": standalone, "subqueries": list(subqueries),
-            "chain": chain, "focus": ""}
+def analysis(route="nsu", standalone="Какой размер стипендии в НГУ?", needs=None, focus=""):
+    return {"route": route, "standalone_question": standalone, "needs": list(needs or [standalone]),
+            "focus": focus}
 
 
-def make(llm, table=None, schedule=None, **settings):
+def make(llm, table=None, schedule=None, rr=None, **settings):
     s = Settings(_env_file=None, **settings)
-    pipe = V2Pipeline(search=FakeSearch(table or {}), llm_router=llm, settings=s, summary_store=SummaryStore(),
+    pipe = V2Pipeline(search=FakeSearch(table or {}, rr), llm_router=llm, settings=s, summary_store=SummaryStore(),
                       docs={}, schedule=schedule)
     pipe.today_fn = lambda: TODAY
     return pipe
@@ -168,6 +223,10 @@ def stages(events):
     return [(e.stage, e.status, (e.detail or {}).get("round")) for e in events]
 
 
+def ids(cands):
+    return [c.chunk.chunk_id for c in cands]
+
+
 # --- paths ---------------------------------------------------------------------------------
 
 
@@ -177,25 +236,30 @@ async def test_chitchat_no_search_no_sources():
     out, events = await prepare(pipe, "привет")
     assert isinstance(out, V2Outcome) and out.route == "chitchat"
     assert pipe.search.calls == [] and out.context_chunks == [] and not out.refusal and not out.general_note
+    assert "evidence_judgement" not in llm.kinds()
     assert {e.stage for e in events} == {StageName.QUERY_REWRITE}
     assert await stream(pipe, out) == "Здравствуйте! Чем помочь? "
     assert await pipe.finalize_sources(out, "Здравствуйте! Чем помочь?") == []
     assert out.sources == [] and pipe.search.reranker.calls == 0
 
 
-async def test_nsu_covered_first_round_is_single_round():
+async def test_sufficient_first_round_is_single_round():
     q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q, subqueries=["размер стипендии", "общежития НГУ"]),
-                  answer=f"{STIP} Ещё: {DORM}")
+    llm = FakeLLM(analysis(standalone=q, needs=["размер стипендии", "общежития НГУ"]), answer=f"{STIP} Ещё: {DORM}")
     table = {q: [("stip", 0.8)], "размер стипендии": [("stip", 0.9)], "общежития НГУ": [("dorm", 0.7)]}
     pipe = make(llm, table)
     out, events = await prepare(pipe)
     round1 = [q, "размер стипендии", "общежития НГУ"]
-    assert pipe.search.calls == [(round1, round1)]
-    assert "search_queries" not in llm.kinds()
-    assert [c.chunk.chunk_id for c in out.context_chunks] == ["stip", "dorm"]
+    assert pipe.search.calls == [(round1, [q, q, q])]  # ranked by the standalone question only
+    assert llm.kinds().count("evidence_judgement") == 1
+    judge_call = next(c for c in llm.calls if c["kind"] == "evidence_judgement")
+    assert judge_call["stage"] == "rerank" and judge_call["temperature"] == 0 and judge_call["timeout"] == 30
+    assert "1. размер стипендии\n2. общежития НГУ" in judge_call["messages"][-1]["content"]
+    assert ids(out.context_chunks) == ["stip", "dorm"] and out.answer_mode == "documents"
     assert {r for _, _, r in stages(events) if r is not None} == {1}
-    assert out.search_queries == [q, "размер стипендии", "общежития НГУ"]
+    rerank = [e for e in events if e.stage == StageName.RERANK and e.status == StageStatus.COMPLETED]
+    assert rerank[0].model_id == "gemma" and rerank[0].detail["verdict"] == "sufficient"
+    assert out.search_queries == round1
     assert STIP in out.context and DORM in out.context
     # timeouts: analysis 20 s, generation from settings; answer tokens capped
     assert next(c for c in llm.calls if c["kind"] == "turn_analysis")["timeout"] == 20
@@ -211,49 +275,171 @@ async def test_nsu_covered_first_round_is_single_round():
     assert out.sources == sources
 
 
-async def test_uncovered_subquery_triggers_second_round():
-    q = "Стипендия и общежитие ФИТ"
-    llm = FakeLLM(analysis(standalone=q, subqueries=["стипендия ФИТ", "общежитие ФИТ"]),
-                  answer=STIP, reformulations=[["общежития студентов НГУ Пирогова"]])
-    table = {q: [("stip", 0.6)], "стипендия ФИТ": [("stip", 0.9)], "общежитие ФИТ": [("fit", 0.1)],
-             "общежития студентов НГУ Пирогова": [("dorm", 0.8)]}
-    pipe = make(llm, table)
-    out, events = await prepare(pipe, q, trace=True)
-    assert [c[0] for c in pipe.search.calls] == [[q, "стипендия ФИТ", "общежитие ФИТ"],
-                                                  ["общежития студентов НГУ Пирогова"]]
-    reform = next(c for c in llm.calls if c["kind"] == "search_queries")
-    assert reform["timeout"] == 15
-    prompt = reform["messages"][-1]["content"]
-    assert "общежитие ФИТ" in prompt and "Стипендии" in prompt  # uncovered subquery + found titles
+async def test_person_question_drifted_reformulation_cannot_take_over():
+    """«Что говорят про Пальчунова?»: the judge rejects ranking news, keeps the person card; a drifted
+    follow-up query finds the ranking news again, but it is scored against the standalone question."""
+    q = "Что говорят про Пальчунова? Хороший ли он преподаватель?"
+    drift = "рейтинг преподавателей НГУ"
+    table = {q: [("palch", 0.78), ("rank", 0.35)], drift: [("rank", 0.999), ("palch_rev", 0.9)]}
+    rr = {(q, "rank"): 0.35, (q, "palch_rev"): 0.65}
+    llm = FakeLLM(
+        analysis(standalone=q, focus="Пальчунов"),
+        answer=f"{PALCH} {PALCH_REV}",
+        judgements=[
+            judgement(["palch"], rejected=["rank"], verdict="partial", mode="partial",
+                      missing="отзывы студентов", queries=[drift]),
+            judgement(["palch", "palch_rev"]),
+        ],
+    )
+    pipe = make(llm, table, rr=rr)
+    out, events = await prepare(pipe, "что говорят про Пальчунова? он хороший преподаватель?",
+                                history=[("user", "Привет"), ("assistant", "Здравствуйте!")], trace=True)
+    assert [c[0] for c in pipe.search.calls] == [[q], [drift]]
+    assert all(rq == q for _, rqs in pipe.search.calls for rq in rqs)  # never ranked by the reformulation
+    assert llm.judged[0] == ["palch", "rank"]
+    assert llm.judged[1] == ["palch", "palch_rev"]  # accepted card kept, rejected news not shown again
+    judge_prompts = [c["messages"][-1]["content"] for c in llm.calls if c["kind"] == "evidence_judgement"]
+    assert "Фокус диалога: Пальчунов" in judge_prompts[0] and "Прежние запросы" not in judge_prompts[0]
+    assert f"Прежние запросы:\n- {drift}" in judge_prompts[1]
     assert (StageName.RETRIEVAL, StageStatus.COMPLETED, 2) in stages(events)
     assert (StageName.RERANK, StageStatus.COMPLETED, 2) in stages(events)
-    assert (StageName.QUERY_REWRITE, StageStatus.COMPLETED, 2) in stages(events)
-    assert out.trace["v2"]["rounds"] == 2
-    assert {c.chunk.chunk_id for c in out.context_chunks} == {"stip", "dorm"}
-    assert "общежития студентов НГУ Пирогова" in out.search_queries
+    assert set(ids(out.context_chunks)) == {"palch", "palch_rev"} and RANK not in out.context
+    assert not out.refusal and out.answer_mode == "documents"
+    assert PALCH in out.context and "[1] Отзывы о преподавателях ММФ" in out.context  # dated first
+    assert "Пальчунов Дмитрий Евгеньевич · сотрудник" in out.context  # clean title
+    rank = next(c for c in out.trace["rerank"]["candidates"] if c["chunk_id"] == "rank")
+    assert rank["score"] == 0.35 and not rank["kept"]
+    assert out.trace["v2"]["judgements"][0]["rejected"] == ["rank"]
+    system = out.qa_messages[0]["content"]
+    assert system.endswith(NO_GREETING)  # mid-dialogue: no greeting
+    answer = await stream(pipe, out)
+    sources = await pipe.finalize_sources(out, answer)
+    assert {s["source_url"] for s in sources} == {"https://nsu.ru/palch", "https://nsu.ru/palch_rev"}
+    assert next(s for s in sources if s["source_url"].endswith("/palch"))["document_title"] == \
+        "Пальчунов Дмитрий Евгеньевич"
 
 
-async def test_nsu_nothing_above_threshold_refuses_without_generation():
-    q = "Кто ректор НГУ в 1970 году?"
-    llm = FakeLLM(analysis(standalone=q), reformulations=[["ректор НГУ 1970"], ["история ректоров НГУ"]])
-    table = {q: [("fit", 0.1)], "ректор НГУ 1970": [("dorm", 0.2)], "история ректоров НГУ": [("stip", 0.05)]}
-    pipe = make(llm, table)
+async def test_namesake_documents_mean_no_data_not_general_knowledge():
+    q = "Что вы знаете про Анастасию Забродину?"
+    llm = FakeLLM(analysis("general", q),
+                  judgements=[judgement([], namesake=["zab"], verdict="insufficient", mode="documents")])
+    pipe = make(llm, {q: [("zab", 0.85)]})
     out, _ = await prepare(pipe, q)
-    assert len(pipe.search.calls) == pipe.settings.v2_max_rounds == 3
-    assert out.refusal and out.context_chunks == [] and out.context == ""
+    assert pipe.search.calls and llm.kinds().count("evidence_judgement") == 1  # general route is searched too
+    assert out.refusal and not out.general_note and out.answer_mode == "no_data"
+    assert out.context_chunks == [] and out.context == ""
     assert await stream(pipe, out) == NO_KB_REFUSAL
-    assert await pipe.generate_text(outcome=out, runtime=RUNTIME) == NO_KB_REFUSAL
     assert "stream" not in llm.kinds() and "generation" not in llm.kinds()
     assert await pipe.finalize_sources(out, NO_KB_REFUSAL) == []
     assert pipe.search.reranker.calls == 0
 
 
-async def test_general_without_context_appends_note_and_no_sources():
-    q = "Что такое производная?"
-    llm = FakeLLM(analysis("general", q), answer="Производная — это скорость изменения функции.")
-    pipe = make(llm, {q: [("fit", 0.05)]}, v2_max_rounds=1)
+async def test_newer_document_preferred_older_marked_stale():
+    q = "Кто декан ММФ НГУ?"
+    table = {q: [("dean_old", 0.9), ("dean_new", 0.7)]}
+    pipe = make(FakeLLM(analysis(standalone=q), judgements=[judgement(["dean_old", "dean_new"],
+                                                                      stale=["dean_old"])]), table)
+    out, _ = await prepare(pipe, q, trace=True)
+    assert ids(out.context_chunks) == ["dean_new"] and DEAN_OLD not in out.context
+    assert out.trace["v2"]["judgements"][0]["stale"] == ["dean_old"]
+    # both current: the newer one is shown first although its reranker score is lower
+    pipe = make(FakeLLM(analysis(standalone=q)), table)
     out, _ = await prepare(pipe, q)
-    assert out.general_note and not out.refusal and out.context_chunks == []
+    assert ids(out.context_chunks) == ["dean_new", "dean_old"]
+    assert out.context.index(DEAN_NEW) < out.context.index(DEAN_OLD)
+    # only an outdated document: used, but labelled
+    pipe = make(FakeLLM(analysis(standalone=q), judgements=[judgement(["dean_old"], stale=["dean_old"])]), table)
+    out, _ = await prepare(pipe, q)
+    assert ids(out.context_chunks) == ["dean_old"]
+    assert out.context.split("\n")[0].endswith("возможно, устарел")
+
+
+async def test_ambiguous_question_asks_to_clarify():
+    q = "Какое новое направление открылось на ФИТ НГУ?"
+    cq = "Вас интересует бакалавриат или магистратура?"
+    llm = FakeLLM(analysis(standalone=q), answer=f"{cq} {BACH}",
+                  judgements=[judgement(["bach", "mag"], verdict="partial", mode="clarify", clarify=cq)])
+    pipe = make(llm, {q: [("mag", 0.82), ("bach", 0.8)]})
+    out, _ = await prepare(pipe, "новое направление на ФИТе")
+    assert out.answer_mode == "clarify" and not out.refusal and not out.general_note
+    assert set(ids(out.context_chunks)) == {"bach", "mag"}
+    system = out.qa_messages[0]["content"]
+    assert MODE_NOTES["clarify"] in system and f"Уточняющий вопрос: {cq}" in system
+    assert len(pipe.search.calls) == 1  # clarify is a final decision, no extra round without queries
+    assert (await stream(pipe, out)).startswith(cq)
+
+
+async def test_partial_answer_says_what_is_missing():
+    q = "Сколько стоит общежитие и какая стипендия на ФИТ?"
+    llm = FakeLLM(analysis(standalone=q),
+                  judgements=[judgement(["stip"], verdict="partial", mode="partial", missing="стоимость общежития")])
+    pipe = make(llm, {q: [("stip", 0.7), ("fit", 0.6)]})
+    out, _ = await prepare(pipe, q)
+    system = out.qa_messages[0]["content"]
+    assert out.answer_mode == "partial" and ids(out.context_chunks) == ["stip"]
+    assert MODE_NOTES["partial"] in system and "Чего нет в документах: стоимость общежития" in system
+
+
+async def test_judge_failure_falls_back_to_reranker_scores():
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM(analysis(standalone=q), judgements=["{oops"])
+    pipe = make(llm, {q: [("stip", 0.9), ("dorm", 0.4)]})
+    out, events = await prepare(pipe, q)
+    assert len(pipe.search.calls) == 1  # no queries from a failed judge: no extra round
+    assert ids(out.context_chunks) == ["stip"] and out.answer_mode == "documents" and not out.refusal
+    rerank = [e for e in events if e.stage == StageName.RERANK and e.status == StageStatus.COMPLETED]
+    assert rerank[0].detail["fallback"] is True
+    # nothing above the fallback threshold -> the verbatim refusal
+    pipe = make(FakeLLM(analysis(standalone=q), judgements=["{oops"]), {q: [("dorm", 0.4)]})
+    out, _ = await prepare(pipe, q)
+    assert out.refusal and await stream(pipe, out) == NO_KB_REFUSAL
+
+
+async def test_failed_later_round_keeps_the_previous_judgement():
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM(analysis(standalone=q), judgements=[
+        judgement(["stip"], verdict="partial", mode="partial", queries=["стипендия ФИТ"]), "garbage"])
+    pipe = make(llm, {q: [("stip", 0.6)], "стипендия ФИТ": [("fit", 0.9)]})
+    out, _ = await prepare(pipe, q)
+    assert len(pipe.search.calls) == 2 and ids(out.context_chunks) == ["stip"] and out.answer_mode == "partial"
+
+
+async def test_loop_stops_at_max_rounds():
+    q = "Кто ректор НГУ в 1970 году?"
+    more = [judgement([], verdict="insufficient", mode="no_data", queries=[f"ректор НГУ запрос {i}"])
+            for i in range(5)]
+    llm = FakeLLM(analysis(standalone=q), judgements=more)
+    table = {q: [("fit", 0.1)], "ректор НГУ запрос 0": [("dorm", 0.2)], "ректор НГУ запрос 1": [("stip", 0.05)]}
+    pipe = make(llm, table)
+    out, _ = await prepare(pipe, q, trace=True)
+    assert len(pipe.search.calls) == pipe.settings.v2_max_rounds == 3
+    assert llm.kinds().count("evidence_judgement") == 3 and out.trace["v2"]["rounds"] == 3
+    assert llm.judged == [["fit"], ["dorm"], ["stip"]]  # each round judges only unseen documents
+    assert out.refusal and out.context_chunks == []
+    assert await pipe.generate_text(outcome=out, runtime=RUNTIME) == NO_KB_REFUSAL
+    # a round that finds nothing new is not judged again
+    llm = FakeLLM(analysis(standalone=q), judgements=[
+        judgement(["fit"], verdict="partial", mode="partial", queries=["ещё про ректора"])])
+    pipe = make(llm, {q: [("fit", 0.6)], "ещё про ректора": [("fit", 0.7)]})
+    out, _ = await prepare(pipe, q)
+    assert len(pipe.search.calls) == 2 and llm.kinds().count("evidence_judgement") == 1
+    assert ids(out.context_chunks) == ["fit"] and out.answer_mode == "partial"
+    # a repeated query or no query ends the loop early
+    for queries in ([q], []):
+        llm = FakeLLM(analysis(standalone=q),
+                      judgements=[judgement([], verdict="insufficient", mode="no_data", queries=queries)])
+        pipe = make(llm, table)
+        await prepare(pipe, q)
+        assert len(pipe.search.calls) == 1
+
+
+async def test_general_knowledge_without_documents_appends_note():
+    q = "Что такое производная?"
+    llm = FakeLLM(analysis("general", q), answer="Производная — это скорость изменения функции.",
+                  judgements=[judgement([], rejected=["fit"], verdict="insufficient", mode="general_knowledge")] * 2)
+    pipe = make(llm, {q: [("fit", 0.05)]})
+    out, _ = await prepare(pipe, q)
+    assert out.general_note and not out.refusal and out.context_chunks == [] and out.answer_mode == "general_knowledge"
     text = await stream(pipe, out)
     assert text.endswith("\n\n" + GENERAL_NOTE)
     assert (await pipe.generate_text(outcome=out, runtime=RUNTIME)).endswith(
@@ -263,7 +449,7 @@ async def test_general_without_context_appends_note_and_no_sources():
 
 async def test_trace_is_readable_by_benchmark_runner():
     q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q))
+    llm = FakeLLM(analysis(standalone=q), judgements=[judgement(["stip", "dorm"], rejected=["fit"])])
     pipe = make(llm, {q: [("stip", 0.9), ("dorm", 0.5), ("fit", 0.1)]})
     out, _ = await prepare(pipe, q, trace=True)
     t = out.trace
@@ -275,10 +461,11 @@ async def test_trace_is_readable_by_benchmark_runner():
     fit = next(c for c in t["rerank"]["candidates"] if c["chunk_id"] == "fit")
     assert fit == {"chunk_id": "fit", "rank": 3, "score": 0.1, "kept": False}
     v2 = t["v2"]
-    assert set(v2) == {"route", "rounds", "standalone_question", "subqueries", "coverage", "timings_ms",
-                       "sources_debug"}
+    assert set(v2) == {"route", "rounds", "standalone_question", "needs", "judgements", "answer_mode",
+                       "timings_ms", "sources_debug"}
     assert v2["route"] == "nsu" and v2["rounds"] == 1 and v2["standalone_question"] == q
-    assert v2["coverage"] == {q: 0.9}
+    assert v2["needs"] == [q] and v2["answer_mode"] == "documents"
+    assert v2["judgements"][0]["relevant"] == ["stip", "dorm"] and v2["judgements"][0]["rejected"] == ["fit"]
     assert {"query_rewrite", "retrieval", "rerank", "context_assembly"} <= set(v2["timings_ms"])
     answer = await stream(pipe, out)
     await pipe.finalize_sources(out, STIP)
@@ -296,8 +483,8 @@ async def test_no_trace_without_capture():
 
 async def test_stage_events_use_only_known_names():
     q = "Стипендия и общежитие"
-    llm = FakeLLM(analysis(standalone=q, subqueries=["стипендия", "общежитие"], chain=True),
-                  reformulations=[["общежития НГУ"], []])
+    llm = FakeLLM(analysis(standalone=q, needs=["стипендия", "общежитие"]),
+                  judgements=[judgement(["stip"], verdict="partial", mode="partial", queries=["общежития НГУ"])])
     pipe = make(llm, {"стипендия": [("stip", 0.9)], "общежитие": [("fit", 0.1)], "общежития НГУ": [("dorm", 0.2)]})
     _, events = await prepare(pipe, q)
     assert events
@@ -317,7 +504,7 @@ async def test_analysis_failure_falls_back_to_nsu_search():
     pipe = make(Broken(analysis()), {"сколько платят стипендию?": [("stip", 0.9)]})
     out, _ = await prepare(pipe)
     assert out.route == "nsu" and pipe.search.calls[0][0] == ["сколько платят стипендию?"]
-    assert [c.chunk.chunk_id for c in out.context_chunks] == ["stip"]
+    assert ids(out.context_chunks) == ["stip"]
 
 
 # --- schedule ------------------------------------------------------------------------------
@@ -329,42 +516,31 @@ BLOCK = ScheduleBlock(
 )
 
 
-async def test_schedule_block_is_context_and_source():
+async def test_schedule_block_is_judged_and_becomes_context_and_source():
     q = "Какое расписание у группы 26201 в понедельник?"
     answer = f"{BLOCK.text[:40]} — первая пара."
     sched = FakeSchedule([BLOCK])
-    llm = FakeLLM(analysis(standalone=q), answer=answer)
+    llm = FakeLLM(analysis(standalone=q), answer=answer, judgements=[judgement(["schedule"], rejected=["fit"])])
     pipe = make(llm, {q: [("fit", 0.2), ("dorm", 0.1)]}, schedule=sched)
     out, _ = await prepare(pipe, "а в понедельник?", trace=True)
     assert sched.calls == [(q, TODAY)]
+    assert llm.judged[0][0] == "schedule"  # shown to the judge like any document
     assert not out.refusal
     assert out.context_chunks[0].chunk.url == BLOCK.url and out.context_chunks[0].score == 1.0
     assert out.context_chunks[0].chunk.doc_type == "schedule_or_calendar"
     assert out.context.startswith("[1] Расписание группы 26201") and "Математический анализ" in out.context
-    assert len(pipe.search.calls) == 1  # the block covers a simple question
+    assert len(pipe.search.calls) == 1
     assert _contexts_from_trace(out.trace)[0]["url"] == BLOCK.url
     sources = await pipe.finalize_sources(out, await stream(pipe, out))
     assert sources[0] == {"document_title": BLOCK.title, "source_url": BLOCK.url, "date": "2026-11-01"}
 
 
-async def test_schedule_block_without_intent_does_not_cover():
-    q = "Где работает Иванов?"
-    pipe = make(FakeLLM(analysis(standalone=q)), {q: [("fit", 0.2)]}, schedule=FakeSchedule([BLOCK]), v2_max_rounds=1)
-    await prepare(pipe, q)
-    assert len(pipe.search.calls) == 1
-    pipe2 = make(FakeLLM(analysis(standalone=q), reformulations=[["ещё"]]), {q: [("fit", 0.2)]},
-                 schedule=FakeSchedule([BLOCK]))
-    await prepare(pipe2, q)
-    assert len(pipe2.search.calls) == 2  # not marked covered -> reformulation round
-
-
-async def test_schedule_block_prevents_refusal_and_is_nsu_only():
+async def test_schedule_lookup_is_nsu_only():
     q = "Расписание группы 26201"
-    pipe = make(FakeLLM(analysis(standalone=q)), {}, schedule=FakeSchedule([BLOCK]))
-    out, _ = await prepare(pipe, q)
-    assert not out.refusal and out.context_chunks[0].chunk.url == BLOCK.url
     sched = FakeSchedule([BLOCK])
-    pipe = make(FakeLLM(analysis("general", q)), {}, schedule=sched, v2_max_rounds=1)
+    pipe = make(FakeLLM(analysis("general", q), judgements=[judgement([], mode="general_knowledge",
+                                                                      verdict="insufficient")]),
+                {}, schedule=sched)
     out, _ = await prepare(pipe, q)
     assert sched.calls == [] and out.general_note
 

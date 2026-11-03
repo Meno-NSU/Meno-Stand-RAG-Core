@@ -21,10 +21,10 @@ class FakeRouter:
         return self.reply
 
 
-def reply(route="nsu", standalone="Q?", subqueries=(), chain=False, focus=""):
+def reply(route="nsu", standalone="Q?", needs=("Q?",), focus=""):
     return json.dumps(
         {"route": route, "standalone_question": standalone,
-         "subqueries": list(subqueries), "chain": chain, "focus": focus},
+         "needs": list(needs), "focus": focus},
         ensure_ascii=False,
     )
 
@@ -35,10 +35,10 @@ async def run(router, question="Как поступить на ФИТ?", recent=
 
 
 async def test_valid_parse():
-    r = FakeRouter(reply("nsu", "Сколько баллов нужно на ФИТ?", ["a", "b"], True, "ФИТ"))
+    r = FakeRouter(reply("nsu", "Сколько баллов нужно на ФИТ?", ["a", "b"], "ФИТ"))
     a = await run(r, "а баллы?")
-    assert (a.route, a.standalone_question, a.subqueries, a.chain, a.focus, a.fallback) == (
-        "nsu", "Сколько баллов нужно на ФИТ?", ["a", "b"], True, "ФИТ", False)
+    assert (a.route, a.standalone_question, a.needs, a.focus, a.fallback) == (
+        "nsu", "Сколько баллов нужно на ФИТ?", ["a", "b"], "ФИТ", False)
 
 
 async def test_call_kwargs():
@@ -59,8 +59,8 @@ async def test_call_kwargs():
 
 async def test_invalid_json_fallback():
     a = await run(FakeRouter("{not json"), "вопрос")
-    assert (a.route, a.standalone_question, a.subqueries, a.chain, a.focus, a.fallback) == (
-        "nsu", "вопрос", [], False, "", True)
+    assert (a.route, a.standalone_question, a.needs, a.focus, a.fallback) == (
+        "nsu", "вопрос", ["вопрос"], "", True)
 
 
 async def test_truncated_json_fallback():
@@ -120,9 +120,13 @@ async def test_blank_standalone_uses_question():
     assert a.standalone_question == "исходная реплика"
 
 
-async def test_subqueries_dedup_and_blank():
-    a = await run(FakeRouter(reply(subqueries=["a", " ", "a", "b ", "", "b"])))
-    assert a.subqueries == ["a", "b"]
+async def test_needs_dedup_blank_and_default():
+    a = await run(FakeRouter(reply(needs=["a", " ", "a", "b ", "", "b"])))
+    assert a.needs == ["a", "b"]
+    a = await run(FakeRouter(reply(standalone="Кто декан ММФ НГУ?", needs=[" "])))
+    assert a.needs == ["Кто декан ММФ НГУ?"]  # a simple question: one need = the question
+    a = await run(FakeRouter(reply(needs=list("abcdef"))))
+    assert a.needs == list("abcd")
 
 
 async def test_recent_truncation_and_layout():
@@ -181,14 +185,12 @@ async def test_whole_token_stem_and_prefix_stems_trigger():
 
 
 async def test_wrong_field_types_fallback():
-    base = {"route": "nsu", "standalone_question": "Q?", "subqueries": [], "chain": False, "focus": ""}
+    base = {"route": "nsu", "standalone_question": "Q?", "needs": ["Q?"], "focus": ""}
     for key, bad in (
         ("route", 1),
         ("standalone_question", None),
-        ("subqueries", "a"),
-        ("subqueries", ["a", 2]),
-        ("chain", "false"),
-        ("chain", 0),
+        ("needs", "a"),
+        ("needs", ["a", 2]),
         ("focus", None),
     ):
         data = {**base, key: bad}

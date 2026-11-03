@@ -1,4 +1,4 @@
-"""v2 answer pipeline: memory -> turn analysis -> multi-round search -> context -> generation -> sources."""
+"""v2 answer pipeline: memory -> turn analysis -> search + evidence-judge rounds -> context -> generation -> sources."""
 
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ from meno_rag.api.events import StageEvent, StageName, StageStatus
 from meno_rag.schemas import ChatMessage, PipelineOutcome
 from meno_rag.stand.pipeline import PipelineRuntime, StageSink, extract_question_and_history
 from meno_rag.stand.sampling import QaSampling
-from meno_rag.v2.analysis import TurnAnalysis, _dedup, _extract_json, analyze
+from meno_rag.v2.analysis import TurnAnalysis, _dedup, analyze
+from meno_rag.v2.evidence import Judgement, judge
 from meno_rag.v2.kb import Chunk
 from meno_rag.v2.memory import (
     CHARS_PER_TOKEN,
@@ -30,7 +31,6 @@ from meno_rag.v2.memory import (
     precompute_next,
 )
 from meno_rag.v2.prompting import PROMPT_GUARD_TEXT, SEARCH_ROUTES, LeakGuard, assemble_context, build_messages
-from meno_rag.v2.schedule import GROUP_RE, has_schedule_intent
 from meno_rag.v2.search import Candidate
 from meno_rag.v2.sources import attribute, llm_check, to_sources
 
@@ -38,9 +38,9 @@ logger = structlog.get_logger(__name__)
 
 TZ = ZoneInfo("Asia/Novosibirsk")
 ANALYSIS_TIMEOUT_S = 20
-REFORMULATE_TIMEOUT_S = 15
+JUDGE_TIMEOUT_S = 30
 MAX_NEW_QUERIES = 3
-REFORMULATE_TITLES = 8
+MIN_NEW_CANDIDATES = 6  # slots for unseen documents in every round after the first
 TRACE_CANDIDATES = 50
 SCHEDULE_DOC_TYPE = "schedule_or_calendar"
 ANSWER_MARGIN_TOKENS = 256
@@ -54,20 +54,6 @@ NO_KB_REFUSAL = (
 GENERAL_NOTE = "_Это общий ответ — не из документов НГУ._"
 LEAK_REPLACEMENT = (
     "Извините, служебные инструкции я показать не могу. Спросите меня об учёбе, поступлении или жизни в НГУ."
-)
-
-REFORMULATE_SCHEMA = {
-    "type": "object",
-    "properties": {"queries": {"type": "array", "items": {"type": "string"}}},
-    "required": ["queries"],
-    "additionalProperties": False,
-}
-REFORMULATE_SYSTEM = (
-    "Ты помогаешь искать документы на сайтах НГУ (Новосибирский государственный университет). "
-    "Не отвечай на вопрос. Предложи не более трёх новых поисковых запросов на русском: другими словами, "
-    "с полными названиями вместо сокращений, по одному на каждую ненайденную часть вопроса, в том же порядке. "
-    "Если вопрос составной (ответ на одну часть нужен, чтобы найти другую), используй найденные документы. "
-    'Не повторяй прежние запросы. Ответ — JSON {"queries": [строки]}.'
 )
 _WORD_RE = re.compile(r"[^\W_]+")
 
@@ -112,6 +98,7 @@ def _word_count(tokens: list[str]) -> int:
 
 class V2Outcome(PipelineOutcome):
     route: str = "nsu"
+    answer_mode: str = ""
     context_chunks: list[Any] = Field(default_factory=list)
     general_note: bool = False
     refusal: bool = False
@@ -174,7 +161,7 @@ class V2Pipeline:
                 durations[stage] = round(durations.get(stage, 0.0) + duration_ms, 2)
                 timings[stage] = durations[stage]
             if stage_sink is not None:
-                llm = model_id if stage == StageName.QUERY_REWRITE else None
+                llm = model_id if stage in (StageName.QUERY_REWRITE, StageName.RERANK) else None
                 await stage_sink(
                     StageEvent(stage=stage, status=status, duration_ms=duration_ms, detail=detail, model_id=llm)
                 )
@@ -198,61 +185,67 @@ class V2Pipeline:
             StageName.QUERY_REWRITE,
             StageStatus.COMPLETED,
             _ms(t0),
-            {"route": an.route, "standalone_question": an.standalone_question, "subqueries": an.subqueries,
-             "chain": an.chain, "fallback": an.fallback},
+            {"route": an.route, "standalone_question": an.standalone_question, "needs": an.needs,
+             "focus": an.focus, "fallback": an.fallback},
         )
 
         searched = an.route in SEARCH_ROUTES
-        ranked: list[Candidate] = []
-        queries: list[str] = []
-        coverage: dict[str, float] = {}
-        rounds = 0
+        loop = _Evidence()
         if searched:
-            ranked, queries, coverage, rounds = await self._search_rounds(an, today, runtime, emit)
+            loop = await self._evidence_rounds(an, question, today, runtime, emit)
+        j = loop.judgement
+        mode = j.answer_mode if j is not None else ""
 
-        context, kept = "", []
+        context, kept, chosen, stale = "", [], [], frozenset()
         if searched:
             await emit(StageName.CONTEXT_ASSEMBLY, StageStatus.STARTED)
             t2 = time.perf_counter()
-            context, kept = assemble_context(
-                ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, s.v2_max_context_chunks
-            )
+            chosen, stale = _evidence_docs(loop.shown, j)
+            if mode != "no_data":
+                context, kept = assemble_context(
+                    chosen, s.v2_context_budget_tokens, s.v2_max_context_chunks, stale=stale
+                )
             await emit(
                 StageName.CONTEXT_ASSEMBLY,
                 StageStatus.COMPLETED,
                 _ms(t2),
-                {"chunks": len(kept), "tokens": estimate_tokens(context)},
+                {"chunks": len(kept), "tokens": estimate_tokens(context), "answer_mode": mode,
+                 "stale": sum(c.pos in stale for c in kept)},
             )
-        refusal = an.route == "nsu" and not kept
-        general_note = an.route == "general" and not kept
 
         def build(ctx: str) -> list[dict]:
+            route = an.route
+            if searched:
+                route = "general" if mode == "general_knowledge" else "nsu"
             return build_messages(
-                an.route,
+                route,
                 question=question,
                 standalone_question=an.standalone_question,
                 memory=memory,
                 context=ctx,
                 today=today,
+                mode=mode,
+                missing=j.missing if j is not None else "",
+                clarify_question=j.clarify_question if j is not None else "",
             )
 
         qa_messages = build(context)
-        # leave room for the answer inside the model window: drop the lowest-ranked documents
+        # leave room for the answer inside the model window: drop the weakest documents
         if len(kept) > 0 and self._answer_room(qa_messages) < MIN_ANSWER_ROOM:
             while kept and self._answer_room(qa_messages) < ENOUGH_ANSWER_ROOM:
-                context, kept = assemble_context(
-                    ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, len(kept) - 1
-                )
+                context, kept = assemble_context(chosen, s.v2_context_budget_tokens, len(kept) - 1, stale=stale)
                 qa_messages = build(context)
-            refusal = an.route == "nsu" and not kept
-            general_note = an.route == "general" and not kept
+        if searched and mode in ("documents", "partial") and not kept:
+            mode = "no_data"
+        refusal = searched and mode == "no_data"
+        general_note = searched and mode == "general_knowledge" and not kept
         trace = None
         if capture_trace:
-            trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings)
+            trace = self._trace(an, loop, kept, mode, timings)
         outcome = V2Outcome(
             question=original_question,
             prepared_dialogue_history=_render_history(memory),
-            search_queries=queries,
+            search_queries=loop.queries,
             context=context,
             sources=[],
             qa_messages=qa_messages,
@@ -260,6 +253,7 @@ class V2Pipeline:
             stage_details=details,
             trace=trace,
             route=an.route,
+            answer_mode=mode,
             context_chunks=kept,
             general_note=general_note,
             refusal=refusal,
@@ -268,14 +262,15 @@ class V2Pipeline:
         outcome._runtime = runtime
         return outcome
 
-    async def _search_rounds(self, an: TurnAnalysis, today: date, runtime: PipelineRuntime, emit):
-        s = self.settings
-        thr = s.v2_rerank_threshold
-        standalone = an.standalone_question
-        subqueries = [q for q in an.subqueries if q != standalone]
-        targets = subqueries or [standalone]
-        target_cov = dict.fromkeys(targets, 0.0)
+    async def _evidence_rounds(self, an: TurnAnalysis, question: str, today: date, runtime: PipelineRuntime, emit):
+        """Search -> judge, repeated while the judge asks for more and offers new queries.
 
+        Every candidate is scored by the cross-encoder against the standalone question only: queries from
+        the analysis or the judge add recall but never decide the ranking.
+        """
+        s = self.settings
+        standalone = an.standalone_question
+        loop = _Evidence()
         schedule_cands: list[Candidate] = []
         if self.schedule is not None and an.route == "nsu":
             try:
@@ -284,129 +279,98 @@ class V2Pipeline:
                 logger.warning("v2_schedule_lookup_failed", error=repr(exc))
                 blocks = []
             schedule_cands = [_schedule_candidate(i, b) for i, b in enumerate(blocks)]
-            intent = has_schedule_intent(standalone) or bool(GROUP_RE.search(standalone))
-            if schedule_cands and not subqueries and intent:
-                target_cov[standalone] = 1.0  # best chunk >= threshold
-
-        best: dict[int, Candidate] = {}
-        coverage: dict[str, float] = {}
-        all_queries: list[str] = []
-        round_queries = _dedup([standalone, *subqueries])
-        # query -> the target it is meant to cover (None: helps, but covers nothing by itself)
-        aims: dict[str, str | None] = {q: (q if q in target_cov else None) for q in round_queries}
-        if not subqueries:
-            aims = dict.fromkeys(round_queries, standalone)
-        rounds = 0
+        hint = f"Фокус диалога: {an.focus}" if an.focus else ""
+        relevant: list[Candidate] = []  # accepted by the latest judgement
+        judged: set[int] = set()  # positions the judge has already seen
+        round_queries = _dedup([standalone, *an.needs])
+        first = len(round_queries)  # the question and the needs are already in the judge prompt
         while round_queries:
-            rounds += 1
-            all_queries += round_queries
-            await emit(StageName.RETRIEVAL, StageStatus.STARTED, None, {"round": rounds})
+            loop.rounds += 1
+            rnd = loop.rounds
+            loop.queries += round_queries
+            await emit(StageName.RETRIEVAL, StageStatus.STARTED, None, {"round": rnd})
             t0 = time.perf_counter()
-            result = await self.search.search(round_queries, round_queries)
-            wall = _ms(t0)
-            rerank_ms = round(float(result.timings_ms.get("rerank", 0.0)), 2)
+            result = await self.search.search(round_queries, [standalone] * len(round_queries))
             await emit(
                 StageName.RETRIEVAL,
                 StageStatus.COMPLETED,
-                round(max(wall - rerank_ms, 0.0), 2),
-                {"round": rounds, "queries": round_queries, "candidates": len(result.candidates)},
+                _ms(t0),
+                {"round": rnd, "queries": round_queries, "candidates": len(result.candidates),
+                 "rerank_ms": round(float(result.timings_ms.get("rerank", 0.0)), 2)},
             )
-            await emit(StageName.RERANK, StageStatus.STARTED, None, {"round": rounds})
             for c in result.candidates:
-                if c.pos not in best or c.score > best[c.pos].score:
-                    best[c.pos] = c
-            for q, v in result.coverage.items():
-                coverage[q] = max(coverage.get(q, 0.0), float(v))
-                t = aims.get(q)
-                if t is not None:
-                    target_cov[t] = max(target_cov[t], float(v))
+                if c.pos not in loop.pool or c.score > loop.pool[c.pos].score:
+                    loop.pool[c.pos] = c
+            cands = self._judge_candidates(result.candidates, schedule_cands, relevant, judged)
+            if loop.judgement is not None and all(c.pos in judged for c in cands):
+                break  # nothing new to judge: keep the previous judgement
+            await emit(StageName.RERANK, StageStatus.STARTED, None, {"round": rnd})
+            t1 = time.perf_counter()
+            j = await judge(
+                self.llm_router,
+                runtime.generation,
+                question=question,
+                standalone=standalone,
+                needs=an.needs,
+                dialogue_hint=hint,
+                candidates=cands,
+                today=today,
+                timeout_s=JUDGE_TIMEOUT_S,
+                fallback_threshold=s.v2_rerank_threshold,
+                tried=loop.queries[first:],
+            )
             await emit(
                 StageName.RERANK,
                 StageStatus.COMPLETED,
-                rerank_ms,
-                {"round": rounds, "coverage": {q: round(float(v), 4) for q, v in result.coverage.items()},
-                 "above_threshold": sum(c.score >= thr for c in result.candidates)},
+                _ms(t1),
+                {"round": rnd, "candidates": len(cands), "relevant": len(j.relevant), "stale": len(j.stale),
+                 "verdict": j.verdict, "answer_mode": j.answer_mode, "queries": j.queries, "fallback": j.fallback},
             )
-            uncovered = [t for t in targets if target_cov[t] < thr]
-            if rounds >= s.v2_max_rounds or not (uncovered or (an.chain and rounds == 1)):
+            loop.log.append(_judgement_log(rnd, j, cands))
+            if j.fallback and loop.judgement is not None and not loop.judgement.fallback:
+                break  # a failed later round must not throw away a real judgement
+            loop.judgement, loop.shown = j, cands
+            relevant = [cands[i] for i in j.relevant]
+            judged |= {c.pos for c in cands}
+            if j.verdict == "sufficient" or loop.rounds >= s.v2_max_rounds:
                 break
-            found = sorted(best.values(), key=lambda c: (-c.score, c.pos))
-            titles = _dedup([c.chunk.title for c in [*schedule_cands, *found]])[:REFORMULATE_TITLES]
-            new = await self._reformulate(standalone, uncovered, an.chain, all_queries, titles, rounds + 1,
-                                          runtime, emit)
-            round_queries = new
-            aims = {q: (uncovered[min(i, len(uncovered) - 1)] if uncovered else None) for i, q in enumerate(new)}
+            tried = {q.casefold() for q in loop.queries}
+            round_queries = [q for q in j.queries if q.casefold() not in tried][:MAX_NEW_QUERIES]
+        return loop
 
-        ranked = [*schedule_cands, *sorted(best.values(), key=lambda c: (-c.score, c.pos))]
-        return ranked, all_queries, coverage, rounds
-
-    async def _reformulate(self, standalone, uncovered, chain, tried, titles, round_no, runtime, emit) -> list[str]:
-        parts = [f"Вопрос: {standalone}"]
-        if uncovered:
-            parts.append("Не найдено:\n" + "\n".join(f"- {q}" for q in uncovered))
-        if chain:
-            parts.append("Вопрос составной: ответ на одну его часть нужен, чтобы найти другую.")
-        parts.append("Прежние запросы:\n" + "\n".join(f"- {q}" for q in tried))
-        if titles:
-            parts.append("Найденные документы:\n" + "\n".join(f"- {t}" for t in titles))
-        messages = [
-            {"role": "system", "content": REFORMULATE_SYSTEM},
-            {"role": "user", "content": "\n\n".join(parts)},
-        ]
-        await emit(StageName.QUERY_REWRITE, StageStatus.STARTED, None, {"round": round_no})
-        t0 = time.perf_counter()
-        queries: list[str] = []
-        try:
-            raw = await asyncio.wait_for(
-                self.llm_router.chat_completion_text(
-                    runtime=runtime.generation,
-                    messages=messages,
-                    stage=StageName.QUERY_REWRITE,
-                    temperature=0,
-                    max_tokens=256,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {"name": "search_queries", "schema": REFORMULATE_SCHEMA, "strict": True},
-                    },
-                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                    timeout=REFORMULATE_TIMEOUT_S,
-                ),
-                REFORMULATE_TIMEOUT_S,
-            )
-            got = _extract_json(raw).get("queries")
-            seen = {q.casefold() for q in tried}
-            queries = [q for q in _dedup(got if isinstance(got, list) else []) if q.casefold() not in seen]
-            queries = queries[:MAX_NEW_QUERIES]
-        except Exception as exc:  # no new queries: answer from what was found
-            logger.warning("v2_reformulation_failed", error=repr(exc))
-        await emit(StageName.QUERY_REWRITE, StageStatus.COMPLETED, _ms(t0), {"round": round_no, "queries": queries})
-        return queries
+    def _judge_candidates(self, found, schedule_cands, relevant, judged) -> list[Candidate]:
+        """Accepted documents of earlier rounds + the best unseen ones, by cross-encoder score."""
+        n = self.settings.v2_judge_candidates
+        keep = sorted(relevant, key=_by_score)[: self.settings.v2_max_context_chunks]
+        have = {c.pos for c in keep}
+        fresh = [c for c in [*schedule_cands, *found] if c.pos not in judged and c.pos not in have]
+        room = max(n - len(keep), MIN_NEW_CANDIDATES if judged else n)
+        return sorted([*keep, *fresh[:room]], key=_by_score)
 
     @staticmethod
-    def _trace(an, ranked, kept, queries, coverage, rounds, timings) -> dict:
+    def _trace(an, loop: _Evidence, kept, mode, timings) -> dict:
         kept_ids = {c.chunk.chunk_id for c in kept}
-        order = sorted(ranked, key=lambda c: -c.score)  # same order assemble_context uses
-        rank = {id(c): i + 1 for i, c in enumerate(order)}
-        listed = order[:TRACE_CANDIDATES]
-        listed += [c for c in order[TRACE_CANDIDATES:] if c.chunk.chunk_id in kept_ids]
+        rest = sorted((c for c in loop.pool.values() if c.chunk.chunk_id not in kept_ids), key=_by_score)
+        listed = [*kept, *rest[: max(TRACE_CANDIDATES - len(kept), 0)]]  # kept first, in context order
         return {
-            "search_queries": list(queries),
+            "search_queries": list(loop.queries),
             "chunks": {
                 c.chunk.chunk_id: {"url": c.chunk.url, "title": c.chunk.title, "text": c.chunk.text} for c in listed
             },
             "rerank": {
                 "candidates": [
-                    {"chunk_id": c.chunk.chunk_id, "rank": rank[id(c)], "score": round(float(c.score), 6),
+                    {"chunk_id": c.chunk.chunk_id, "rank": i + 1, "score": round(float(c.score), 6),
                      "kept": c.chunk.chunk_id in kept_ids}
-                    for c in listed
+                    for i, c in enumerate(listed)
                 ]
             },
             "v2": {
                 "route": an.route,
-                "rounds": rounds,
+                "rounds": loop.rounds,
                 "standalone_question": an.standalone_question,
-                "subqueries": list(an.subqueries),
-                "coverage": {q: round(float(v), 6) for q, v in coverage.items()},
+                "needs": list(an.needs),
+                "judgements": loop.log,
+                "answer_mode": mode,
                 "timings_ms": timings,
                 "sources_debug": None,
             },
@@ -580,3 +544,48 @@ class V2Pipeline:
 
 def _ms(t0: float) -> float:
     return round((time.perf_counter() - t0) * 1000, 2)
+
+
+def _by_score(c: Candidate):
+    return (-c.score, c.pos)
+
+
+class _Evidence:
+    """State of the search/judge rounds of one turn."""
+
+    def __init__(self) -> None:
+        self.judgement: Judgement | None = None
+        self.shown: list[Candidate] = []  # candidates the final judgement refers to
+        self.pool: dict[int, Candidate] = {}  # every candidate seen, for the trace
+        self.queries: list[str] = []
+        self.rounds = 0
+        self.log: list[dict] = []
+
+
+def _evidence_docs(shown: list[Candidate], j: Judgement | None) -> tuple[list[Candidate], frozenset[int]]:
+    """Accepted documents, best cross-encoder score first; outdated ones only when nothing else is left."""
+    if j is None:
+        return [], frozenset()
+    accepted = [shown[i] for i in j.relevant]
+    stale = {shown[i].pos for i in j.stale}
+    current = [c for c in accepted if c.pos not in stale]
+    chosen = sorted(current or accepted, key=_by_score)
+    return chosen, frozenset(stale & {c.pos for c in chosen})
+
+
+def _judgement_log(rnd: int, j: Judgement, cands: list[Candidate]) -> dict:
+    ids = [c.chunk.chunk_id for c in cands]
+    return {
+        "round": rnd,
+        "verdict": j.verdict,
+        "answer_mode": j.answer_mode,
+        "missing": j.missing,
+        "queries": list(j.queries),
+        "clarify_question": j.clarify_question,
+        "fallback": j.fallback,
+        "candidates": ids,
+        "relevant": [ids[i] for i in j.relevant],
+        "stale": [ids[i] for i in sorted(j.stale)],
+        "rejected": [ids[i] for i in sorted(j.rejected)],
+    }
+

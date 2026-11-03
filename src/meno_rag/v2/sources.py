@@ -16,6 +16,20 @@ log = logging.getLogger(__name__)
 
 MIN_WORDS = 4
 SOCIAL_HOSTS = ("vk.com", "t.me", "telegram.me")
+TITLE_CHARS = 100
+# a title segment that only names the site, e.g. "… | НГУ", "… — Новосибирский государственный университет"
+_SITE_SEGMENT_RE = re.compile(
+    r"(?:официальный сайт\s+)?(?:нгу|ngu|nsu(?:\.ru)?|www\.nsu\.ru|новосибирский государственный университет"
+    r"(?:\s*\(нгу\))?|вконтакте|vk|telegram|главная(?: страница)?)",
+    re.IGNORECASE,
+)
+_SITE_SUFFIX_RE = re.compile(r"[\s,.:;|—–-]*\bНовосибирск(?:ий|ого) государственн(?:ый|ого) университет[а]?\s*$",
+                             re.IGNORECASE)
+_DASH_SEP_RE = re.compile(r"\s+[—–-]\s+")
+_ARROW_SEP_RE = re.compile(r"\s*(?:>|»|›|→)\s*")
+_SLASH_SEP_RE = re.compile(r"\s+/\s+")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MARKUP_RE = re.compile(r"<[^>]+>|[*_`#]+|&nbsp;|&[a-z]+;")
 # one call scores every (query, texts) group and returns one score list per group
 RerankerCall = Callable[[list[tuple[str, list[str]]]], Awaitable[list[list[float]]]]
 
@@ -76,8 +90,52 @@ def _iso_date(raw: str | None) -> str:
     return m[1] if m else ""
 
 
+def _is_site_segment(seg: str) -> bool:
+    return bool(_SITE_SEGMENT_RE.fullmatch(seg.strip(" .,:;")))
+
+
+def clean_title(raw: str | None) -> str:
+    """A readable document title: no markup, breadcrumbs or site-name tails, at most 100 chars."""
+    text = _MD_LINK_RE.sub(r"\1", str(raw or ""))
+    text = " ".join(_MARKUP_RE.sub(" ", text).split())
+    if not text:
+        return ""
+    # "Страница | Раздел | НГУ" -> "Страница"
+    text = next((g.strip() for g in text.split("|") if g.strip() and not _is_site_segment(g)), text)
+    # breadcrumbs: "Главная > Наука > Лаборатории", "Главная / Абитуриентам / Бакалавриат" -> the last step
+    crumbs = [c for c in _ARROW_SEP_RE.split(text) if c.strip()]
+    slashes = [c for c in _SLASH_SEP_RE.split(text) if c.strip()]
+    if len(crumbs) > 1:
+        text = crumbs[-1].strip()
+    elif len(slashes) > 1 and _is_site_segment(slashes[0]):
+        text = slashes[-1].strip()
+    # "Новости — НГУ", "НГУ - Приёмная комиссия"
+    dashes = [g for g in _DASH_SEP_RE.split(text) if g.strip()]
+    while len(dashes) > 1 and _is_site_segment(dashes[-1]):
+        dashes.pop()
+    while len(dashes) > 1 and _is_site_segment(dashes[0]):
+        dashes.pop(0)
+    text = " — ".join(g.strip() for g in dashes) if len(dashes) > 1 else dashes[0].strip()
+    text = _SITE_SUFFIX_RE.sub("", text).strip(" ,.:;|—–-") or text
+    if len(text) > TITLE_CHARS:
+        cut = text[: TITLE_CHARS - 1]
+        if " " in cut:
+            cut = cut[: cut.rindex(" ")]
+        text = cut.rstrip(" ,.:;|—–-") + "…"
+    return text
+
+
+def _title_key(title: str) -> str:
+    return " ".join(re.findall(r"\w+", title.casefold().replace("ё", "е")))
+
+
 def to_sources(used: list[tuple[Candidate, float]], docs: dict, max_sources: int) -> list[dict]:
-    has_site = {c.chunk.doc_id for c, _ in used if not _is_social(c.chunk.url)}
+    def title_of(ch) -> str:
+        return clean_title(ch.title or (docs.get(ch.doc_id) or {}).get("title") or "")
+
+    site = [c.chunk for c, _ in used if not _is_social(c.chunk.url)]
+    has_site = {ch.doc_id for ch in site if ch.doc_id}
+    site_titles = {_title_key(title_of(ch)) for ch in site} - {""}
     out: list[dict] = []
     seen_urls: set[str] = set()
     for cand, _ in sorted(used, key=lambda p: -p[1]):
@@ -85,10 +143,10 @@ def to_sources(used: list[tuple[Candidate, float]], docs: dict, max_sources: int
         key = _norm_url(ch.url)
         if key in seen_urls:
             continue
-        if ch.doc_id and ch.doc_id in has_site and _is_social(ch.url):
+        title = title_of(ch)
+        if _is_social(ch.url) and (ch.doc_id in has_site or _title_key(title) in site_titles):
             continue  # prefer the nsu.ru page over its repost
         seen_urls.add(key)
-        title = ch.title or (docs.get(ch.doc_id) or {}).get("title") or ""
         out.append({"document_title": title, "source_url": ch.url, "date": _iso_date(ch.date)})
         if len(out) >= max_sources:
             break

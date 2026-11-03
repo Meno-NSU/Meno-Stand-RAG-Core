@@ -6,13 +6,16 @@ from meno_rag.v2.analysis import ROUTES
 from meno_rag.v2.kb import Chunk
 from meno_rag.v2.memory import DialogueMemory, estimate_tokens, split_history
 from meno_rag.v2.prompting import (
+    MODE_NOTES,
     NO_CONTEXT_BLOCKS,
+    NO_GREETING,
     PROMPT_GUARD_TEXT,
     ROUTE_BLOCKS,
     SYSTEM_PROMPT_V2,
     LeakGuard,
     assemble_context,
     build_messages,
+    may_greet,
 )
 from meno_rag.v2.search import Candidate
 
@@ -37,53 +40,56 @@ def cand(pos, score, *, title="Документ", text="текст", date_="2025
 # --- assemble_context -------------------------------------------------------
 
 
-def test_threshold_drops_low_scores():
-    _, kept = assemble_context([cand(1, 0.9), cand(2, 0.2), cand(3, 0.5), cand(4, 0.3)],
-                               threshold=0.3, budget_tokens=10_000, max_chunks=10)
-    assert [c.pos for c in kept] == [1, 3, 4]
+def test_empty_input():
+    assert assemble_context([], budget_tokens=10_000, max_chunks=8) == ("", [])
 
 
-def test_nothing_above_threshold():
-    assert assemble_context([cand(1, 0.1)], threshold=0.3, budget_tokens=10_000, max_chunks=8) == ("", [])
-    assert assemble_context([], threshold=0.3, budget_tokens=10_000, max_chunks=8) == ("", [])
+def test_selection_keeps_pick_order_and_shows_newest_first():
+    cands = [cand(1, 0.9, text="текст-раз", date_="2019-05-01"), cand(2, 0.5, text="текст-два", date_=None),
+             cand(3, 0.7, text="текст-три", date_="2026-10-21"), cand(4, 0.2, text="текст-четыре", date_="2026")]
+    context, kept = assemble_context(cands, budget_tokens=10_000, max_chunks=10)
+    assert [c.pos for c in kept] == [3, 4, 1, 2]  # 21.10.2026, 2026, 2019, undated last
+    assert context.index("[1] ") < context.index("текст-три") < context.index("[2] ") \
+        < context.index("текст-четыре") < context.index("[3] ") < context.index("текст-раз") \
+        < context.index("[4] ") < context.index("текст-два")
 
 
-def test_order_by_score_and_numbering():
-    cands = [cand(1, 0.4, text="текст-раз"), cand(2, 0.95, text="текст-два"), cand(3, 0.7, text="текст-три")]
-    context, kept = assemble_context(cands, threshold=0.3, budget_tokens=10_000, max_chunks=10)
-    assert [c.pos for c in kept] == [2, 3, 1]
-    assert context.index("[1] ") < context.index("текст-два") < context.index("[2] ") \
-        < context.index("текст-три") < context.index("[3] ") < context.index("текст-раз")
-
-
-def test_budget_cuts_worst():
+def test_budget_cuts_last_picked():
     cands = [cand(i, 0.9 - i / 100, text="я" * 300) for i in range(5)]  # ~110 tokens per block
-    context, kept = assemble_context(cands, threshold=0.3, budget_tokens=250, max_chunks=10)
-    assert [c.pos for c in kept] == [0, 1]
+    context, kept = assemble_context(cands, budget_tokens=250, max_chunks=10)
+    assert {c.pos for c in kept} == {0, 1}
     assert estimate_tokens(context) <= 250
 
 
 def test_max_chunks():
     cands = [cand(i, 0.9 - i / 100) for i in range(10)]
-    _, kept = assemble_context(cands, threshold=0.3, budget_tokens=10_000, max_chunks=3)
+    _, kept = assemble_context(cands, budget_tokens=10_000, max_chunks=3)
     assert [c.pos for c in kept] == [0, 1, 2]
+
+
+def test_stale_documents_are_labelled():
+    context, _ = assemble_context([cand(1, 0.9, title="Декан ММФ", date_="2023-01-10")], budget_tokens=10_000,
+                                  max_chunks=8, stale=frozenset({1}))
+    assert context.split("\n")[0].endswith(" · возможно, устарел")
+    context, _ = assemble_context([cand(1, 0.9)], budget_tokens=10_000, max_chunks=8)
+    assert "устарел" not in context
 
 
 def test_block_header_has_type_and_date():
     cands = [
-        cand(1, 0.9, title="Положение о стипендиях", text="Размер стипендии…", date_="2025-09-01",
+        cand(1, 0.9, title="Положение о стипендиях | НГУ", text="Размер стипендии…", date_="2025-09-01",
              doc_type="regulation_or_order", url="https://nsu.ru/stip"),
         cand(2, 0.8, title="Новость", date_=None, doc_type="event_or_news", url="https://nsu.ru/n"),
         cand(3, 0.7, title="Статья", date_="2017", doc_type="publication_card", url="https://pure.nsu.ru/p"),
         cand(4, 0.6, title="Карточка", doc_type="weird_code", url="kb://cards/faculty/ФИТ"),
     ]
-    context, _ = assemble_context(cands, threshold=0.3, budget_tokens=10_000, max_chunks=10)
+    context, _ = assemble_context(cands, budget_tokens=10_000, max_chunks=10)
     lines = context.split("\n")
     assert lines[0] == "[1] Положение о стипендиях · приказ/положение · 01.09.2025 · https://nsu.ru/stip"
     assert lines[1] == "Размер стипендии…"
-    assert "[2] Новость · новость · дата не указана · https://nsu.ru/n" in lines
+    assert "[2] Карточка · документ · 01.09.2025 · ссылка не указана" in lines
     assert "[3] Статья · публикация · 2017 г. · https://pure.nsu.ru/p" in lines
-    assert "[4] Карточка · документ · 01.09.2025 · ссылка не указана" in lines
+    assert "[4] Новость · новость · дата не указана · https://nsu.ru/n" in lines
 
 
 # --- build_messages ---------------------------------------------------------
@@ -93,10 +99,10 @@ RECENT = [{"role": "user", "content": "Привет"}, {"role": "assistant", "co
 
 
 def build(route, *, context=CONTEXT, memory=None, question="а сколько платят?",
-          standalone="Какой размер стипендии в НГУ?"):
+          standalone="Какой размер стипендии в НГУ?", **kw):
     return build_messages(route, question=question, standalone_question=standalone,
                           memory=memory if memory is not None else DialogueMemory(recent=list(RECENT)),
-                          context=context, today=TODAY)
+                          context=context, today=TODAY, **kw)
 
 
 def test_nsu_with_context_layout():
@@ -135,6 +141,44 @@ def test_routes_without_search_ignore_context(route):
     assert CONTEXT not in system and "уточнённый" not in system
     assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]
     assert msgs[-1]["content"] == "а сколько платят?"
+
+
+def test_partial_and_clarify_notes_follow_the_documents():
+    system = build("nsu", mode="partial", missing="отзывов студентов")[0]["content"]
+    assert system.index(CONTEXT) < system.index(MODE_NOTES["partial"]) < system.index("(уточнённый)")
+    assert "Чего нет в документах: отзывов студентов" in system
+    system = build("nsu", mode="clarify", clarify_question="Бакалавриат или магистратура?")[0]["content"]
+    assert system.index(CONTEXT) < system.index(MODE_NOTES["clarify"])
+    assert "Уточняющий вопрос: Бакалавриат или магистратура?" in system
+    assert MODE_NOTES["partial"] not in build("nsu")[0]["content"]
+
+
+def test_clarify_without_documents_asks_without_refusing():
+    system = build("nsu", context="", mode="clarify", clarify_question="Какой уровень обучения?")[0]["content"]
+    assert MODE_NOTES["clarify"] in system and "Уточняющий вопрос: Какой уровень обучения?" in system
+    assert NO_CONTEXT_BLOCKS["nsu"] not in system
+
+
+def test_greeting_rule_in_system_prompt():
+    assert "Не здоровайся и не представляйся, если пользователь сам не поздоровался" in SYSTEM_PROMPT_V2
+    assert "повторно не здоровайся" in SYSTEM_PROMPT_V2
+    assert "120–180 слов" in SYSTEM_PROMPT_V2
+    assert "больше двух лет" in SYSTEM_PROMPT_V2 and "дату документа" in SYSTEM_PROMPT_V2
+    # mid-dialogue: never greet, even if the user says hello again
+    assert build("nsu", question="Привет! а сколько платят?")[0]["content"].endswith(NO_GREETING)
+    # first turn without a greeting: start with the answer
+    first = build("nsu", memory=DialogueMemory())[0]["content"]
+    assert first.endswith(NO_GREETING)
+    # the user greets first: a greeting back is allowed
+    assert NO_GREETING not in build("chitchat", question="Здравствуйте!", memory=DialogueMemory())[0]["content"]
+
+
+def test_may_greet():
+    assert may_greet("Добрый день! Как поступить?", DialogueMemory())
+    assert not may_greet("Как поступить?", DialogueMemory())
+    assert not may_greet("Привет", DialogueMemory(recent=list(RECENT)))
+    assert not may_greet("Привет", DialogueMemory(summary="ранее говорили о ФИТ"))
+    assert not may_greet("Расскажите про архипелаг", DialogueMemory())  # no greeting inside words
 
 
 def memory_part(msgs):
@@ -220,11 +264,15 @@ def test_history_budget_not_exceeded():
 def test_system_prompt_size(route, with_context):
     system = build(route, context=CONTEXT if with_context else "")[0]["content"]
     static = system.replace(CONTEXT, "").replace("Какой размер стипендии в НГУ?", "")
-    assert estimate_tokens(static) <= 700
+    assert estimate_tokens(static) <= 750
+    for mode in ("partial", "clarify"):
+        system = build(route, context=CONTEXT if with_context else "", mode=mode)[0]["content"]
+        static = system.replace(CONTEXT, "").replace("Какой размер стипендии в НГУ?", "")
+        assert estimate_tokens(static) <= 850
 
 
 def test_system_prompt_has_no_placeholders():
-    for text in [SYSTEM_PROMPT_V2, *ROUTE_BLOCKS.values(), *NO_CONTEXT_BLOCKS.values()]:
+    for text in [SYSTEM_PROMPT_V2, *ROUTE_BLOCKS.values(), *NO_CONTEXT_BLOCKS.values(), *MODE_NOTES.values()]:
         assert "{" not in text and "}" not in text
 
 
@@ -279,7 +327,7 @@ def test_guard_latches():
 
 
 def test_guard_covers_every_route_block():
-    for text in [*ROUTE_BLOCKS.values(), *NO_CONTEXT_BLOCKS.values()]:
+    for text in [*ROUTE_BLOCKS.values(), *NO_CONTEXT_BLOCKS.values(), *MODE_NOTES.values()]:
         guard = LeakGuard(PROMPT_GUARD_TEXT)
         assert any(guard.feed(t) for t in tokens(words_of(text, 0, 8) + " ")), text[:40]
 

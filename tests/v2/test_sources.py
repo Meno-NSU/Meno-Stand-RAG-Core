@@ -1,8 +1,10 @@
 import json
 
+import pytest
+
 from meno_rag.v2.kb import Chunk
 from meno_rag.v2.search import Candidate
-from meno_rag.v2.sources import attribute, llm_check, split_sentences, to_sources
+from meno_rag.v2.sources import attribute, clean_title, llm_check, split_sentences, to_sources
 
 
 def cand(pos, text, url="https://nsu.ru/a", doc="d1", title="T", date="2026-05-01T10:00:00"):
@@ -47,6 +49,44 @@ def test_dedupe_urls_and_prefer_nsu():
     assert [s["source_url"] for s in src] == ["https://nsu.ru/n/1/", "https://nsu.ru/z"]
     assert src[0]["date"] == "2026-05-01" and src[1]["date"] == ""
     assert len(to_sources(used, {}, 1)) == 1
+
+
+@pytest.mark.parametrize(("raw", "clean"), [
+    ("Пальчунов Дмитрий Евгеньевич | Новосибирский государственный университет", "Пальчунов Дмитрий Евгеньевич"),
+    ("Новости — НГУ", "Новости"),
+    ("НГУ | Приёмная комиссия", "Приёмная комиссия"),
+    ("Главная > Наука > Лаборатории", "Лаборатории"),
+    ("Главная / Абитуриентам / Бакалавриат", "Бакалавриат"),
+    ("Бакалавриат / Специалитет", "Бакалавриат / Специалитет"),
+    ("**Механико-математический факультет** Новосибирский государственный университет",
+     "Механико-математический факультет"),
+    ("  Положение   о <b>стипендиях</b>\n", "Положение о стипендиях"),
+    ("[Программы обмена](https://nsu.ru/x) для студентов", "Программы обмена для студентов"),
+    ("Анонс: день открытых дверей - ВКонтакте", "Анонс: день открытых дверей"),
+    ("ФИТ НГУ", "ФИТ НГУ"),
+    ("", ""),
+    (None, ""),
+])
+def test_clean_title(raw, clean):
+    assert clean_title(raw) == clean
+
+
+def test_clean_title_cuts_long_titles_on_a_word():
+    out = clean_title("Очень длинное название документа " * 6)
+    assert len(out) <= 100 and out.endswith("…") and out[:-1] == out[:-1].rstrip()
+    assert "Очень длинное название документа Очень".startswith(out[:10])
+
+
+def test_sources_have_clean_titles_and_prefer_site_over_repost_by_title():
+    used = [
+        (cand(0, "a", url="https://vk.com/wall-1_2", doc="vk1", title="Неделя науки | ВКонтакте"), 0.95),
+        (cand(1, "b", url="https://nsu.ru/news/nauka", doc="n1", title="Неделя науки — НГУ"), 0.8),
+        (cand(2, "c", url="https://t.me/nsu/5", doc="tg1", title="Другой пост"), 0.7),
+    ]
+    src = to_sources(used, {}, 5)
+    assert [(s["document_title"], s["source_url"]) for s in src] == [
+        ("Неделя науки", "https://nsu.ru/news/nauka"), ("Другой пост", "https://t.me/nsu/5")]
+    assert all("date" in s for s in src)
 
 
 class Router:

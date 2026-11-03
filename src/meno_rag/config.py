@@ -245,8 +245,10 @@ class Settings(BaseSettings):
     v2_embed_dtype: str = Field(default="bf16", validation_alias="V2_EMBED_DTYPE")
     # Extra LLM check of the answer's sources.
     v2_sources_llm_check: bool = Field(default=False, validation_alias="V2_SOURCES_LLM_CHECK")
-    # Cross-encoder score above which a chunk counts as relevant.
-    v2_rerank_threshold: float = Field(default=0.3, validation_alias="V2_RERANK_THRESHOLD")
+    # Cross-encoder score a chunk needs when the evidence judge fails (fallback only).
+    v2_rerank_threshold: float = Field(default=0.5, validation_alias="V2_RERANK_THRESHOLD")
+    # Candidates (best cross-encoder score vs the standalone question) shown to the evidence judge.
+    v2_judge_candidates: int = Field(default=14, validation_alias="V2_JUDGE_CANDIDATES")
     # Score above which a chunk is attributed as a source of the answer.
     v2_attribution_threshold: float = Field(default=0.5, validation_alias="V2_ATTRIBUTION_THRESHOLD")
     # Token budget for dialog history in the prompt.
