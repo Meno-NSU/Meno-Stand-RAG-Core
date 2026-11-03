@@ -147,7 +147,7 @@ class ArenaTurnRequest(BaseModel):
     # Generous for a pasted paragraph-level question — far above any real chat turn, and well
     # under settings.max_qa_prompt_chars (60_000, the full system+context+history+question
     # budget for an actual pipeline run) — while still bounding this endpoint's per-row
-    # storage cost the same way FeedbackRequest.comment (2000) already does for feedback.
+    # storage cost the same way FeedbackRequest.comment (20000) already does for feedback.
     question: str = Field(..., min_length=1, max_length=8_000)
     turn_index: int | None = Field(default=None, ge=0)
     sides: list[ArenaSide] = Field(..., min_length=2, max_length=2)
@@ -157,7 +157,7 @@ class FeedbackRequest(BaseModel):
     completion_id: str = Field(..., min_length=1)
     session_id: str = Field(..., min_length=1)
     value: Literal["up", "down"]
-    comment: str | None = Field(default=None, max_length=2000)
+    comment: str | None = Field(default=None, max_length=20000)
 
 
 class FeedbackClearRequest(BaseModel):
