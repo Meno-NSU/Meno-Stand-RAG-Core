@@ -281,18 +281,13 @@ class V2Pipeline:
         the analysis or the judge add recall but never decide the ranking.
         """
         s = self.settings
+        if s.v2_evidence == "rerank":
+            return await self._rerank_evidence(an, today, emit)
         started = time.perf_counter()
         slowest = 0.0  # the longest search + judge round so far, seconds
         standalone = an.standalone_question
         loop = _Evidence()
-        schedule_cands: list[Candidate] = []
-        if self.schedule is not None and an.route == "nsu":
-            try:
-                blocks = self.schedule.lookup(standalone, today)
-            except Exception as exc:  # a timetable bug must not break the answer
-                logger.warning("v2_schedule_lookup_failed", error=repr(exc))
-                blocks = []
-            schedule_cands = [_schedule_candidate(i, b) for i, b in enumerate(blocks)]
+        schedule_cands = self._schedule_candidates(an, today)
         hint = f"Фокус диалога: {an.focus}" if an.focus else ""
         terms = query_terms([standalone, *an.needs], self._idf())  # for query-biased judge excerpts
         relevant: list[Candidate] = []  # accepted by the latest judgement
@@ -367,6 +362,77 @@ class V2Pipeline:
             tried = {q.casefold() for q in loop.queries}
             round_queries = [q for q in j.queries if q.casefold() not in tried][:MAX_NEW_QUERIES]
         return loop
+
+    def _schedule_candidates(self, an: TurnAnalysis, today: date) -> list[Candidate]:
+        if self.schedule is None or an.route != "nsu":
+            return []
+        try:
+            blocks = self.schedule.lookup(an.standalone_question, today)
+        except Exception as exc:  # a timetable bug must not break the answer
+            logger.warning("v2_schedule_lookup_failed", error=repr(exc))
+            return []
+        return [_schedule_candidate(i, b) for i, b in enumerate(blocks)]
+
+    async def _rerank_evidence(self, an: TurnAnalysis, today: date, emit) -> _Evidence:
+        """V2_EVIDENCE=rerank: one search, no LLM call. The same candidate mix the judge would see (best
+        cross-encoder scores + BM25 slots); a candidate is evidence when its score reaches
+        V2_RERANK_THRESHOLD or it contains the rarest question term (a name, an abbreviation) that occurs in
+        at most V2_RARE_TERM_MAX_DF chunks: the cross-encoder scores "what do you know about <surname>"
+        against a staff list low even when the list is the answer."""
+        s = self.settings
+        standalone = an.standalone_question
+        loop = _Evidence()
+        loop.rounds = 1
+        queries = _dedup([standalone, *an.needs])
+        loop.queries = list(queries)
+        await emit(StageName.RETRIEVAL, StageStatus.STARTED, None, {"round": 1})
+        t0 = time.perf_counter()
+        result = await self.search.search(
+            queries, [standalone] * len(queries),
+            lexical_top=s.v2_judge_candidates_dense + s.v2_judge_candidates_lexical, lexical_for=1,
+        )
+        await emit(StageName.RETRIEVAL, StageStatus.COMPLETED, _ms(t0),
+                   {"round": 1, "queries": queries, "candidates": len(result.candidates),
+                    "rerank_ms": round(float(result.timings_ms.get("rerank", 0.0)), 2)})
+        for c in result.candidates:
+            loop.pool[c.pos] = c
+        cands = self._judge_candidates(result, self._schedule_candidates(an, today), [], set())
+        rare = self._rarest_term(standalone)
+        lexical = {c.pos for c in getattr(result, "lexical_top", [])}
+        by_score = [i for i, c in enumerate(cands) if c.score >= s.v2_rerank_threshold]
+        by_term = [i for i, c in enumerate(cands)
+                   if i not in by_score and rare and rare in self._chunk_terms(c.chunk)]
+        # rare-term matches keep up to half of the context even when many chunks pass the threshold
+        by_term = by_term[: s.v2_max_context_chunks // 2]
+        relevant = sorted(by_score[: s.v2_max_context_chunks - len(by_term)] + by_term)
+        if relevant:
+            mode = "documents"
+        else:
+            mode = "general_knowledge" if an.route == "general" else "no_data"
+        j = Judgement(relevant=relevant, verdict="sufficient" if relevant else "insufficient", answer_mode=mode)
+        loop.judgement, loop.shown = j, cands
+        await emit(StageName.RERANK, StageStatus.COMPLETED, None,
+                   {"round": 1, "candidates": len(cands), "relevant": len(relevant), "by_term": len(by_term),
+                    "rare_term": rare, "lexical_slots": sum(c.pos in lexical for c in cands),
+                    "answer_mode": mode, "evidence": "rerank"})
+        loop.log.append(_judgement_log(1, j, cands))
+        return loop
+
+    def _rarest_term(self, text: str) -> str:
+        """The question stem found in the fewest chunks (0 < df <= V2_RARE_TERM_MAX_DF), or ''."""
+        bm25 = getattr(self.search, "bm25", None)
+        limit = self.settings.v2_rare_term_max_df
+        if limit <= 0 or not hasattr(bm25, "doc_freq") or not hasattr(bm25, "tokens"):
+            return ""
+        best, best_df = "", limit + 1
+        for t in dict.fromkeys(bm25.tokens(text)):
+            df = bm25.doc_freq(t)
+            if df and df < best_df:
+                best, best_df = t, df
+        return best
+
+    def _chunk_terms(self, chunk: Chunk) -> set[str]:
+        return set(self.search.bm25.tokens(chunk.index_text))
 
     def _judge_candidates(self, result, schedule_cands, relevant, judged) -> list[Candidate]:
         """Approved documents of earlier rounds + unseen ones: the best cross-encoder scores, then the best

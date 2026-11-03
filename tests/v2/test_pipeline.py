@@ -847,3 +847,70 @@ def test_close_shuts_search_executor():
     pipe.search._executor = Exec()
     pipe.close()
     assert Exec.down
+
+
+# --- V2_EVIDENCE=rerank: no judge call -----------------------------------------------------
+
+
+class FakeBm25:
+    """Lowercased words as stems; doc frequencies from a table (5000 = common)."""
+
+    def __init__(self, df):
+        self.df = df
+
+    def tokens(self, text):
+        return re.findall(r"\w+", (text or "").lower())
+
+    def doc_freq(self, token):
+        return self.df.get(token, 5000)
+
+    def idf(self, token):
+        return 1.0
+
+
+RERANK = {"v2_evidence": "rerank", "v2_rerank_threshold": 0.5, "v2_judge_candidates": 8,
+          "v2_judge_candidates_dense": 6, "v2_judge_candidates_lexical": 2}
+
+
+async def test_rerank_evidence_keeps_high_scores_and_rare_term_matches_without_a_judge():
+    q = "Кто такой Солихов Руслан Махмаднабиевич?"
+    others = [c for c in CHUNKS if c != "groups"]
+    dense = [(c, 0.9 if i < 2 else 0.1) for i, c in enumerate(others)] + [("groups", 0.02)]
+    llm = FakeLLM(analysis(standalone=q), answer=GROUPS)
+    pipe = make(llm, {q: dense}, lexical={q: [("groups", 0.02)]}, **RERANK)
+    pipe.search.bm25 = FakeBm25({"солихов": 3, "махмаднабиевич": 2})
+    out, events = await prepare(pipe, q)
+    assert llm.judged == [] and "evidence_judgement" not in llm.kinds()
+    assert set(ids(out.context_chunks)) == {*others[:2], "groups"}
+    assert out.answer_mode == "documents" and not out.refusal
+    rr = [e.detail for e in events if e.stage == StageName.RERANK][0]
+    assert rr["rare_term"] == "махмаднабиевич" and rr["by_term"] == 1 and rr["evidence"] == "rerank"
+
+
+async def test_rerank_evidence_refuses_when_nothing_passes():
+    q = "Как зовут декана Слизерина?"
+    dense = [(c, 0.2) for c in CHUNKS if c != "groups"]
+    llm = FakeLLM(analysis(standalone=q))
+    pipe = make(llm, {q: dense}, **RERANK)
+    pipe.search.bm25 = FakeBm25({"слизерина": 0})  # not in the index: no rare term
+    out, _ = await prepare(pipe, q)
+    assert out.refusal and out.context_chunks == [] and out.answer_mode == "no_data"
+    llm = FakeLLM(analysis("general", q))
+    pipe = make(llm, {q: dense}, **RERANK)
+    pipe.search.bm25 = FakeBm25({})
+    out, _ = await prepare(pipe, q)
+    assert out.answer_mode == "general_knowledge" and not out.refusal
+
+
+async def test_rerank_evidence_rare_term_matches_take_at_most_half_of_the_context():
+    q = "Кто такой Солихов?"
+    dense = [(c, 0.95) for c in CHUNKS if c != "groups"] + [("groups", 0.02)]
+    pipe = make(FakeLLM(analysis(standalone=q)), {q: dense}, lexical={q: [("groups", 0.02)]},
+                **{**RERANK, "v2_max_context_chunks": 4})
+    pipe.search.bm25 = FakeBm25({"солихов": 3})
+    out, _ = await prepare(pipe, q)
+    assert "groups" in ids(out.context_chunks) and len(out.context_chunks) <= 4
+    # without document frequencies (Qdrant BM25 backend) the rare-term rule is off
+    pipe = make(FakeLLM(analysis(standalone=q)), {q: dense}, lexical={q: [("groups", 0.02)]}, **RERANK)
+    out, _ = await prepare(pipe, q)
+    assert "groups" not in ids(out.context_chunks)

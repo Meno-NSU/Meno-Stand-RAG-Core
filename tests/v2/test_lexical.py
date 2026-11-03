@@ -45,3 +45,9 @@ def test_idf_from_the_index(retriever):
     common, rare = stem.stem("студентам"), stem.stem("деканат")
     assert retriever.idf(rare) > retriever.idf(common) > 1.0  # "студентам" is in two of four texts
     assert retriever.idf("несуществующийтокен") >= retriever.idf(rare)
+
+
+def test_doc_freq_and_tokens(retriever):
+    toks = retriever.tokens("Стипендия")
+    assert toks and retriever.doc_freq(toks[0]) >= 1
+    assert retriever.doc_freq("zzzнесуществующее") == 0

@@ -27,6 +27,20 @@ class Bm25Retriever:
         out.sort(key=lambda x: -x[1])
         return out
 
+    def tokens(self, text: str) -> list[str]:
+        return tokenize_and_normalize_text(text or "", self._stemmer).split()
+
+    def doc_freq(self, token: str) -> int | None:
+        """Number of chunks containing an index token; None if the index cannot tell."""
+        try:
+            indptr = self._index.scores["indptr"]
+            tid = self._index.vocab_dict.get(token)
+        except Exception:
+            return None
+        if tid is None:
+            return 0
+        return int(indptr[tid + 1] - indptr[tid]) if tid + 1 < len(indptr) else None
+
     def idf(self, token: str) -> float:
         """Smoothed IDF of an index token (a Snowball stem, as indexed); 1.0 if the index cannot tell."""
         try:
