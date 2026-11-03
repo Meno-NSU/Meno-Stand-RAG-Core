@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import date
 from typing import Any
 
@@ -22,11 +23,14 @@ ALLOWED_STATUSES = {v for k, v in vars(StageStatus).items() if k.isupper()}
 STIP = "Академическая стипендия в НГУ составляет 3000 рублей в месяц."
 DORM = "Общежития НГУ расположены на улице Пирогова в Академгородке."
 FIT = "Факультет информационных технологий готовит программистов и аналитиков."
+STAFF = "Группа 22215: Иванов А. А., Петров Б. Б., Солихов Руслан Махмаднабиевич, Сидоров В. В."
 CHUNKS = {
     "stip": Chunk("stip", "d-stip", "https://nsu.ru/stip", "Стипендии", "2026-09-01", "regulation", None, STIP, STIP),
     "dorm": Chunk("dorm", "d-dorm", "https://nsu.ru/dorm", "Общежития", "2025-05-10", "housing_or_campus", None,
                   DORM, DORM),
     "fit": Chunk("fit", "d-fit", "https://nsu.ru/fit", "ФИТ", None, "faculty_card", None, FIT, FIT),
+    "staff": Chunk("staff", "d-staff", "https://nsu.ru/groups", "Бакалавриат - 4 курс", "2026-09-01", "web_page", None,
+                   STAFF, STAFF),
 }
 POS = {cid: i for i, cid in enumerate(CHUNKS)}
 
@@ -68,16 +72,19 @@ class FakeReranker:
 class FakeSearch:
     """table: query -> [(chunk_id, score)]; coverage = best score per query."""
 
-    def __init__(self, table):
+    def __init__(self, table, lexical=None):
         self.table = table
+        self.lexical = lexical or {}  # query -> [(chunk_id, cross-encoder score)] in BM25 order
         self.calls: list[tuple[list[str], list[str]]] = []
+        self.kwargs: list[dict] = []
         self.reranker = FakeReranker()
 
     async def run_gpu(self, fn, *args):
         return fn(*args)
 
-    async def search(self, queries, rerank_queries):
+    async def search(self, queries, rerank_queries, **kw):
         self.calls.append((list(queries), list(rerank_queries)))
+        self.kwargs.append(kw)
         best: dict[str, float] = {}
         coverage: dict[str, float] = {}
         for q in queries:
@@ -85,8 +92,13 @@ class FakeSearch:
             for cid, sc in self.table.get(q, []):
                 best[cid] = max(best.get(cid, sc), sc)
                 coverage[q] = max(coverage[q], sc)
+        lex = self.lexical.get(queries[0], [])[: kw.get("lexical_top", 0)] if queries else []
+        for cid, sc in lex:
+            best[cid] = max(best.get(cid, sc), sc)
         cands = [Candidate(POS[c], CHUNKS[c], s) for c, s in sorted(best.items(), key=lambda p: -p[1])]
-        return SearchResult(cands, coverage, {"embed_dense": 1.0, "bm25": 1.0, "rrf": 0.1, "rerank": 2.0})
+        by_id = {c.chunk.chunk_id: c for c in cands}
+        return SearchResult(cands, coverage, {"embed_dense": 1.0, "bm25": 1.0, "rrf": 0.1, "rerank": 2.0},
+                            [by_id[c] for c, _ in lex])
 
 
 class FakeLLM:
@@ -447,3 +459,57 @@ def test_close_shuts_search_executor():
     pipe.search._executor = Exec()
     pipe.close()
     assert Exec.down
+
+
+# --- v2.1: BM25 slots + rare-term evidence ---------------------------------------------------
+
+
+class FakeBm25:
+    """Lowercased words as stems; doc frequencies from a table (5000 = common)."""
+
+    def __init__(self, df):
+        self.df = df
+
+    def tokens(self, text):
+        return re.findall(r"\w+", (text or "").lower())
+
+    def doc_freq(self, token):
+        return self.df.get(token, 5000)
+
+    def variants(self, token, min_len=5):
+        vocab = {t for t, df in self.df.items() if df}
+        return [token[:n] for n in range(len(token), max(min_len, len(token) - 3) - 1, -1) if token[:n] in vocab]
+
+
+Q_PERSON = "Что ты знаешь про Руслана Солихова?"
+
+
+def _person_pipe(df, **settings):
+    llm = FakeLLM(analysis(standalone=Q_PERSON), answer=STAFF)
+    pipe = make(llm, {Q_PERSON: [("stip", 0.1), ("dorm", 0.1)]}, **settings)
+    pipe.search.lexical = {Q_PERSON: [("staff", 0.02), ("dorm", 0.1)]}
+    pipe.search.bm25 = FakeBm25(df)
+    return pipe
+
+
+async def test_lexical_slots_off_keep_the_original_search():
+    pipe = _person_pipe({"солихов": 3})
+    out, _ = await prepare(pipe, Q_PERSON)
+    assert all(kw == {} for kw in pipe.search.kwargs)
+    assert out.refusal and out.context_chunks == []
+
+
+async def test_rare_term_match_is_evidence_below_the_threshold():
+    pipe = _person_pipe({"солихов": 3}, V2_LEXICAL_SLOTS=4)
+    out, events = await prepare(pipe, Q_PERSON)
+    first = pipe.search.kwargs[0]
+    assert first["lexical_top"] == 4 and first["lexical_extra"] == ("солихов",)  # the indexed form
+    assert [c.chunk.chunk_id for c in out.context_chunks] == ["staff"] and not out.refusal
+    ctx = [e.detail for e in events if e.stage == StageName.CONTEXT_ASSEMBLY and e.detail][0]
+    assert ctx["rare_term_chunks"] == 1
+
+
+async def test_without_a_rare_term_low_scored_slots_stay_out():
+    pipe = _person_pipe({}, V2_LEXICAL_SLOTS=4)  # every stem is common
+    out, _ = await prepare(pipe, Q_PERSON)
+    assert out.refusal and out.context_chunks == []

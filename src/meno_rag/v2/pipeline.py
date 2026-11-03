@@ -29,6 +29,7 @@ from meno_rag.v2.memory import (
     estimate_tokens,
     precompute_next,
 )
+from meno_rag.v2.lexical import stems_match
 from meno_rag.v2.prompting import PROMPT_GUARD_TEXT, SEARCH_ROUTES, LeakGuard, assemble_context, build_messages
 from meno_rag.v2.schedule import GROUP_RE, has_schedule_intent
 from meno_rag.v2.search import Candidate
@@ -207,21 +208,22 @@ class V2Pipeline:
         queries: list[str] = []
         coverage: dict[str, float] = {}
         rounds = 0
+        forced: list[Candidate] = []
         if searched:
-            ranked, queries, coverage, rounds = await self._search_rounds(an, today, runtime, emit)
+            ranked, queries, coverage, rounds, forced = await self._search_rounds(an, today, runtime, emit)
 
         context, kept = "", []
         if searched:
             await emit(StageName.CONTEXT_ASSEMBLY, StageStatus.STARTED)
             t2 = time.perf_counter()
             context, kept = assemble_context(
-                ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, s.v2_max_context_chunks
+                ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, s.v2_max_context_chunks, forced
             )
             await emit(
                 StageName.CONTEXT_ASSEMBLY,
                 StageStatus.COMPLETED,
                 _ms(t2),
-                {"chunks": len(kept), "tokens": estimate_tokens(context)},
+                {"chunks": len(kept), "tokens": estimate_tokens(context), "rare_term_chunks": len(forced)},
             )
         refusal = an.route == "nsu" and not kept
         general_note = an.route == "general" and not kept
@@ -241,7 +243,8 @@ class V2Pipeline:
         if len(kept) > 0 and self._answer_room(qa_messages) < MIN_ANSWER_ROOM:
             while kept and self._answer_room(qa_messages) < ENOUGH_ANSWER_ROOM:
                 context, kept = assemble_context(
-                    ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, len(kept) - 1
+                    ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, len(kept) - 1,
+                    forced[: max(len(kept) - 1, 0) // 2],
                 )
                 qa_messages = build(context)
             refusal = an.route == "nsu" and not kept
@@ -297,12 +300,25 @@ class V2Pipeline:
         if not subqueries:
             aims = dict.fromkeys(round_queries, standalone)
         rounds = 0
+        forced: list[Candidate] = []
+        rare, forms = self._rarest_term(standalone) if s.v2_lexical_slots > 0 else ("", [])
         while round_queries:
             rounds += 1
             all_queries += round_queries
             await emit(StageName.RETRIEVAL, StageStatus.STARTED, None, {"round": rounds})
             t0 = time.perf_counter()
-            result = await self.search.search(round_queries, round_queries)
+            kw = {}
+            if rounds == 1 and s.v2_lexical_slots > 0:
+                # the question's best BM25 hits, scored even when the fusion dropped them; the rare term's
+                # indexed inflection forms join its BM25 query («Солихова» also searches «солих»)
+                kw = {"lexical_top": s.v2_lexical_slots, "lexical_for": 1}
+                extra = tuple(f for f in forms if f != rare)
+                if extra:
+                    kw["lexical_extra"] = extra
+            result = await self.search.search(round_queries, round_queries, **kw)
+            if kw and rare:
+                forced = [c for c in getattr(result, "lexical_top", [])
+                          if c.score < thr and self._has_term(c.chunk, forms)][: s.v2_max_context_chunks // 2]
             wall = _ms(t0)
             rerank_ms = round(float(result.timings_ms.get("rerank", 0.0)), 2)
             await emit(
@@ -338,7 +354,26 @@ class V2Pipeline:
             aims = {q: (uncovered[min(i, len(uncovered) - 1)] if uncovered else None) for i, q in enumerate(new)}
 
         ranked = [*schedule_cands, *sorted(best.values(), key=lambda c: (-c.score, c.pos))]
-        return ranked, all_queries, coverage, rounds
+        return ranked, all_queries, coverage, rounds, forced
+
+    def _rarest_term(self, text: str) -> tuple[str, list[str]]:
+        """The question stem whose index forms (itself + shorter inflection variants) occur in the fewest
+        chunks, 0 < df <= V2_RARE_TERM_MAX_DF, with those forms; ('', []) if none or no document frequencies."""
+        bm25 = getattr(self.search, "bm25", None)
+        limit = self.settings.v2_rare_term_max_df
+        if limit <= 0 or not all(hasattr(bm25, a) for a in ("doc_freq", "tokens", "variants")):
+            return "", []
+        best, best_forms, best_df = "", [], limit + 1
+        for t in dict.fromkeys(bm25.tokens(text)):
+            forms = bm25.variants(t) if len(t) >= 5 else ([t] if bm25.doc_freq(t) else [])
+            df = sum(bm25.doc_freq(f) or 0 for f in forms)
+            if forms and 0 < df < best_df:
+                best, best_forms, best_df = t, forms, df
+        return best, best_forms
+
+    def _has_term(self, chunk: Chunk, forms: list[str]) -> bool:
+        toks = set(self.search.bm25.tokens(chunk.index_text))
+        return bool(toks & set(forms)) or any(stems_match(u, forms[0]) for u in toks if len(u) >= 5)
 
     async def _reformulate(self, standalone, uncovered, chain, tried, titles, round_no, runtime, emit) -> list[str]:
         parts = [f"Вопрос: {standalone}"]

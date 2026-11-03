@@ -169,10 +169,14 @@ def _block(n: int, cand: Candidate) -> str:
 
 
 def assemble_context(
-    candidates: list[Candidate], threshold: float, budget_tokens: int, max_chunks: int
+    candidates: list[Candidate], threshold: float, budget_tokens: int, max_chunks: int,
+    forced: list[Candidate] | tuple = (),
 ) -> tuple[str, list[Candidate]]:
-    """Blocks of the candidates scoring >= threshold, best first, while they fit the budget."""
-    ranked = sorted((c for c in candidates if c.score >= threshold), key=lambda c: -c.score)
+    """Blocks of the candidates scoring >= threshold, best first, then the forced ones (evidence the
+    cross-encoder scores low, e.g. a rare-term match), while they fit max_chunks and the budget."""
+    taken = {c.pos for c in forced}
+    above = sorted((c for c in candidates if c.score >= threshold and c.pos not in taken), key=lambda c: -c.score)
+    ranked = [*above[: max(max_chunks - len(forced), 0)], *forced]
     blocks: list[str] = []
     kept: list[Candidate] = []
     for cand in ranked:
