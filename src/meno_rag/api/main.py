@@ -54,6 +54,7 @@ from meno_rag.llm.router import LLMRouter
 from meno_rag.llm.status import InMemoryModelStatusStore, ModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest
+from meno_rag.api.knowledge_bases import LEGACY_KB_ID, V2_KB_ID, default_kb_id, knowledge_bases
 from meno_rag.stand.pipeline import PipelineRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
 from meno_rag.stand.search import vectorize_search_query
@@ -242,30 +243,54 @@ async def lifespan(app: FastAPI):
 
     resources = None
     pipeline = None
-    try:
-        resources = await asyncio.to_thread(load_stand_resources, settings)
+    v2_pipeline = None
+    if not settings.legacy_enabled and not settings.v2_enabled:
+        logger.error("no_knowledge_base_enabled", detail="LEGACY_ENABLED and V2_ENABLED are both off")
+    if settings.legacy_enabled:
         try:
-            await asyncio.to_thread(
-                vectorize_search_query,
-                "прогрев",
-                resources.embedder[0],
-                resources.embedder[1],
+            resources = await asyncio.to_thread(load_stand_resources, settings)
+            try:
+                await asyncio.to_thread(
+                    vectorize_search_query,
+                    "прогрев",
+                    resources.embedder[0],
+                    resources.embedder[1],
+                )
+            except Exception as exc:
+                logger.warning("frida_warmup_failed", error=str(exc))
+            pipeline = StandRagPipeline(
+                settings=settings,
+                resources=resources,
+                llm_router=llm_router,
+                rewrite_semaphore=asyncio.Semaphore(settings.rewrite_concurrency),
+                rerank_semaphore=asyncio.Semaphore(settings.rerank_concurrency),
+                generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
+                embed_semaphore=asyncio.Semaphore(settings.embed_concurrency),
+                bm25_semaphore=asyncio.Semaphore(settings.bm25_concurrency),
+                retrieval_executor=retrieval_executor,
             )
         except Exception as exc:
-            logger.warning("frida_warmup_failed", error=str(exc))
-        pipeline = StandRagPipeline(
-            settings=settings,
-            resources=resources,
-            llm_router=llm_router,
-            rewrite_semaphore=asyncio.Semaphore(settings.rewrite_concurrency),
-            rerank_semaphore=asyncio.Semaphore(settings.rerank_concurrency),
-            generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
-            embed_semaphore=asyncio.Semaphore(settings.embed_concurrency),
-            bm25_semaphore=asyncio.Semaphore(settings.bm25_concurrency),
-            retrieval_executor=retrieval_executor,
-        )
-    except Exception as exc:
-        logger.exception("stand_resources_load_failed", error=str(exc))
+            logger.exception("stand_resources_load_failed", error=str(exc))
+    if settings.v2_enabled:
+        try:
+            from meno_rag.v2.memory import SummaryStore
+            from meno_rag.v2.pipeline import V2Pipeline
+            from meno_rag.v2.schedule import load_schedule
+            from meno_rag.v2.search import load_search_service
+
+            search = await asyncio.to_thread(load_search_service, settings)
+            v2_pipeline = V2Pipeline(
+                search=search,
+                llm_router=llm_router,
+                settings=settings,
+                summary_store=SummaryStore(),
+                docs=search.release.docs,
+                schedule=load_schedule(settings.v2_schedule_path),
+                generation_semaphore=asyncio.Semaphore(settings.generation_concurrency),
+            )
+        except Exception as exc:
+            logger.exception("v2_resources_load_failed", error=str(exc))
+            v2_pipeline = None
 
     app.state.settings = settings
     app.state.database = database
@@ -273,6 +298,7 @@ async def lifespan(app: FastAPI):
     app.state.vllm_registry = registry
     app.state.resources = resources
     app.state.pipeline = pipeline
+    app.state.v2_pipeline = v2_pipeline
     app.state.redis = redis
     app.state.arena_lock = arena_lock
     app.state.openrouter_registry = openrouter_registry
@@ -299,6 +325,8 @@ async def lifespan(app: FastAPI):
         await trace_store.close()
     if redis is not None:
         await redis.close()
+    if v2_pipeline is not None:
+        v2_pipeline.close()
     await http_client.aclose()
     await database.close()
     retrieval_executor.shutdown(wait=False, cancel_futures=True)
@@ -445,14 +473,20 @@ async def healthz(request: Request):
             "unreachable": unreachable,
         }
 
-    overall = "ok" if pipeline is not None and db_status == "ok" else "degraded"
+    pipelines = _pipelines(state)
+    rag_ready = any(pipelines[kb.id] is not None for kb in knowledge_bases(settings))
+    overall = "ok" if rag_ready and db_status == "ok" else "degraded"
     return {
         "status": overall,
-        "rag_ready": pipeline is not None,
+        "rag_ready": rag_ready,
         "db": db_status,
         "redis": redis_status,
         "embedder_device": embedder_device,
-        "knowledge_base_id": KB_ID,
+        "knowledge_base_id": default_kb_id(settings),
+        "knowledge_bases": [
+            {"id": kb.id, "available": pipelines[kb.id] is not None}
+            for kb in knowledge_bases(settings)
+        ],
         "openrouter": or_state,
     }
 
@@ -641,21 +675,48 @@ async def diagnostics_openrouter(request: Request):
     return {"object": "list", "data": results, "summary": summary}
 
 
+def _pipelines(state: Any) -> dict[str, Any]:
+    return {LEGACY_KB_ID: state.pipeline, V2_KB_ID: getattr(state, "v2_pipeline", None)}
+
+
+def _late_sources(pipeline: Any, kb_id: str) -> bool:
+    """True for pipelines that attribute sources to the finished answer (v2)."""
+    return kb_id != LEGACY_KB_ID and hasattr(pipeline, "finalize_sources")
+
+
+def _select_pipeline(app: FastAPI, kb_id: str | None) -> tuple[Any, str]:
+    """Pick the pipeline serving ``kb_id`` (empty -> the default base).
+
+    Returns ``(None, id)`` when the base is known but its pipeline is not loaded,
+    and ``(None, "")`` when the id is unknown or the base is not enabled.
+    """
+    settings: Settings = app.state.settings
+    chosen = kb_id or default_kb_id(settings)
+    if chosen not in {kb.id for kb in knowledge_bases(settings)}:
+        return None, ""
+    return _pipelines(app.state)[chosen], chosen
+
+
 @app.get("/v1/knowledge-bases")
 async def list_knowledge_bases(request: Request):
-    available = request.app.state.pipeline is not None
+    settings: Settings = request.app.state.settings
+    pipelines = _pipelines(request.app.state)
+    kbs = knowledge_bases(settings)
+    default_id = default_kb_id(settings)
+    default_engine = next((kb.rag_engine_id for kb in kbs if kb.id == default_id), RAG_ENGINE_ID)
     return {
         "object": "list",
         "data": [
             {
-                "id": KB_ID,
-                "name": KB_NAME,
-                "description": "Legacy-compatible RAG: FRIDA + FAISS, BM25, LLM rerank, stand prompts.",
-                "supported_rag_engines": [RAG_ENGINE_ID],
-                "available": available,
+                "id": kb.id,
+                "name": kb.name,
+                "description": kb.description,
+                "supported_rag_engines": [kb.rag_engine_id],
+                "available": pipelines[kb.id] is not None,
             }
+            for kb in kbs
         ],
-        "default_selection": {"knowledge_base_id": KB_ID, "rag_engine_id": RAG_ENGINE_ID},
+        "default_selection": {"knowledge_base_id": default_id, "rag_engine_id": default_engine},
     }
 
 
@@ -676,8 +737,8 @@ def _record_preflight_failure(code: str, *, bench: bool) -> None:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(payload: ChatCompletionRequest, request: Request, response: Response):
-    pipeline: StandRagPipeline | None = request.app.state.pipeline
-    if pipeline is None:
+    pipeline, kb_id = _select_pipeline(request.app, payload.knowledge_base_id)
+    if pipeline is None and (kb_id or not any(p is not None for p in _pipelines(request.app.state).values())):
         return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
 
     # Benchmark requests are recognised before anything else: they pick a
@@ -758,7 +819,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             settings.capture_pipeline_trace and random.random() < settings.pipeline_trace_sample_rate
         )
 
-        if payload.knowledge_base_id and payload.knowledge_base_id != KB_ID:
+        if pipeline is None:
             return _error_response(
                 400,
                 f"Unknown knowledge_base_id={payload.knowledge_base_id!r}.",
@@ -789,6 +850,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                     on_finish=admission.release,
                     capture_trace=capture_trace,
                     bench=bench,
+                    pipeline=pipeline,
+                    kb_id=kb_id,
                 ),
                 media_type="text/event-stream",
                 headers=stream_headers,
@@ -807,6 +870,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             guest_session_id=guest_session_id,
             capture_trace=capture_trace,
             bench=bench,
+            pipeline=pipeline,
+            kb_id=kb_id,
         )
     finally:
         if not released:
@@ -841,8 +906,11 @@ async def _non_stream_response(
     guest_session_id: str | None = None,
     capture_trace: bool = False,
     bench: bool = False,
+    pipeline: Any = None,
+    kb_id: str = LEGACY_KB_ID,
 ):
-    pipeline: StandRagPipeline = request.app.state.pipeline
+    if pipeline is None:
+        pipeline = request.app.state.pipeline
     database: Database = request.app.state.database
     started = time.perf_counter()
     answer = ""
@@ -857,6 +925,8 @@ async def _non_stream_response(
             outcome=outcome, runtime=runtime, max_tokens=max_tokens, temperature=temperature
         )
         generation_ms = round((time.perf_counter() - gen_started) * 1000, 2)
+        if _late_sources(pipeline, kb_id):
+            outcome.sources = await pipeline.finalize_sources(outcome, answer, runtime)
         total_ms = round((time.perf_counter() - started) * 1000, 2)
         if not bench:
             await _persist_success(
@@ -878,6 +948,7 @@ async def _non_stream_response(
                 user_id=user_id,
                 guest_session_id=guest_session_id,
                 arena=payload.arena,
+                kb_id=kb_id,
                 trace_writer=request.app.state.trace_writer,
             )
     except Exception as exc:
@@ -912,6 +983,7 @@ async def _non_stream_response(
                 stage=stage,
                 user_id=user_id,
                 guest_session_id=guest_session_id,
+                kb_id=kb_id,
             )
         return _classified_error_response(classified, retry_id=completion_id, stage=stage)
     finally:
@@ -976,8 +1048,11 @@ async def _stream_response(
     on_finish: Callable[[], None] | None = None,
     capture_trace: bool = False,
     bench: bool = False,
+    pipeline: Any = None,
+    kb_id: str = LEGACY_KB_ID,
 ):
-    pipeline: StandRagPipeline = request.app.state.pipeline
+    if pipeline is None:
+        pipeline = request.app.state.pipeline
     database: Database = request.app.state.database
     started = time.perf_counter()
     stage_queue: asyncio.Queue[StageEvent] = asyncio.Queue()
@@ -1004,7 +1079,8 @@ async def _stream_response(
             yield event.to_sse()
 
         outcome = await prepare_task
-        if outcome.sources:
+        late_sources = _late_sources(pipeline, kb_id)
+        if outcome.sources and not late_sources:
             yield sse_event("sources", {"sources": outcome.sources})
 
         yield sse_data(
@@ -1051,6 +1127,11 @@ async def _stream_response(
             duration_ms=generation_ms,
             model_id=runtime.generation.model_id,
         ).to_sse()
+
+        if late_sources:
+            outcome.sources = await pipeline.finalize_sources(outcome, "".join(answer_parts), runtime)
+            if outcome.sources:
+                yield sse_event("sources", {"sources": outcome.sources})
 
         done_chunk = openai_chunk(
             completion_id=completion_id,
@@ -1106,6 +1187,7 @@ async def _stream_response(
                 user_id=user_id,
                 guest_session_id=guest_session_id,
                 arena=payload.arena,
+                kb_id=kb_id,
                 trace_writer=request.app.state.trace_writer,
             )
     except Exception as exc:
@@ -1167,6 +1249,7 @@ async def _stream_response(
                 stage=stage,
                 user_id=user_id,
                 guest_session_id=guest_session_id,
+                kb_id=kb_id,
             )
     finally:
         # If the client disconnected mid-prepare, the background prepare task is
@@ -1213,6 +1296,7 @@ async def _persist_success(
     user_id: str | None = None,
     guest_session_id: str | None = None,
     arena: bool = False,
+    kb_id: str = LEGACY_KB_ID,
     trace_writer: TraceWriter | None = None,
 ) -> None:
     try:
@@ -1263,7 +1347,7 @@ async def _persist_success(
                     role="user",
                     content=question,
                     model=model,
-                    knowledge_base_id=KB_ID,
+                    knowledge_base_id=kb_id,
                     request_id=run_id,
                 )
                 await repositories.append_message(
@@ -1272,7 +1356,7 @@ async def _persist_success(
                     role="assistant",
                     content=answer,
                     model=model,
-                    knowledge_base_id=KB_ID,
+                    knowledge_base_id=kb_id,
                     request_id=run_id,
                     # Outside the `if improvement:` block below on purpose: these are the
                     # sources the user was shown, part of the answer, not analytics.
@@ -1293,7 +1377,7 @@ async def _persist_success(
                     generation_model=generation_model,
                     core_model=core_model,
                     endpoint=endpoint,
-                    knowledge_base_id=KB_ID,
+                    knowledge_base_id=kb_id,
                     user_question=question,
                     search_queries=outcome.search_queries,
                     total_ms=total_ms,
@@ -1359,6 +1443,7 @@ async def _persist_failure(
     stage: str | None = None,
     user_id: str | None = None,
     guest_session_id: str | None = None,
+    kb_id: str = LEGACY_KB_ID,
 ) -> None:
     """Record a failed turn for diagnostics.
 
@@ -1389,7 +1474,7 @@ async def _persist_failure(
             generation_model=runtime.generation.model_id,
             core_model=runtime.core.model_id,
             endpoint=runtime.generation.base_url,
-            knowledge_base_id=KB_ID,
+            knowledge_base_id=kb_id,
             user_question=question,
             search_queries=None,
             total_ms=None,
