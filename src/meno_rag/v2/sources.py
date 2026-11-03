@@ -16,7 +16,8 @@ log = logging.getLogger(__name__)
 
 MIN_WORDS = 4
 SOCIAL_HOSTS = ("vk.com", "t.me", "telegram.me")
-RerankerCall = Callable[[str, list[str]], Awaitable[list[float]]]
+# one call scores every (query, texts) group and returns one score list per group
+RerankerCall = Callable[[list[tuple[str, list[str]]]], Awaitable[list[list[float]]]]
 
 KEEP_SCHEMA = {
     "type": "object",
@@ -50,8 +51,8 @@ async def attribute(
         return []
     texts = [c.chunk.text for c in context_chunks]
     best = [0.0] * len(context_chunks)
-    for sentence in sentences:
-        scores = await reranker_call(sentence, texts)
+    all_scores = await reranker_call([(sentence, texts) for sentence in sentences])
+    for scores in all_scores:
         for i, sc in enumerate(scores):
             best[i] = max(best[i], float(sc))
     used = [(c, b) for c, b in zip(context_chunks, best) if b >= threshold]

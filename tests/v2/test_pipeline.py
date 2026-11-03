@@ -347,6 +347,17 @@ async def test_schedule_block_is_context_and_source():
     assert sources[0] == {"document_title": BLOCK.title, "source_url": BLOCK.url, "date": "2026-11-01"}
 
 
+async def test_schedule_block_without_intent_does_not_cover():
+    q = "Где работает Иванов?"
+    pipe = make(FakeLLM(analysis(standalone=q)), {q: [("fit", 0.2)]}, schedule=FakeSchedule([BLOCK]), v2_max_rounds=1)
+    await prepare(pipe, q)
+    assert len(pipe.search.calls) == 1
+    pipe2 = make(FakeLLM(analysis(standalone=q), reformulations=[["ещё"]]), {q: [("fit", 0.2)]},
+                 schedule=FakeSchedule([BLOCK]))
+    await prepare(pipe2, q)
+    assert len(pipe2.search.calls) == 2  # not marked covered -> reformulation round
+
+
 async def test_schedule_block_prevents_refusal_and_is_nsu_only():
     q = "Расписание группы 26201"
     pipe = make(FakeLLM(analysis(standalone=q)), {}, schedule=FakeSchedule([BLOCK]))
@@ -381,11 +392,29 @@ async def test_question_is_capped_before_analysis_and_generation():
     llm = FakeLLM(analysis())
     pipe = make(llm, {"Какой размер стипендии в НГУ?": [("stip", 0.9)]})
     out, _ = await prepare(pipe, huge)
-    cap = pipe.settings.v2_history_budget_tokens // 2
-    assert out.question.endswith("[…]") and estimate_tokens(out.question) <= cap
-    assert out.qa_messages[-1]["content"] == out.question
+    cap = pipe.settings.v2_history_budget_tokens // 4
+    assert out.question == huge.strip()  # the original is reported
+    capped = out.qa_messages[-1]["content"]
+    assert capped.endswith("[…]") and estimate_tokens(capped) <= cap
     sent = next(c for c in llm.calls if c["kind"] == "turn_analysis")["messages"][-1]["content"]
-    assert out.question in sent and estimate_tokens(sent) < estimate_tokens(huge)
+    assert capped in sent and estimate_tokens(sent) < estimate_tokens(huge)
+
+
+async def test_prompt_plus_answer_fits_model_context():
+    huge = "Расскажите про стипендию " + "очень " * 8000
+    history = []
+    for i in range(40):
+        history += [("user", f"вопрос номер {i} про общежития " + "а" * 400),
+                    ("assistant", f"ответ номер {i} про общежития " + "б" * 800)]
+    q = "Какой размер стипендии в НГУ?"
+    table = {q: [("stip", 0.9), ("dorm", 0.8), ("fit", 0.7)]}
+    for ctx_limit, expect_drop in ((16384, False), (6800, True)):
+        pipe = make(FakeLLM(analysis(standalone=q)), table, v2_model_context_tokens=ctx_limit)
+        out, _ = await prepare(pipe, huge, history=history)
+        used = sum(estimate_tokens(m["content"]) for m in out.qa_messages)
+        mt = pipe._gen_kwargs(out, None, None)["max_tokens"]
+        assert used + mt <= ctx_limit
+        assert (len(out.context_chunks) < 3) == expect_drop
 
 
 # --- leak guard ----------------------------------------------------------------------------

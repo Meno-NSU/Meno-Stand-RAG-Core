@@ -10,8 +10,10 @@ def cand(pos, text, url="https://nsu.ru/a", doc="d1", title="T", date="2026-05-0
 
 
 def fake_rr(table):
-    async def call(q, texts):
-        return [table.get((q.split()[0], t), 0.0) for t in texts]
+    async def call(groups):
+        call.count += 1
+        return [[table.get((q.split()[0], t), 0.0) for t in texts] for q, texts in groups]
+    call.count = 0
     return call
 
 
@@ -62,3 +64,10 @@ async def test_llm_check():
     assert await llm_check(Router(json.dumps({"keep": [1]})), None, "ans", srcs) == [srcs[1]]
     assert await llm_check(Router(RuntimeError("x")), None, "ans", srcs) == srcs
     assert await llm_check(Router("not json"), None, "ans", srcs) == srcs
+
+
+async def test_attribute_scores_all_sentences_in_one_call():
+    answer = " ".join(f"Предложение номер {i} про стипендию и сессию." for i in range(5))
+    rr = fake_rr({("Предложение", "про стипендию"): 0.9})
+    used = await attribute(answer, [cand(0, "про стипендию")], rr, 0.5)
+    assert rr.count == 1 and [c.pos for c, _ in used] == [0]

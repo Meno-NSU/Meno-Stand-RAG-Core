@@ -30,6 +30,7 @@ from meno_rag.v2.memory import (
     precompute_next,
 )
 from meno_rag.v2.prompting import PROMPT_GUARD_TEXT, SEARCH_ROUTES, LeakGuard, assemble_context, build_messages
+from meno_rag.v2.schedule import GROUP_RE, has_schedule_intent
 from meno_rag.v2.search import Candidate
 from meno_rag.v2.sources import attribute, llm_check, to_sources
 
@@ -42,6 +43,9 @@ MAX_NEW_QUERIES = 3
 REFORMULATE_TITLES = 8
 TRACE_CANDIDATES = 50
 SCHEDULE_DOC_TYPE = "schedule_or_calendar"
+ANSWER_MARGIN_TOKENS = 256
+MIN_ANSWER_ROOM = 256
+ENOUGH_ANSWER_ROOM = 512
 
 NO_KB_REFUSAL = (
     "В документах НГУ, которые у меня есть, нет ответа на этот вопрос. Уточнить можно на сайте nsu.ru "
@@ -156,7 +160,8 @@ class V2Pipeline:
         s = self.settings
         today = self.today_fn()
         question, history = extract_question_and_history(messages)
-        question = cap_text(question, s.v2_history_budget_tokens // 2)
+        original_question = question
+        question = cap_text(question, s.v2_history_budget_tokens // 4)
         model_id = runtime.generation.model_id
         timings: dict[str, float] = {}
         durations: dict[str, float] = {}
@@ -221,19 +226,31 @@ class V2Pipeline:
         refusal = an.route == "nsu" and not kept
         general_note = an.route == "general" and not kept
 
-        qa_messages = build_messages(
-            an.route,
-            question=question,
-            standalone_question=an.standalone_question,
-            memory=memory,
-            context=context,
-            today=today,
-        )
+        def build(ctx: str) -> list[dict]:
+            return build_messages(
+                an.route,
+                question=question,
+                standalone_question=an.standalone_question,
+                memory=memory,
+                context=ctx,
+                today=today,
+            )
+
+        qa_messages = build(context)
+        # leave room for the answer inside the model window: drop the lowest-ranked documents
+        if len(kept) > 0 and self._answer_room(qa_messages) < MIN_ANSWER_ROOM:
+            while kept and self._answer_room(qa_messages) < ENOUGH_ANSWER_ROOM:
+                context, kept = assemble_context(
+                    ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, len(kept) - 1
+                )
+                qa_messages = build(context)
+            refusal = an.route == "nsu" and not kept
+            general_note = an.route == "general" and not kept
         trace = None
         if capture_trace:
             trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings)
         outcome = V2Outcome(
-            question=question,
+            question=original_question,
             prepared_dialogue_history=_render_history(memory),
             search_queries=queries,
             context=context,
@@ -247,7 +264,7 @@ class V2Pipeline:
             general_note=general_note,
             refusal=refusal,
         )
-        outcome._history = [*history, {"role": "user", "content": question}]
+        outcome._history = [*history, {"role": "user", "content": original_question}]
         outcome._runtime = runtime
         return outcome
 
@@ -267,7 +284,8 @@ class V2Pipeline:
                 logger.warning("v2_schedule_lookup_failed", error=repr(exc))
                 blocks = []
             schedule_cands = [_schedule_candidate(i, b) for i, b in enumerate(blocks)]
-            if schedule_cands and not subqueries:
+            intent = has_schedule_intent(standalone) or bool(GROUP_RE.search(standalone))
+            if schedule_cands and not subqueries and intent:
                 target_cov[standalone] = 1.0  # best chunk >= threshold
 
         best: dict[int, Candidate] = {}
@@ -399,16 +417,23 @@ class V2Pipeline:
     def _generation_slot(self):
         return self.generation_semaphore if self.generation_semaphore is not None else contextlib.nullcontext()
 
-    def _max_tokens(self, max_tokens: int | None) -> int:
+    def _answer_room(self, messages: list[dict]) -> int:
+        used = sum(estimate_tokens(str(m.get("content") or "")) for m in messages)
+        return self.settings.v2_model_context_tokens - used - ANSWER_MARGIN_TOKENS
+
+    def _max_tokens(self, max_tokens: int | None, messages: list[dict] | None = None) -> int:
         cap = self.settings.v2_max_answer_tokens
-        return min(max_tokens or cap, cap)
+        out = min(max_tokens or cap, cap)
+        if messages is not None:
+            out = min(out, max(self._answer_room(messages), 1))
+        return out
 
     def _gen_kwargs(self, outcome: V2Outcome, max_tokens, temperature) -> dict:
         sampling = QaSampling()
         return {
             "messages": outcome.qa_messages,
             "stage": StageName.GENERATION,
-            "max_tokens": self._max_tokens(max_tokens),
+            "max_tokens": self._max_tokens(max_tokens, outcome.qa_messages),
             "temperature": sampling.temperature if temperature is None else temperature,
             "seed": sampling.seed,
             "timeout": self.settings.generation_timeout_seconds,
@@ -543,8 +568,14 @@ class V2Pipeline:
             outcome.trace["v2"]["sources_debug"] = debug
         return sources
 
-    async def _rerank_call(self, sentence: str, texts: list[str]) -> list[float]:
-        return await self.search.run_gpu(self.search.reranker.score, sentence, texts)
+    async def _rerank_call(self, groups: list[tuple[str, list[str]]]) -> list[list[float]]:
+        """All (sentence, chunk texts) groups scored inside ONE executor job."""
+        reranker = self.search.reranker
+
+        def run() -> list[list[float]]:
+            return [list(reranker.score(q, texts)) for q, texts in groups]
+
+        return await self.search.run_gpu(run)
 
 
 def _ms(t0: float) -> float:

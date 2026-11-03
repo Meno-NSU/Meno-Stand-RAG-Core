@@ -7,12 +7,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import structlog
+
 from meno_rag.v2.dense import DenseRetriever, load_matrix
 from meno_rag.v2.embed import load_embedder
 from meno_rag.v2.fusion import rrf
 from meno_rag.v2.kb import Chunk, KbRelease, load_release
 from meno_rag.v2.lexical import Bm25Retriever
 from meno_rag.v2.rerank import load_reranker
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -106,7 +110,10 @@ def load_search_service(settings) -> SearchService:
             raise ValueError(f"{env} is empty: required to load the v2 search service")
     device = settings.v2_device
     if device.startswith("cuda"):
-        torch.cuda.set_per_process_memory_fraction(settings.v2_gpu_mem_fraction)
+        if settings.legacy_enabled:
+            logger.warning("v2_gpu_mem_fraction_skipped_legacy_enabled")  # the cap covers the whole process
+        else:
+            torch.cuda.set_per_process_memory_fraction(settings.v2_gpu_mem_fraction)
     kb = Path(settings.v2_kb_dir)
     release = load_release(kb)
     bm25 = Bm25Retriever(release, kb / "ragcore" / "knowledge" / "bm25")

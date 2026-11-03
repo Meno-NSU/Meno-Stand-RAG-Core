@@ -55,3 +55,11 @@ def test_max_blocks_and_load(tmp_path):
     p.write_text(json.dumps(rec(), ensure_ascii=False) + "\n", encoding="utf-8")
     assert load_schedule(str(p)) is not None
     assert load_schedule("") is None and load_schedule(str(tmp_path / "no")) is None
+
+
+def test_teacher_requires_schedule_intent():
+    assert IDX.lookup("где работает Иванов", TODAY) == []
+    [b] = IDX.lookup("когда пара у Иванова", TODAY)
+    assert "Физика" in b.text
+    assert len(IDX.lookup("когда у Иванова?", TODAY)) == 1
+    assert len(IDX.lookup("группа 26201", TODAY)) == 1  # group numbers stay ungated

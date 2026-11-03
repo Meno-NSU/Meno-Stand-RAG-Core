@@ -243,6 +243,8 @@ class Settings(BaseSettings):
     v2_summary_budget_tokens: int = Field(default=800, validation_alias="V2_SUMMARY_BUDGET_TOKENS")
     # Token budget for retrieved context.
     v2_context_budget_tokens: int = Field(default=6000, validation_alias="V2_CONTEXT_BUDGET_TOKENS")
+    # Model context window; prompt + answer are kept inside it.
+    v2_model_context_tokens: int = Field(default=16384, validation_alias="V2_MODEL_CONTEXT_TOKENS")
     # Cap on generated answer tokens.
     v2_max_answer_tokens: int = Field(default=1500, validation_alias="V2_MAX_ANSWER_TOKENS")
     # Max chunks in the answer context.

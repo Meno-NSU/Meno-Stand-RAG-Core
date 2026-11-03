@@ -120,3 +120,26 @@ def test_load_search_service_empty_path(field):
     kw = {"V2_EMBEDDER_PATH": "/x", "V2_MATRIX_DIR": "/y", "V2_RERANKER_PATH": "/z", field: ""}
     with pytest.raises(ValueError, match=field):
         load_search_service(Settings(_env_file=None, **kw))
+
+
+@pytest.mark.parametrize("legacy,expected", [(False, [0.5]), (True, [])])
+def test_gpu_fraction_only_without_legacy(monkeypatch, legacy, expected):
+    import torch
+
+    from meno_rag.v2 import search as search_mod
+
+    calls = []
+    monkeypatch.setattr(torch.cuda, "set_per_process_memory_fraction", lambda f: calls.append(f))
+
+    class Stop(Exception):
+        pass
+
+    def stop(_kb):
+        raise Stop
+
+    monkeypatch.setattr(search_mod, "load_release", stop)
+    s = Settings(_env_file=None, V2_EMBEDDER_PATH="/x", V2_MATRIX_DIR="/y", V2_RERANKER_PATH="/z",
+                 V2_DEVICE="cuda:0", V2_GPU_MEM_FRACTION=0.5, LEGACY_ENABLED=legacy)
+    with pytest.raises(Stop):
+        load_search_service(s)
+    assert calls == expected

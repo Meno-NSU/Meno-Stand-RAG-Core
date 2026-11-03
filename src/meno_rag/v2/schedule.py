@@ -62,6 +62,7 @@ class ScheduleIndex:
                 self.surname_stems.setdefault(_stem(name.split()[0]), set()).add(name)
 
     def lookup(self, text: str, today: date, max_blocks: int = 2) -> list[ScheduleBlock]:
+        """Group numbers always match; teacher surnames only when the question is about a timetable."""
         target, day = _target(text, today)
         blocks: list[ScheduleBlock] = []
         seen: set[str] = set()
@@ -73,7 +74,7 @@ class ScheduleIndex:
             if recs:
                 blocks.append(_group_block(g, recs, today, target, day))
         names: list[str] = []
-        for w in re.findall(r"[А-Яа-яЁё-]{5,}", text):
+        for w in re.findall(r"[А-Яа-яЁё-]{5,}", text) if has_schedule_intent(text) else []:
             q = _stem(w)
             for st, ns in self.surname_stems.items():
                 if _same_stem(q, st):
@@ -81,6 +82,17 @@ class ScheduleIndex:
         for name in names:
             blocks.append(_teacher_block(name, self.teachers[name], today, target, day))
         return blocks[:max_blocks]
+
+
+INTENT_PREFIXES = ("расписан", "пар", "занят", "лекци", "семинар", "практик", "ауд")
+INTENT_PHRASES = ("когда у", "во сколько", "где сейчас")
+
+
+def has_schedule_intent(text: str) -> bool:
+    low = text.lower().replace("ё", "е")
+    if any(p in low for p in INTENT_PHRASES):
+        return True
+    return any(w.startswith(INTENT_PREFIXES) for w in re.findall(r"[а-я]+", low))
 
 
 def load_schedule(path: str | Path | None) -> ScheduleIndex | None:
