@@ -95,6 +95,16 @@
 
 - [ ] Тесты (фейковый реранкер): предложение про стипендию → использован кусок про стипендию, не про общежитие; дубли URL схлопнуты; nsu.ru предпочтён vk.com; ответ без предложений выше порога → `[]`; `llm_check` оставляет указанные номера, на ошибке — вход. → FAIL → реализовать → PASS → commit `feat(v2): post-hoc source attribution with dates`.
 
+### Task 6b: Расписание групп (структурная выборка)
+
+**Files:** Create `src/meno_rag/v2/schedule.py`; Test `tests/v2/test_schedule.py`. Data: `schedule.jsonl` from the ICS export of table.nsu.ru (records `{group, faculty, weekday 1–7, start "HH:MM", end, subject, kind, room, teacher, interval_weeks 1|2, first_date, until, url, collected_at}`), path in setting `V2_SCHEDULE_PATH` (empty → feature off).
+
+**Interfaces:**
+- Produces: `class ScheduleIndex(records)`, `load_schedule(path) -> ScheduleIndex | None`; `lookup(text: str, today: date, max_blocks: int = 2) -> list[ScheduleBlock]` where `ScheduleBlock(title, url, date, text)`; groups found by `\b\d{5}(?:\.\d)?\b` in the text; teachers by surname (Snowball stem of each word ≥ 5 letters vs stems of teacher surnames; ambiguous surname → all matches up to `max_blocks`); block text = the week containing `today` (lessons with `until < today` dropped; every-other-week lessons included only if `(monday_of_week - monday(first_date)).days % 14 == 0`), grouped by weekday, each line `HH:MM–HH:MM · предмет (вид) · ауд. … · преподаватель` (for a teacher block: `· группа …`), header «Расписание группы 26201 (ФИТ) на неделю с DD.MM по DD.MM, по данным table.nsu.ru на DD.MM.YYYY»; if the question names a weekday («в среду», «завтра», «сегодня») only that day.
+- Pipeline (Task 7): for routes `nsu`, if `lookup(standalone_question)` returns blocks, they become context candidates with score 1.0 placed first (chunk-like objects with title/url/date/text/doc_type «расписание»), and they are eligible as sources.
+
+- [ ] Tests on a tiny fixture: group lookup; teacher lookup by inflected surname («у Терсенова»); biweekly parity; expired lesson dropped; weekday filter; no number/surname → []. → FAIL → implement → PASS → commit `feat(v2): group and teacher timetable lookup`.
+
 ### Task 7: `V2Pipeline`
 
 **Files:** Create `src/meno_rag/v2/pipeline.py`; Test `tests/v2/test_pipeline.py`.
