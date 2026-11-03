@@ -1,7 +1,9 @@
-"""Cross-encoder rerankers (bge-reranker-v2-m3, Qwen3-Reranker) behind one interface."""
+"""Cross-encoder rerankers (bge-reranker-v2-m3, Qwen3-Reranker, mxbai-rerank-v2) behind one interface."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Protocol
 
 import torch
@@ -19,6 +21,20 @@ QWEN3_PREFIX = (
     "<|im_end|>\n<|im_start|>user\n"
 )
 QWEN3_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+# mxbai-rerank-v2's own prompt (chat_template.jinja of the model repo)
+MXBAI_TEMPLATE = (
+    "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n"
+    "<|im_start|>user\nquery: {query}\ndocument: {document}\nYou are a search relevance expert who evaluates how "
+    "well documents match search queries. For each query-document pair, carefully analyze the semantic relationship "
+    "between them, then provide your binary relevance judgment (0 for not relevant, 1 for relevant).\n"
+    "Relevance:<|im_end|>\n<|im_start|>assistant\n"
+)
+# raw scores (logit '1' - logit '0') of mxbai-rerank-large-v2 on our KB sit around 4..13; 8.5 is the median best
+# score of unanswerable benchmark questions (2026-11-03 pilot), so 0.5 rejects about half of them while keeping
+# ~all answerable ones
+MXBAI_CENTER = 8.5
+MXBAI_SCALE = 1.0
+MXBAI_MAX_DOC_TOKENS = 800
 
 
 class Reranker(Protocol):
@@ -110,9 +126,45 @@ class Qwen3Reranker(_BaseReranker):
         return torch.softmax(pair, dim=1)[:, 1].tolist()
 
 
+class MxbaiReranker(_BaseReranker):
+    """mixedbread-ai/mxbai-rerank-v2 (a Qwen2 causal LM): logit('1') - logit('0') at the last position of the
+    model's prompt, mapped to [0, 1] as sigmoid((raw - MXBAI_CENTER) / MXBAI_SCALE). max_length counts document
+    tokens only (the prompt and the query come on top)."""
+
+    def __init__(self, tokenizer: Any = None, model: Any = None, *, path: str | None = None,
+                 device: str = "cpu", true_id: int = 16, false_id: int = 15) -> None:
+        if tokenizer is None:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(path, padding_side="left")
+            model = _to_device(AutoModelForCausalLM.from_pretrained(path, dtype=_dtype(device)), device)
+            cfg = Path(path) / "1_LogitScore" / "config.json"
+            if cfg.exists():
+                ids = json.loads(cfg.read_text(encoding="utf-8"))
+                true_id, false_id = int(ids["true_token_id"]), int(ids["false_token_id"])
+        super().__init__(tokenizer, model)
+        self.true_id, self.false_id = true_id, false_id
+
+    def score(self, query: str, texts: list[str], batch_size: int = 8,
+              max_length: int = MXBAI_MAX_DOC_TOKENS) -> list[float]:
+        return super().score(query, texts, batch_size, max_length)
+
+    def _score_batch(self, query, texts, max_length):
+        docs = self.tokenizer(texts, add_special_tokens=False, truncation=True, max_length=max_length)["input_ids"]
+        prompts = [MXBAI_TEMPLATE.format(query=query, document=self.tokenizer.decode(d)) for d in docs]
+        enc = self.tokenizer(prompts, padding=True, return_tensors="pt", add_special_tokens=False)
+        enc = {k: v.to(self.device) for k, v in enc.items()}
+        with torch.inference_mode():
+            last = self.model(**enc, logits_to_keep=1).logits[:, -1, :].float()
+        raw = last[:, self.true_id] - last[:, self.false_id]
+        return torch.sigmoid((raw - MXBAI_CENTER) / MXBAI_SCALE).tolist()
+
+
 def load_reranker(name: str, path: str, device: str) -> Reranker:
     if name == "bge":
         return BgeReranker(path=path, device=device)
     if name == "qwen3":
         return Qwen3Reranker(path=path, device=device)
-    raise ValueError(f"unknown reranker {name!r}; expected 'bge' or 'qwen3'")
+    if name == "mxbai":
+        return MxbaiReranker(path=path, device=device)
+    raise ValueError(f"unknown reranker {name!r}; expected 'bge', 'qwen3' or 'mxbai'")

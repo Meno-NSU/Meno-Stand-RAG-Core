@@ -242,6 +242,9 @@ class Settings(BaseSettings):
     v2_reranker_path: str = Field(default="", validation_alias="V2_RERANKER_PATH")
     # Torch device for v2 models.
     v2_device: str = Field(default="cuda", validation_alias="V2_DEVICE")
+    # Device of the query embedder when it should differ from V2_DEVICE (e.g. "cpu" to leave the GPU to a bigger
+    # reranker); empty = V2_DEVICE. Only with V2_VECTOR_BACKEND=qdrant (the matrix backend keeps vectors on V2_DEVICE).
+    v2_embed_device: str = Field(default="", validation_alias="V2_EMBED_DEVICE")
     # Fraction of GPU memory v2 may use.
     v2_gpu_mem_fraction: float = Field(default=0.3, validation_alias="V2_GPU_MEM_FRACTION")
     # Embedder weights dtype on CUDA: bf16 or fp16.

@@ -174,3 +174,20 @@ def test_lexical_backend_validation(monkeypatch, fake, store):
         load_search_service(Settings(**base, V2_VECTOR_BACKEND="qdrant"))
     with pytest.raises(ValueError, match="bm25s|qdrant"):
         load_search_service(Settings(**{**base, "V2_LEXICAL_BACKEND": "x"}, V2_VECTOR_BACKEND="qdrant"))
+
+
+def test_embed_device_override(monkeypatch, fake, store):
+    store.create_collection("c", 2)
+    store.upsert_matrix("c", np.zeros((10, 2), dtype=np.float32))
+    seen = {}
+    monkeypatch.setattr(search_mod, "load_release", lambda _kb: _release(10))
+    monkeypatch.setattr(search_mod, "Bm25Retriever", lambda *a, **k: None)
+    monkeypatch.setattr(search_mod, "load_embedder", lambda name, path, device, **k: seen.setdefault("emb", device))
+    monkeypatch.setattr(search_mod, "load_reranker", lambda name, path, device: seen.setdefault("rr", device))
+    monkeypatch.setattr(search_mod, "QdrantStore", lambda url: store)
+    base = dict(_env_file=None, V2_EMBEDDER_PATH="/x", V2_RERANKER_PATH="/z", V2_DEVICE="cpu",
+                V2_QDRANT_COLLECTION="c", V2_EMBED_DEVICE="meta")
+    with pytest.raises(ValueError, match="only supported with V2_VECTOR_BACKEND=qdrant"):
+        load_search_service(Settings(**base, V2_MATRIX_DIR="/m"))
+    load_search_service(Settings(**base, V2_VECTOR_BACKEND="qdrant"))
+    assert seen == {"emb": "meta", "rr": "cpu"}

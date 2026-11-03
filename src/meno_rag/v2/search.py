@@ -156,8 +156,11 @@ def load_search_service(settings) -> SearchService:
     kb = Path(settings.v2_kb_dir)
     release = load_release(kb)
     bm25 = Bm25Retriever(release, kb / "ragcore" / "knowledge" / "bm25") if lexical == "bm25s" else None
+    embed_device = settings.v2_embed_device or device
+    if embed_device != device and backend != "qdrant":
+        raise ValueError("V2_EMBED_DEVICE differs from V2_DEVICE: only supported with V2_VECTOR_BACKEND=qdrant")
     embedder = load_embedder(
-        settings.v2_embedder, settings.v2_embedder_path, device, dtype=settings.v2_embed_dtype
+        settings.v2_embedder, settings.v2_embedder_path, embed_device, dtype=settings.v2_embed_dtype
     )
     if backend == "qdrant":
         store = QdrantStore(settings.v2_qdrant_url)

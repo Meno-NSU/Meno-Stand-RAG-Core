@@ -10,7 +10,10 @@ from transformers import (
 )
 
 from meno_rag.v2.rerank import (
+    MXBAI_CENTER,
+    MXBAI_TEMPLATE,
     BgeReranker,
+    MxbaiReranker,
     Qwen3Reranker,
     load_reranker,
 )
@@ -73,7 +76,43 @@ def qwen(spy=False):
     return Qwen3Reranker.from_objects(tok, model)
 
 
-@pytest.mark.parametrize("make", [bge, qwen])
+def mxbai(spy=False):
+    tok = make_tok("left")
+    torch.manual_seed(0)
+    cfg = Qwen3Config(vocab_size=len(tok), hidden_size=32, intermediate_size=64,
+                      num_hidden_layers=1, num_attention_heads=2,
+                      num_key_value_heads=2, head_dim=16, max_position_embeddings=2048)
+    model = AutoModelForCausalLM.from_config(cfg).eval()
+    if spy:
+        model = SpyModel(model)
+    return MxbaiReranker.from_objects(tok, model)
+
+
+def test_mxbai_scores_are_calibrated_logit_differences():
+    r = mxbai()
+    r.true_id, r.false_id = 5, 6
+    out = r.score("question", ["hello world", "foo bar"])
+    assert len(out) == 2 and all(0.0 <= x <= 1.0 for x in out)
+    enc = r.tokenizer([MXBAI_TEMPLATE.format(query="question", document="hello world")],
+                      return_tensors="pt", add_special_tokens=False)
+    with torch.inference_mode():
+        last = r.model(**enc).logits[0, -1].float()
+    raw = float(last[5] - last[6])
+    assert out[0] == pytest.approx(float(torch.sigmoid(torch.tensor(raw - MXBAI_CENTER))), abs=1e-4)
+
+
+def test_mxbai_truncates_the_document_only_and_ends_with_the_prompt():
+    r = mxbai(spy=True)
+    r.score("question", ["foo " * 900, "hello"], batch_size=8, max_length=10)
+    ids = r.model.inputs[0]
+    tail = r.tokenizer("Relevance:<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)["input_ids"]
+    for row in ids:  # left padding: every sequence ends with the model's prompt tail
+        assert row[-len(tail):].tolist() == tail
+    foo = r.tokenizer("foo", add_special_tokens=False)["input_ids"][0]
+    assert int((ids[0] == foo).sum()) == 10  # the document cut to max_length tokens
+
+
+@pytest.mark.parametrize("make", [bge, qwen, mxbai])
 def test_scores_in_range_and_length(make):
     r = make()
     texts = ["hello world", "foo bar baz", "", "   ", "answer"]
@@ -82,12 +121,12 @@ def test_scores_in_range_and_length(make):
     assert all(0.0 <= s <= 1.0 for s in out)
 
 
-@pytest.mark.parametrize("make", [bge, qwen])
+@pytest.mark.parametrize("make", [bge, qwen, mxbai])
 def test_empty_texts(make):
     assert make().score("question", []) == []
 
 
-@pytest.mark.parametrize("make", [bge, qwen])
+@pytest.mark.parametrize("make", [bge, qwen, mxbai])
 def test_long_text_truncated(make):
     r = make()
     out = r.score("question", ["foo " * 800, "hello"], max_length=32)
@@ -116,7 +155,7 @@ def test_qwen_yes_no_ids_used():
     assert r.yes_id != r.no_id
 
 
-@pytest.mark.parametrize("make", [bge, qwen])
+@pytest.mark.parametrize("make", [bge, qwen, mxbai])
 def test_oom_halves_batch(make):
     r = make()
     inner = r.model
