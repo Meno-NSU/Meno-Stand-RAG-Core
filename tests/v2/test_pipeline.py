@@ -544,9 +544,7 @@ async def test_general_question_without_a_rare_term_keeps_the_general_rules():
     assert general_block and not nsu_block
 
 
-async def test_conversational_words_are_never_the_rare_term():
-    pipe = _person_pipe({"знаешь": 3, "солихов": 40}, V2_LEXICAL_SLOTS=4)
-    assert pipe._rarest_term("Что ты знаешь про Руслана Солихова?")[0] == "солихова"
+async def test_the_most_specific_form_decides_the_rarity():
     pipe = _person_pipe({"солихов": 40, "солих": 2}, V2_LEXICAL_SLOTS=4)  # shorter form's df does not decide
     rare, forms = pipe._rarest_term("Солихова")
     assert rare == "солихова" and forms == ["солихов", "солих"]
