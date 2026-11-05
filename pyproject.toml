@@ -63,6 +63,8 @@ module-name = "meno_rag"
 
 [tool.ruff]
 line-length = 120
+# KB release tools vendored from the dataset, kept close to upstream (see kb_tools/README.md).
+extend-exclude = ["kb_tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "ASYNC", "UP", "SIM", "C4", "PIE", "RUF"]
