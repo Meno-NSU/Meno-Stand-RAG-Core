@@ -259,6 +259,11 @@ class Settings(BaseSettings):
     # A lexical-slot candidate is evidence below V2_RERANK_THRESHOLD when it contains the rarest question stem
     # (or its indexed inflection forms) occurring in at most this many chunks; 0 = off. Needs the bm25s backend.
     v2_rare_term_max_df: int = Field(default=1000, validation_alias="V2_RARE_TERM_MAX_DF")
+    # Weight of the source prior (the release's quality_score: tier P0 1.0 .. P3 0.6) in the order of relevant chunks
+    # and shown sources: logit(score) + weight * ln(prior); 0 = off (cross-encoder order). The threshold stays on the score.
+    v2_source_prior_weight: float = Field(default=0.0, validation_alias="V2_SOURCE_PRIOR_WEIGHT")
+    # Tell the model that official NSU documents outrank social posts (posts: when nothing official, or as a supplement).
+    v2_source_authority: bool = Field(default=False, validation_alias="V2_SOURCE_AUTHORITY")
     # Score above which a chunk is attributed as a source of the answer.
     v2_attribution_threshold: float = Field(default=0.5, validation_alias="V2_ATTRIBUTION_THRESHOLD")
     # Token budget for dialog history in the prompt.

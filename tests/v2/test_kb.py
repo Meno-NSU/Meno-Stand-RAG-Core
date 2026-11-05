@@ -47,3 +47,12 @@ def test_num_docs_mismatch(tmp_path):
     _make(tmp_path, 3)
     with pytest.raises(ValueError, match="2.*3|3.*2"):
         load_release(tmp_path)
+
+
+def test_quality_score_loaded(tmp_path):
+    _make(tmp_path, 2)
+    rows = [dict(_chunk("a", "d1", True), quality_score=0.6), _chunk("c", "d2", True)]
+    _gz(tmp_path / "chunks/part-00000.jsonl.gz", rows[:1])
+    _gz(tmp_path / "chunks/part-00001.jsonl.gz", rows[1:])
+    rel = load_release(tmp_path)
+    assert rel.chunks[0].quality == 0.6 and rel.chunks[1].quality is None

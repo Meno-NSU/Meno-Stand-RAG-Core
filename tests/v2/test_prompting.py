@@ -11,8 +11,11 @@ from meno_rag.v2.prompting import (
     ROUTE_BLOCKS,
     SYSTEM_PROMPT_V2,
     LeakGuard,
+    SOURCE_AUTHORITY_RULE,
     assemble_context,
     build_messages,
+    priority,
+    source_prior,
 )
 from meno_rag.v2.search import Candidate
 
@@ -28,9 +31,9 @@ LEAK_REPLACEMENT = (
 
 
 def cand(pos, score, *, title="Документ", text="текст", date_="2025-09-01", doc_type="news",
-         url="https://nsu.ru/doc"):
+         url="https://nsu.ru/doc", tier="P1", quality=None):
     chunk = Chunk(chunk_id=f"c{pos}", doc_id=f"d{pos}", url=url, title=title, date=date_,
-                  doc_type=doc_type, tier="P1", text=text, index_text=f"{title}\n{text}")
+                  doc_type=doc_type, tier=tier, text=text, index_text=f"{title}\n{text}", quality=quality)
     return Candidate(pos=pos, chunk=chunk, score=score)
 
 
@@ -84,6 +87,62 @@ def test_block_header_has_type_and_date():
     assert "[2] Новость · новость · дата не указана · https://nsu.ru/n" in lines
     assert "[3] Статья · публикация · 2017 г. · https://pure.nsu.ru/p" in lines
     assert "[4] Карточка · документ · 01.09.2025 · ссылка не указана" in lines
+
+
+# --- source prior -----------------------------------------------------------
+
+
+def _post(pos, score):
+    return cand(pos, score, doc_type="social_post", url=f"https://t.me/club/{pos}", tier="P3", quality=0.6)
+
+
+def _official(pos, score, tier="P0"):
+    return cand(pos, score, doc_type="regulation_or_order", url=f"https://nsu.ru/doc/{pos}", tier=tier, quality=1.0)
+
+
+def test_source_prior_off_keeps_score_order():
+    cands = [_post(1, 0.95), _official(2, 0.9)]
+    _, kept = assemble_context(cands, threshold=0.3, budget_tokens=10_000, max_chunks=10)
+    assert [c.pos for c in kept] == [1, 2]
+    _, kept = assemble_context(cands, threshold=0.3, budget_tokens=10_000, max_chunks=10, source_weight=0.0)
+    assert [c.pos for c in kept] == [1, 2]
+
+
+def test_source_prior_puts_comparably_relevant_official_first():
+    _, kept = assemble_context([_post(1, 0.95), _official(2, 0.9)], threshold=0.3, budget_tokens=10_000,
+                               max_chunks=10, source_weight=2.0)
+    assert [c.pos for c in kept] == [2, 1]
+
+
+def test_source_prior_keeps_a_clearly_better_post_first():
+    _, kept = assemble_context([_post(1, 0.99), _official(2, 0.5)], threshold=0.3, budget_tokens=10_000,
+                               max_chunks=10, source_weight=2.0)
+    assert [c.pos for c in kept] == [1, 2]
+
+
+def test_source_prior_fills_the_slots_with_official_first():
+    cands = [_post(1, 0.97), _post(2, 0.96), _official(3, 0.95), _official(4, 0.94)]
+    _, kept = assemble_context(cands, threshold=0.3, budget_tokens=10_000, max_chunks=2, source_weight=2.0)
+    assert [c.pos for c in kept] == [3, 4]
+
+
+def test_source_prior_does_not_move_the_threshold():
+    _, kept = assemble_context([_post(1, 0.5), _official(2, 0.25)], threshold=0.3, budget_tokens=10_000,
+                               max_chunks=10, source_weight=4.0)
+    assert [c.pos for c in kept] == [1]
+
+
+def test_source_prior_uses_tier_when_no_quality_score():
+    assert source_prior(cand(1, 0.9, tier="P3").chunk) == 0.6
+    assert source_prior(cand(1, 0.9, tier="P0").chunk) == 1.0
+    assert source_prior(cand(1, 0.9, tier=None).chunk) == 1.0
+    assert source_prior(cand(1, 0.9, tier="P3", quality=0.55).chunk) == 0.55
+
+
+def test_priority_is_the_score_without_weight():
+    c = _post(1, 0.8)
+    assert priority(c, 0.0) == 0.8
+    assert priority(c, 2.0) < priority(_official(2, 0.8), 2.0)
 
 
 # --- build_messages ---------------------------------------------------------
@@ -308,3 +367,15 @@ def test_guard_covers_system_prompt_rules():
 def test_guard_silent_on_normal_answers(answer):
     guard = LeakGuard(PROMPT_GUARD_TEXT)
     assert not any(guard.feed(t) for t in tokens(answer, 3))
+
+
+def test_source_authority_rule_only_when_enabled():
+    mem = DialogueMemory(recent=[], summary="", recalled=[])
+    ctx = "[1] Документ · новость · 01.09.2025 · https://nsu.ru/doc\nтекст"
+    for route in ("nsu", "general"):
+        off = build_messages(route, question="q", standalone_question="q", memory=mem, context=ctx, today=TODAY)
+        on = build_messages(route, question="q", standalone_question="q", memory=mem, context=ctx, today=TODAY,
+                            source_authority=True)
+        assert SOURCE_AUTHORITY_RULE not in off[0]["content"]
+        assert SOURCE_AUTHORITY_RULE in on[0]["content"]
+    assert SOURCE_AUTHORITY_RULE in PROMPT_GUARD_TEXT

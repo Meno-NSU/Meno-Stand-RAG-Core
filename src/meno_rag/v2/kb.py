@@ -18,6 +18,7 @@ class Chunk:
     tier: str | None
     text: str
     index_text: str
+    quality: float | None = None  # the release's quality_score of the source (tier prior, flags); None if absent
 
 
 @dataclass
@@ -53,6 +54,7 @@ def load_release(root: Path) -> KbRelease:
                     tier=row.get("tier"),
                     text=row["text"],
                     index_text=row["index_text"],
+                    quality=row.get("quality_score"),
                 )
             )
     docs_path = root / "docs.jsonl.gz"

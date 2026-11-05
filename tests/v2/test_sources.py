@@ -49,6 +49,16 @@ def test_dedupe_urls_and_prefer_nsu():
     assert len(to_sources(used, {}, 1)) == 1
 
 
+def test_source_prior_orders_official_before_posts():
+    post = Candidate(0, Chunk("c0", "d0", "https://t.me/club/1", "Пост", None, "social_post", "P3", "a", "a", 0.6), 0.9)
+    page = Candidate(1, Chunk("c1", "d1", "https://nsu.ru/p", "Положение", None, "regulation_or_order", "P0", "b", "b",
+                              1.0), 0.85)
+    used = [(post, 0.9), (page, 0.85)]
+    assert [s["source_url"] for s in to_sources(used, {}, 5)] == ["https://t.me/club/1", "https://nsu.ru/p"]
+    assert [s["source_url"] for s in to_sources(used, {}, 5, source_weight=2.0)] == ["https://nsu.ru/p",
+                                                                                      "https://t.me/club/1"]
+
+
 class Router:
     def __init__(self, out):
         self.out = out

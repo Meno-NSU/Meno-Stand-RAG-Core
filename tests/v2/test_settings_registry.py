@@ -32,6 +32,7 @@ def test_defaults(monkeypatch):
     assert (s.v2_context_budget_tokens, s.v2_max_answer_tokens) == (6000, 1500)
     assert (s.v2_max_context_chunks, s.v2_max_sources, s.v2_max_rounds) == (8, 5, 3)
     assert (s.v2_candidates_per_query, s.v2_rerank_top) == (50, 40)
+    assert s.v2_source_prior_weight == 0.0 and s.v2_source_authority is False
 
 
 def test_env_parsing(monkeypatch):

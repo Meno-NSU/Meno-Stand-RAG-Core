@@ -30,7 +30,14 @@ from meno_rag.v2.memory import (
     precompute_next,
 )
 from meno_rag.v2.lexical import stems_match
-from meno_rag.v2.prompting import PROMPT_GUARD_TEXT, SEARCH_ROUTES, LeakGuard, assemble_context, build_messages
+from meno_rag.v2.prompting import (
+    PROMPT_GUARD_TEXT,
+    SEARCH_ROUTES,
+    LeakGuard,
+    assemble_context,
+    build_messages,
+    priority,
+)
 from meno_rag.v2.schedule import GROUP_RE, has_schedule_intent
 from meno_rag.v2.search import Candidate
 from meno_rag.v2.sources import attribute, llm_check, to_sources
@@ -218,7 +225,8 @@ class V2Pipeline:
             await emit(StageName.CONTEXT_ASSEMBLY, StageStatus.STARTED)
             t2 = time.perf_counter()
             context, kept = assemble_context(
-                ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, s.v2_max_context_chunks, forced
+                ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, s.v2_max_context_chunks, forced,
+                s.v2_source_prior_weight,
             )
             await emit(
                 StageName.CONTEXT_ASSEMBLY,
@@ -243,6 +251,7 @@ class V2Pipeline:
                 memory=memory,
                 context=ctx,
                 today=today,
+                source_authority=s.v2_source_authority,
             )
 
         qa_messages = build(context)
@@ -251,14 +260,14 @@ class V2Pipeline:
             while kept and self._answer_room(qa_messages) < ENOUGH_ANSWER_ROOM:
                 context, kept = assemble_context(
                     ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, len(kept) - 1,
-                    forced[: max(len(kept) - 1, 0) // 2],
+                    forced[: max(len(kept) - 1, 0) // 2], s.v2_source_prior_weight,
                 )
                 qa_messages = build(context)
             refusal = an.route == "nsu" and not kept
             general_note = an.route == "general" and not kept
         trace = None
         if capture_trace:
-            trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings)
+            trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings, s.v2_source_prior_weight)
         outcome = V2Outcome(
             question=original_question,
             prepared_dialogue_history=_render_history(memory),
@@ -424,9 +433,9 @@ class V2Pipeline:
         return queries
 
     @staticmethod
-    def _trace(an, ranked, kept, queries, coverage, rounds, timings) -> dict:
+    def _trace(an, ranked, kept, queries, coverage, rounds, timings, source_weight: float = 0.0) -> dict:
         kept_ids = {c.chunk.chunk_id for c in kept}
-        order = sorted(ranked, key=lambda c: -c.score)  # same order assemble_context uses
+        order = sorted(ranked, key=lambda c: -priority(c, source_weight))  # same order assemble_context uses
         rank = {id(c): i + 1 for i, c in enumerate(order)}
         listed = order[:TRACE_CANDIDATES]
         listed += [c for c in order[TRACE_CANDIDATES:] if c.chunk.chunk_id in kept_ids]
@@ -594,7 +603,7 @@ class V2Pipeline:
                 debug["used"] = [
                     {"chunk_id": c.chunk.chunk_id, "url": c.chunk.url, "score": round(float(sc), 4)} for c, sc in used
                 ]
-                sources = to_sources(used, self.docs, s.v2_max_sources)
+                sources = to_sources(used, self.docs, s.v2_max_sources, s.v2_source_prior_weight)
                 rt = runtime or outcome._runtime
                 if s.v2_sources_llm_check and sources and rt is not None:
                     sources = await llm_check(self.llm_router, rt.generation, answer, sources)

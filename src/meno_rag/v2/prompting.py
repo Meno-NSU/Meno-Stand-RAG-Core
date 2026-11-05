@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections import deque
 from datetime import date
@@ -131,8 +132,15 @@ NO_CONTEXT_BLOCKS: dict[str, str] = {
     ),
 }
 
+# With V2_SOURCE_AUTHORITY: official documents first, community posts as a supplement (appended to the route block).
+SOURCE_AUTHORITY_RULE = (
+    "- Официальные документы НГУ (страницы сайтов НГУ, положения, приказы, сведения об образовательной организации) "
+    "надёжнее постов в соцсетях. Опирайся прежде всего на официальные документы; посты используй, когда официальных "
+    "сведений нет, или чтобы дополнить их, и тогда прямо называй источник, например «по сообщению в Telegram-канале …»."
+)
+
 # Everything the model must never recite: the rules and every route block (not the persona).
-PROMPT_GUARD_TEXT = "\n\n".join([RULES, *ROUTE_BLOCKS.values(), *NO_CONTEXT_BLOCKS.values()])
+PROMPT_GUARD_TEXT = "\n\n".join([RULES, *ROUTE_BLOCKS.values(), *NO_CONTEXT_BLOCKS.values(), SOURCE_AUTHORITY_RULE])
 
 MEMORY_HEADER = "Ранее в этом диалоге (старая часть разговора, не вошедшая в историю ниже):"
 STANDALONE_LABEL = "Вопрос пользователя (уточнённый):"
@@ -156,6 +164,27 @@ def _format_date(raw: str | None) -> str:
     return s
 
 
+# Source priors of the KB release's tiers (tools/chunk_kb.py TIER_Q) for chunks without their own quality_score.
+TIER_QUALITY: dict[str, float] = {"P0": 1.0, "P1": 0.9, "P2": 0.75, "P3": 0.6}
+
+
+def source_prior(chunk) -> float:
+    """The release's quality score of the chunk's source: its tier prior, lowered for OCR or outdated flags; 1.0
+    when the chunk has neither score nor tier (timetable blocks)."""
+    q = chunk.quality if chunk.quality else TIER_QUALITY.get(chunk.tier or "", 1.0)
+    return min(max(float(q), 0.05), 1.0)
+
+
+def priority(c: Candidate, weight: float) -> float:
+    """Order of relevant candidates: the cross-encoder logit plus weight * ln(source prior), i.e. the odds scaled by
+    prior**weight, so a comparably relevant official document goes before a post and a clearly better post stays
+    ahead; weight 0 = the cross-encoder score itself."""
+    if weight <= 0:
+        return c.score
+    p = min(max(float(c.score), 1e-6), 1 - 1e-6)
+    return math.log(p / (1 - p)) + weight * math.log(source_prior(c.chunk))
+
+
 def _doc_type_label(code: str | None) -> str:
     return DOC_TYPE_LABELS.get(code or "", DEFAULT_DOC_TYPE)
 
@@ -171,12 +200,14 @@ def _block(n: int, cand: Candidate) -> str:
 
 def assemble_context(
     candidates: list[Candidate], threshold: float, budget_tokens: int, max_chunks: int,
-    forced: list[Candidate] | tuple = (),
+    forced: list[Candidate] | tuple = (), source_weight: float = 0.0,
 ) -> tuple[str, list[Candidate]]:
-    """Blocks of the candidates scoring >= threshold, best first, then the forced ones (evidence the
-    cross-encoder scores low, e.g. a rare-term match), while they fit max_chunks and the budget."""
+    """Blocks of the candidates scoring >= threshold, best first (by priority(): the score, or with source_weight the
+    score adjusted by the source prior), then the forced ones (evidence the cross-encoder scores low, e.g. a rare-term
+    match), while they fit max_chunks and the budget."""
     taken = {c.pos for c in forced}
-    above = sorted((c for c in candidates if c.score >= threshold and c.pos not in taken), key=lambda c: -c.score)
+    above = sorted((c for c in candidates if c.score >= threshold and c.pos not in taken),
+                   key=lambda c: -priority(c, source_weight))
     ranked = [*above[: max(max_chunks - len(forced), 0)], *forced]
     blocks: list[str] = []
     kept: list[Candidate] = []
@@ -224,6 +255,7 @@ def build_messages(
     memory: DialogueMemory,
     context: str,
     today: date,
+    source_authority: bool = False,
 ) -> list[dict]:
     """One system message (prompt, route rules, documents, memory block) -> recent turns -> the question.
 
@@ -236,7 +268,8 @@ def build_messages(
     parts = [SYSTEM_PROMPT_V2, f"Сегодня {today:%d.%m.%Y}."]
     if route in SEARCH_ROUTES and context:
         anchor = standalone_question.strip() or question.strip()
-        parts += [ROUTE_BLOCKS[route], context, f"{STANDALONE_LABEL} {anchor}"]
+        rules = ROUTE_BLOCKS[route] + ("\n" + SOURCE_AUTHORITY_RULE if source_authority else "")
+        parts += [rules, context, f"{STANDALONE_LABEL} {anchor}"]
     elif route in SEARCH_ROUTES:
         parts.append(NO_CONTEXT_BLOCKS[route])
     else:
