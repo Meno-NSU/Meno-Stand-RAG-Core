@@ -11,7 +11,16 @@ Per document (RAG-ready = not duplicate, not recommended exclude; schedule snaps
   before the continuation; documents without split tables keep their text byte-identical).
 - index_text = context header (title, source/organisation, date, section path) + chunk text, guaranteed to fit FRIDA's
   512 tokens together with the "search_document: " prefix.
-- Identical chunk texts across documents are indexed once (dup_of), chunks with < 25 letters are dropped.
+- Identical chunk texts across documents are indexed once (dup_of), chunks with < 25 letters or digits are dropped.
+- Every non-space character of a document's text lies in the body span of some chunk; a document that would lose text
+  stops the build.
+Fixes made in Meno-RAG-Core (marked FIX(meno)), against dataset revision 76fa38bd:
+- a table block of a header row + separator and no body rows, too long for one chunk, yielded no chunk: its text was lost
+  (PDF extraction produces such blocks);
+- an oversized table row was cut by tokens without the table header in its continuation pieces; they now repeat the
+  header like every other table continuation;
+- chunks of numbers (dates, figures) were dropped as low-content because only letters were counted;
+- the coverage check above.
 Outputs: chunks.jsonl (rich records), docs.jsonl, ragcore/chunked_texts_about_nsu_with_metadata.jsonl, ragcore/chunk_mapping_to_texts.json, stats.json"""
 
 import collections, hashlib, json, os, re, sys, time
@@ -29,6 +38,8 @@ SOURCE_MANIFEST_SHA256 = hashlib.sha256((Path(S) / "manifest.json").read_bytes()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 EMB_MAX, MAXT, TARGET, MINT, HDR_MAX = 512, 380, 280, 64, 72
 PREFIX = "search_document: "
+CHUNKER = "chunk_kb@76fa38bd+meno-1"  # upstream revision + the FIX(meno) changes listed in the docstring
+NONSPACE = re.compile(r"\S")
 HEAD = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LIST = re.compile(r"^\s{0,3}(?:[-*+•▪●–]|\d{1,3}[.)]|[a-zа-я][.)])\s+\S")
 TABLE = re.compile(r"^\s*\|")
@@ -194,18 +205,18 @@ class Doc:
         return self.cache[k]
 
 
-def hard_split(D, s, e):
+def hard_split(D, s, e, limit=MAXT):
     enc = tok(D.t[s:e], add_special_tokens=False, return_offsets_mapping=True)
     offs = enc["offset_mapping"]
     out = []
     i = 0
     while i < len(offs):
-        j = min(len(offs), i + MAXT)
+        j = min(len(offs), i + limit)
         if j < len(offs):
             k = j
-            while k > i + MAXT // 2 and not D.t[s + offs[k][0] - 1 : s + offs[k][0]].isspace():
+            while k > i + limit // 2 and not D.t[s + offs[k][0] - 1 : s + offs[k][0]].isspace():
                 k -= 1
-            j = k if k > i + MAXT // 2 else j
+            j = k if k > i + limit // 2 else j
         a, b = s + offs[i][0], s + offs[j - 1][1]
         out.append({"s": a, "e": b, "tok": j - i, "h": False})
         i = j
@@ -219,25 +230,27 @@ def units_of(D, b):
     if t <= MAXT:
         return [{"s": s, "e": e, "tok": t, "h": False}]
     if b["t"] == "table":
+        if not b["rows"]:  # FIX(meno): header + separator and no body rows: the block used to yield no units (text lost)
+            return hard_split(D, s, e)
         res = []
         hs, he = b["hdr"] if b["hdr"] else (None, None)
         htok = D.tk(hs, he) if b["hdr"] else 0
+        rep = (hs, he, htok) if (b["hdr"] and htok <= MAXT // 3) else None
         rows = b["rows"]
         for k, (rs, re_) in enumerate(rows):
             st0 = hs if (k == 0 and b["hdr"]) else rs
             rt = D.tk(st0, re_)
-            if rt > MAXT:
+            if rt > MAXT and rep:
+                # FIX(meno): an oversized row is cut so that each piece fits with the table header in front of it,
+                # and its continuation pieces repeat the header like any other table continuation
+                parts = hard_split(D, rs, re_, MAXT - htok - 2)
+                if k == 0:
+                    parts[0] = dict(parts[0], s=hs, tok=D.tk(hs, parts[0]["e"]))
+                res += [dict(p, tbl=rep if (k > 0 or i > 0) else None) for i, p in enumerate(parts)]
+            elif rt > MAXT:
                 res += hard_split(D, st0, re_)
             else:
-                res.append(
-                    {
-                        "s": st0,
-                        "e": re_,
-                        "tok": rt,
-                        "h": False,
-                        "tbl": (hs, he, htok) if (b["hdr"] and k > 0 and htok <= MAXT // 3) else None,
-                    }
-                )
+                res.append({"s": st0, "e": re_, "tok": rt, "h": False, "tbl": rep if k > 0 else None})
         return res
     if b["t"] == "list":
         res = []
@@ -390,6 +403,16 @@ def fit_header(lines, body_tok):
     return "\n".join(lines) + "\n\n"
 
 
+def uncovered(text, spans):
+    """number of non-space characters of text outside every (start, end) span"""
+    n, pos = 0, 0
+    for s, e in sorted(spans) + [(len(text), len(text))]:
+        if s > pos:
+            n += len(NONSPACE.findall(text, pos, s))
+        pos = max(pos, e)
+    return n
+
+
 def first_sentence(text):
     for ln in text.split("\n"):
         s = ln.strip(" #*-|")
@@ -413,6 +436,9 @@ def process(job):
             pieces += [dict(h, path=p["path"], tbl=None) for h in hard_split(D, p["s"], p["e"])]
         else:
             pieces.append(p)
+    lost = uncovered(text, [(p["s"], p["e"]) for p in pieces])
+    if lost:  # FIX(meno): chunking must not lose source text
+        raise ValueError(f"source text not covered by chunks ({lost} non-space characters): {m.get('id')}")
     # render (only when table continuations exist)
     rendered = any(p["tbl"] for p in pieces)
     chunks, parts, pos = [], [], 0
@@ -433,7 +459,7 @@ def process(job):
             flag = "over_limit"
         else:
             flag = None
-        letters = sum(c.isalpha() for c in body)
+        alnum = sum(c.isalnum() for c in body)  # FIX(meno): digits count as content (dates, figures)
         chunks.append(
             {
                 "start_char": st_,
@@ -446,7 +472,7 @@ def process(job):
                 "has_table": "|" in body[:2] or "\n|" in body,
                 "table_header_repeated": bool(p["tbl"]),
                 "flag": flag,
-                "low_content": letters < 25,
+                "low_content": alnum < 25,
                 "source_spans": (
                     [{"start_char": p["tbl"][0], "end_char": p["tbl"][1], "role": "repeated_table_header"}]
                     if p["tbl"]
@@ -698,6 +724,7 @@ def main():
         "unique_document_ids": len(doc_ids),
         "unique_chunk_ids": len(chunk_ids),
         "source_manifest_sha256": SOURCE_MANIFEST_SHA256,
+        "chunker": CHUNKER,
         "tokenizer_snapshot": Path(TOKENIZER_PATH).name,
         "seconds": round(time.time() - t0, 2),
     }
