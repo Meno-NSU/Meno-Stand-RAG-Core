@@ -3,14 +3,18 @@ chunk_kb.py <out_dir> [--limit N]
 
 Per document (RAG-ready = not duplicate, not recommended exclude; schedule snapshots of table.nsu.ru skipped):
 - Markdown is parsed into blocks: headings (#..######, plus bold / ALL-CAPS single lines as weak headings), paragraphs,
-  lists (items), tables (rows; header = first row + separator).
+  lists (items; an item continues onto following lines, indented or not, until a blank line or another block),
+  tables (rows; header = first row, + the separator row when there is one).
 - Section tree by heading level; a section that fits MAXT FRIDA tokens is one chunk; larger sections are split into their
   intro + subsections, recursively; oversized blocks are split by sentences (razdel), list items or table rows; a single
   oversized sentence/row is cut at whitespace by token offsets. Headings never end a chunk. Small neighbours (< MINT) are merged.
 - Continuation chunks of a split table get the table header repeated (the document is then "rendered": header rows inserted
   before the continuation; documents without split tables keep their text byte-identical).
+- A document mis-decoded as a whole (cp1251 read as Latin-1, a PDF font with shifted glyph codes) is repaired first by a
+  1:1 character map (text_repair.repair_encoding; same length, so all offsets refer to the repaired text).
 - index_text = context header (title, source/organisation, date, section path) + chunk text, guaranteed to fit FRIDA's
-  512 tokens together with the "search_document: " prefix.
+  512 tokens together with the "search_document: " prefix. In index_text only, words broken at a wrap and letter-spaced
+  words are joined when the joined word is in the corpus vocabulary (text_repair.index_form); "text" stays verbatim.
 - Identical chunk texts across documents are indexed once (dup_of), chunks with < 25 letters or digits are dropped.
 - Every non-space character of a document's text lies in the body span of some chunk; a document that would lose text
   stops the build.
@@ -20,7 +24,10 @@ Fixes made in Meno-RAG-Core (marked FIX(meno)), against dataset revision 76fa38b
 - an oversized table row was cut by tokens without the table header in its continuation pieces; they now repeat the
   header like every other table continuation;
 - chunks of numbers (dates, figures) were dropped as low-content because only letters were counted;
-- the coverage check above.
+- the coverage check above;
+- (meno-2) a list item wrapped onto a non-indented line ended the list, so chunks were cut inside the item;
+- (meno-2) tables without a separator row (HTML, docx) had no header, so their continuation chunks had none;
+- (meno-2) the encoding repair and the index-only joining of broken words above.
 Outputs: chunks.jsonl (rich records), docs.jsonl, ragcore/chunked_texts_about_nsu_with_metadata.jsonl, ragcore/chunk_mapping_to_texts.json, stats.json"""
 
 import collections, hashlib, json, os, re, sys, time
@@ -30,6 +37,7 @@ from multiprocessing import Pool
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kb_orgs import org_label
+import text_repair
 
 S = os.environ["KB_SOURCE_ROOT"]
 OUT = sys.argv[1] if len(sys.argv) > 1 else None
@@ -38,7 +46,7 @@ SOURCE_MANIFEST_SHA256 = hashlib.sha256((Path(S) / "manifest.json").read_bytes()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 EMB_MAX, MAXT, TARGET, MINT, HDR_MAX = 512, 380, 280, 64, 72
 PREFIX = "search_document: "
-CHUNKER = "chunk_kb@76fa38bd+meno-1"  # upstream revision + the FIX(meno) changes listed in the docstring
+CHUNKER = "chunk_kb@76fa38bd+meno-2"  # upstream revision + the FIX(meno) changes listed in the docstring
 NONSPACE = re.compile(r"\S")
 HEAD = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LIST = re.compile(r"^\s{0,3}(?:[-*+•▪●–]|\d{1,3}[.)]|[a-zа-я][.)])\s+\S")
@@ -62,12 +70,15 @@ CARD_ANN = {
     "nsu_staff": "Карточка преподавателя НГУ: должность, кафедра, образование, преподаваемые дисциплины, научные интересы, публикации.",
 }
 tok = None
+VOCAB = {}  # corpus vocabulary of text_repair (word -> document frequency), set by main() before chunking
 
 
-def init():
-    global tok, sentenize
+def init(vocab=None):
+    global tok, sentenize, VOCAB
     from transformers import AutoTokenizer
     from razdel import sentenize as _s
+
+    VOCAB = vocab or {}
 
     tok = AutoTokenizer.from_pretrained(TOKENIZER_PATH, local_files_only=True)
     tok.model_max_length = 1000000000
@@ -96,6 +107,16 @@ def clean_heading(s):
     return re.sub(r"\s+", " ", re.sub(r"[*_`#]+", "", s)).strip(" :")
 
 
+def block_start(lines, j):
+    """line j starts a block of its own: a heading, a table row, or a one-line paragraph that is a weak heading"""
+    ln = lines[j][2]
+    if HEAD.match(ln) or TABLE.match(ln):
+        return True
+    nxt = lines[j + 1][2] if j + 1 < len(lines) else ""
+    alone = not nxt.strip() or HEAD.match(nxt) or TABLE.match(nxt) or LIST.match(nxt)
+    return bool(alone and pseudo_heading(ln))
+
+
 def parse(text):
     lines, pos = [], 0
     for ln in text.split("\n"):
@@ -120,6 +141,8 @@ def parse(text):
                 j += 1
             if len(rows) >= 2 and TSEP.match(lines[i + 1][2]):
                 hdr, body = (rows[0][0], rows[1][1]), rows[2:]
+            elif len(rows) >= 2:  # FIX(meno): no separator row (HTML, docx): the first row is the header
+                hdr, body = rows[0], rows[1:]
             else:
                 hdr, body = None, rows
             out.append({"t": "table", "s": rows[0][0], "e": rows[-1][1], "hdr": hdr, "rows": body})
@@ -132,7 +155,8 @@ def parse(text):
                 l2 = lines[j][2]
                 if LIST.match(l2):
                     items.append([lines[j][0], lines[j][1]])
-                elif l2.strip() and l2[:1] in (" ", "\t") and items:
+                elif l2.strip() and items and (l2[:1] in (" ", "\t") or not block_start(lines, j)):
+                    # FIX(meno): markdown lazy continuation: an item wrapped onto a non-indented line continues the item
                     items[-1][1] = lines[j][1]
                 elif not l2.strip() and j + 1 < n and LIST.match(lines[j + 1][2]):
                     pass
@@ -424,6 +448,7 @@ def first_sentence(text):
 
 def process(job):
     m, text = job
+    text, repair = text_repair.repair_encoding(text, VOCAB)  # FIX(meno): 1:1 character map, offsets are kept
     D = Doc(text)
     title = re.sub(r"\s+", " ", (m.get("title") or "").strip()) or first_sentence(text)[:120] or m["canonical_url"]
     blocks = parse(text)
@@ -454,8 +479,9 @@ def process(job):
         else:
             st_, en_ = p["s"], p["e"]
         bt = ntok(body)
-        h = fit_header(header(m, p["path"], title), bt)
-        if ntok(PREFIX + h + body) > EMB_MAX:  # rare: body itself too long after header -> keep, flagged
+        ibody, fixes = text_repair.index_form(body, VOCAB)  # FIX(meno): broken and letter-spaced words, index only
+        h = fit_header(header(m, p["path"], title), ntok(ibody))
+        if ntok(PREFIX + h + ibody) > EMB_MAX:  # rare: body itself too long after header -> keep, flagged
             flag = "over_limit"
         else:
             flag = None
@@ -465,10 +491,11 @@ def process(job):
                 "start_char": st_,
                 "end_char": en_,
                 "text": body,
-                "index_text": h + body,
+                "index_text": h + ibody,
+                "index_repairs": fixes or None,
                 "heading_path": p["path"],
                 "tokens": bt,
-                "tokens_index": ntok(PREFIX + h + body),
+                "tokens_index": ntok(PREFIX + h + ibody),
                 "has_table": "|" in body[:2] or "\n|" in body,
                 "table_header_repeated": bool(p["tbl"]),
                 "flag": flag,
@@ -488,6 +515,7 @@ def process(job):
         "title": title,
         "full": full,
         "rendered": rendered,
+        "text_repair": repair,
         "chunks": chunks,
         "doc_tokens": ntok(text) if len(text) < 400000 else int(len(text) / 3.4),
     }
@@ -550,9 +578,11 @@ def main():
     doc_ids = set()
     chunk_ids = set()
     fc = None
+    vocab = text_repair.vocabulary(text for _, text in jobs())
+    print("vocabulary", len(vocab), "words", round(time.time() - t0), "s", flush=True)
     try:
         with (
-            Pool(int(os.environ.get("WORKERS", "4")), initializer=init) as pool,
+            Pool(int(os.environ.get("WORKERS", "4")), initializer=init, initargs=(vocab,)) as pool,
             open_gzip(Path(OUT) / "docs.jsonl.gz") as fd,
             open_gzip(Path(OUT) / "ragcore/chunked_texts_about_nsu_with_metadata.jsonl.gz") as fr,
         ):
@@ -608,6 +638,8 @@ def main():
                     st["low_content"] += c["low_content"]
                     st["over_limit"] += c["flag"] == "over_limit"
                     st["table_hdr_repeated"] += c["table_header_repeated"]
+                    st["index_repaired_chunks"] += bool(c["index_repairs"])
+                    st.update(c["index_repairs"] or {})
                     rec = {
                         "chunk_id": cid,
                         "doc_id": m["id"],
@@ -619,6 +651,7 @@ def main():
                         "end_char": c["end_char"],
                         "text": c["text"],
                         "index_text": c["index_text"],
+                        "index_repairs": c["index_repairs"],
                         "source_spans": c["source_spans"],
                         "source_joiner": c["source_joiner"],
                         "heading_path": c["heading_path"],
@@ -659,6 +692,7 @@ def main():
                         )
                 st["docs"] += 1
                 st["rendered_docs"] += r["rendered"]
+                st["encoding_repaired_docs"] += bool(r["text_repair"])
                 fd.write(
                     json.dumps(
                         {
@@ -675,6 +709,7 @@ def main():
                             "n_indexed": len(rc),
                             "doc_tokens_frida": r["doc_tokens"],
                             "text_rendered": r["rendered"],
+                            "text_repair": r["text_repair"],
                             "chunk_ids": ids,
                         },
                         ensure_ascii=False,
@@ -725,6 +760,7 @@ def main():
         "unique_chunk_ids": len(chunk_ids),
         "source_manifest_sha256": SOURCE_MANIFEST_SHA256,
         "chunker": CHUNKER,
+        "vocabulary_words": len(vocab),
         "tokenizer_snapshot": Path(TOKENIZER_PATH).name,
         "seconds": round(time.time() - t0, 2),
     }

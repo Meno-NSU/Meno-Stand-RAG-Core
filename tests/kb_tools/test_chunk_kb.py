@@ -104,3 +104,70 @@ def test_chunk_without_letters_or_digits_is_still_low_content(ck):
     dash_chunk = next(c for c in result["chunks"] if "— —" in c["text"])
     assert "слово" not in dash_chunk["text"]
     assert dash_chunk["low_content"]
+
+
+def chunk_with(result, s):
+    return next(c for c in result["chunks"] if s in c["text"])
+
+
+@pytest.mark.parametrize("k", range(4, 24))
+def test_list_item_wrapped_onto_an_unindented_line_stays_one_item(ck, k):
+    # markdown lazy continuation: PDF and HTML extraction wrap list items without indenting the next line
+    items = [f"- {words(f'пункт{i}x', 20)};" for i in range(30)]
+    items[k] = "- члены их семей (супруги и\nнесовершеннолетние дети) проходят через турникеты;"
+    text = "# Правила прохода\n\n" + "\n".join(items) + "\n"
+    result = ck.process((meta(), text))
+    assert "несовершеннолетние дети" in chunk_with(result, "супруги и")["text"]
+    assert lost_words(text, result) == []
+
+
+@pytest.mark.parametrize("heading", ["## Подраздел", "ПОДРАЗДЕЛ"])
+def test_a_heading_line_after_a_list_is_not_swallowed_by_the_last_item(ck, heading):
+    text = f"# Раздел\n\n- {words('пункт', 5)}\n- {words('пункт', 5)}\n{heading}\n\n{words('текст', 500)}\n"
+    result = ck.process((meta(), text))
+    assert any(c["heading_path"][-1:] == ["Подраздел"] or c["heading_path"][-1:] == ["ПОДРАЗДЕЛ"] for c in result["chunks"])
+
+
+def test_continuations_of_a_table_without_a_separator_row_repeat_its_first_row(ck):
+    # HTML (trafilatura) and docx tables come without the |---| row; their first row is the header
+    head = "| Код научной специальности | Наименование | Стоимость, руб./год |"
+    rows = [f"| 1.1.{i} | {words(f'специальность{i}x', 12)} | {276000 + i} |" for i in range(60)]
+    text = "# Стоимость обучения\n\n" + "\n".join([head, *rows]) + "\n"
+    result = ck.process((meta(), text))
+    body = {id(c): next(text[x["start_char"] : x["end_char"]] for x in c["source_spans"] if x["role"] == "body")
+            for c in result["chunks"]}
+    later = [c for c in result["chunks"] if head not in body[id(c)]]
+    assert later
+    for c in later:
+        assert c["table_header_repeated"]
+        assert c["text"].startswith(head)
+    assert lost_words(text, result) == []
+    assert all(c["tokens_index"] <= ck.EMB_MAX for c in result["chunks"])
+
+
+def test_a_one_row_table_has_no_header(ck):
+    text = f"# Раздел\n\n| {words('ячейка', 400)} |\n"
+    result = ck.process((meta(), text))
+    assert not any(c["table_header_repeated"] for c in result["chunks"])
+    assert lost_words(text, result) == []
+
+
+def test_index_text_joins_broken_words_and_the_shown_text_stays_verbatim(ck, monkeypatch):
+    monkeypatch.setattr(ck, "VOCAB", {"сентября": 40, "министерство": 25})
+    text = "# Сроки\n\nМ И Н И С Т Е Р С Т В О сообщает: заявления принимаются до 1 сен-\nтября 2026 года.\n"
+    c = ck.process((meta(), text))["chunks"][0]
+    assert "сен-\nтября" in c["text"] and "М И Н И С Т Е Р С Т В О" in c["text"]
+    assert "до 1 сентября 2026" in c["index_text"] and "МИНИСТЕРСТВО сообщает" in c["index_text"]
+    assert c["index_repairs"] == {"dehyphenated": 1, "letter_spacing_joined": 1}
+    assert c["tokens_index"] == ck.ntok(ck.PREFIX + c["index_text"])
+
+
+def test_a_mis_decoded_document_is_chunked_from_its_repaired_text(ck, monkeypatch):
+    monkeypatch.setattr(ck, "VOCAB", dict.fromkeys(("министерство", "науки", "высшего", "образования", "отчет", "ректора", "новосибирского", "государственного", "университета"), 9))
+    moji = "ÌÈÍÈÑÒÅÐÑÒÂÎ ÍÀÓÊÈ È ÂÛÑØÅÃÎ ÎÁÐÀÇÎÂÀÍÈß. Îò÷åò ðåêòîðà Íîâîñèáèðñêîãî ãîñóäàðñòâåííîãî óíèâåðñèòåòà"
+    text = f"# Отчёт\n\n{moji}\n"
+    result = ck.process((meta(), text))
+    c = result["chunks"][0]
+    assert "МИНИСТЕРСТВО НАУКИ И ВЫСШЕГО ОБРАЗОВАНИЯ. Отчет ректора Новосибирского" in c["text"]
+    assert result["full"][c["start_char"] : c["end_char"]] == c["text"]
+    assert result["text_repair"]["map"] == "cp1251_as_latin1"
