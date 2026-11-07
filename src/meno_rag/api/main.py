@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -23,6 +25,15 @@ from meno_rag.api import bench as bench_mod
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
+from meno_rag.api.external import (
+    ExternalRegistry,
+    ExternalTarget,
+    Relay,
+    complete,
+    parse_external_backends,
+    relay_stream,
+    upstream_body,
+)
 from meno_rag.api.events import (
     StageEvent,
     StageName,
@@ -62,7 +73,7 @@ from meno_rag.api.knowledge_bases import (
     split_virtual_model,
     virtual_model_entries,
 )
-from meno_rag.stand.pipeline import PipelineRuntime, StandRagPipeline
+from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
 from meno_rag.stand.search import vectorize_search_query
 
@@ -238,6 +249,15 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("openrouter_startup_discovery_failed", error=str(exc))
 
+    # Raises on a bad EXTERNAL_BACKENDS, so a typo stops the start instead of hiding the backends.
+    external_registry = ExternalRegistry(
+        parse_external_backends(settings.external_backends),
+        http_client=http_client,
+        timeout=settings.model_discovery_timeout_seconds,
+        cache_ttl=settings.model_cache_ttl_seconds,
+    )
+    await external_registry.refresh()
+
     llm_router = LLMRouter(
         vllm=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
         openrouter=openrouter_client,
@@ -311,6 +331,7 @@ async def lifespan(app: FastAPI):
     app.state.openrouter_registry = openrouter_registry
     app.state.openrouter_client = openrouter_client
     app.state.model_status_store = status_store
+    app.state.external_registry = external_registry
     app.state.llm_router = llm_router
     app.state.admission = AdmissionController(settings.max_concurrent_chats)
     # Benchmark traffic draws from its own budget so a dev's benchmark run can
@@ -583,6 +604,9 @@ async def list_models(request: Request):
 
     if getattr(request.app.state, "v2_pipeline", None) is not None:
         merged.extend(virtual_model_entries(settings, merged))
+    external = _external_registry(request.app)
+    if external is not None:
+        merged.extend(await external.entries())
 
     current_user = await auth.resolve_optional_user(request)
     if settings.auth_enabled and current_user is None:
@@ -608,6 +632,9 @@ async def refresh_models(request: Request):
     refreshes: list[Any] = [vllm_registry.refresh()]
     if or_registry is not None:
         refreshes.append(or_registry.discover())
+    external = _external_registry(request.app)
+    if external is not None and external.backends:
+        refreshes.append(external.refresh())
     await asyncio.gather(*refreshes)
     return await list_models(request)
 
@@ -750,11 +777,16 @@ def _record_preflight_failure(code: str, *, bench: bool) -> None:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(payload: ChatCompletionRequest, request: Request, response: Response):
-    base_model, virtual = split_virtual_model(payload.model)
-    # «Менон 1.1» model entries always run the v2 pipeline, whatever base the client sent.
-    pipeline, kb_id = _select_pipeline(request.app, V2_KB_ID if virtual else payload.knowledge_base_id)
-    if pipeline is None and (kb_id or not any(p is not None for p in _pipelines(request.app.state).values())):
-        return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
+    # A model entry of an external backend: the whole answer comes from that backend.
+    external = _external_target(request.app, payload.model)
+    if external is not None:
+        base_model, virtual, pipeline, kb_id = payload.model, False, None, external.kb_id
+    else:
+        base_model, virtual = split_virtual_model(payload.model)
+        # «Менон 1.1» model entries always run the v2 pipeline, whatever base the client sent.
+        pipeline, kb_id = _select_pipeline(request.app, V2_KB_ID if virtual else payload.knowledge_base_id)
+        if pipeline is None and (kb_id or not any(p is not None for p in _pipelines(request.app.state).values())):
+            return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
 
     # Benchmark requests are recognised before anything else: they pick a
     # different admission budget, force trace capture, and skip persistence.
@@ -786,7 +818,10 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
     try:
         settings: Settings = request.app.state.settings
         try:
-            runtime = await _resolve_runtime(request.app, base_model if virtual else payload.model)
+            if external is not None:
+                runtime = _external_runtime(external)
+            else:
+                runtime = await _resolve_runtime(request.app, base_model if virtual else payload.model)
         except ValueError as exc:
             _record_preflight_failure("model_not_found", bench=bench)
             return _error_response(400, str(exc), "model_not_found", param="model")
@@ -834,7 +869,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             settings.capture_pipeline_trace and random.random() < settings.pipeline_trace_sample_rate
         )
 
-        if pipeline is None:
+        if pipeline is None and external is None:
             return _error_response(
                 400,
                 f"Unknown knowledge_base_id={payload.knowledge_base_id!r}.",
@@ -850,6 +885,24 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             stream_headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
             if bench:
                 stream_headers["X-Bench-Mode"] = "1"
+            if external is not None:
+                return StreamingResponse(
+                    _external_stream_response(
+                        request=request,
+                        payload=payload,
+                        target=external,
+                        runtime=runtime,
+                        completion_id=completion_id,
+                        created_ts=created_ts,
+                        session_id=session_id,
+                        user_id=user_id,
+                        guest_session_id=guest_session_id,
+                        on_finish=admission.release,
+                        bench=bench,
+                    ),
+                    media_type="text/event-stream",
+                    headers=stream_headers,
+                )
             return StreamingResponse(
                 _stream_response(
                     request=request,
@@ -872,6 +925,18 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                 headers=stream_headers,
             )
 
+        if external is not None:
+            return await _external_non_stream_response(
+                request=request,
+                payload=payload,
+                target=external,
+                runtime=runtime,
+                completion_id=completion_id,
+                session_id=session_id,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                bench=bench,
+            )
         return await _non_stream_response(
             request=request,
             payload=payload,
@@ -894,8 +959,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
 
 
 def _public_model(payload: ChatCompletionRequest, runtime: PipelineRuntime) -> str:
-    """Model id shown to the client and stored: the virtual id for «Менон 1.1» entries."""
-    if payload.model and split_virtual_model(payload.model)[1]:
+    """Model id shown to the client and stored: the entry id for «Менон 1.1» and external backends."""
+    if payload.model and (split_virtual_model(payload.model)[1] or runtime.generation.provider == "external"):
         return payload.model
     return runtime.generation.model_id
 
@@ -1284,6 +1349,252 @@ async def _stream_response(
             metrics_mod.dec_chat_in_flight()
         if on_finish is not None:
             on_finish()
+
+
+def _external_registry(app: FastAPI) -> ExternalRegistry | None:
+    return getattr(app.state, "external_registry", None)
+
+
+def _external_target(app: FastAPI, model: str | None) -> ExternalTarget | None:
+    registry = _external_registry(app)
+    return registry.resolve(model) if registry is not None else None
+
+
+def _external_runtime(target: ExternalTarget) -> PipelineRuntime:
+    return PipelineRuntime.uniform(
+        ModelRuntime(provider="external", model_id=target.model, base_url=target.backend.url)
+    )
+
+
+def _last_user_message(payload: ChatCompletionRequest) -> str:
+    return next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
+
+
+def _external_outcome(payload: ChatCompletionRequest, sources: list[dict], stage_durations: dict[str, float]) -> Any:
+    """What _persist_success reads from a pipeline outcome; the backend's search and prompt stay with it."""
+    return SimpleNamespace(
+        question=_last_user_message(payload),
+        sources=sources,
+        search_queries=None,
+        stage_durations_ms={k: v for k, v in stage_durations.items() if k != StageName.GENERATION},
+        stage_details={},
+        qa_messages=[],
+        prepared_dialogue_history=None,
+        retrieved=None,
+        fewshots=None,
+        trace=None,
+    )
+
+
+async def _external_stream_response(
+    *,
+    request: Request,
+    payload: ChatCompletionRequest,
+    target: ExternalTarget,
+    runtime: PipelineRuntime,
+    completion_id: str,
+    created_ts: int,
+    session_id: str,
+    user_id: str | None,
+    guest_session_id: str | None,
+    on_finish: Callable[[], None] | None,
+    bench: bool,
+):
+    """Relay the external backend's stream, then store the answer as for our own pipelines."""
+    registry = _external_registry(request.app)
+    database: Database = request.app.state.database
+    started = time.perf_counter()
+    first_token_at: float | None = None
+    relay = Relay(completion_id=completion_id, public_id=target.public_id)
+    if not bench:
+        metrics_mod.inc_chat_in_flight()
+    try:
+        async for block in relay_stream(registry.http, target, upstream_body(target, payload), relay):
+            if first_token_at is None and relay.parts:
+                first_token_at = time.perf_counter()
+                if not bench:
+                    metrics_mod.record_time_to_first_token(provider="external", seconds=first_token_at - started)
+            yield block
+        total_ms = round((time.perf_counter() - started) * 1000, 2)
+        if bench:
+            metrics_mod.record_bench_request(status="error" if relay.error else "ok")
+        elif relay.error is not None:
+            # The backend already sent its error event to the client; keep the failed turn for diagnostics.
+            code = str(relay.error.get("code") or "external_backend_error")
+            logger.warning(
+                "external_stream_error_event", request_id=completion_id, backend=target.backend.id, code=code
+            )
+            metrics_mod.record_error(code)
+            metrics_mod.record_chat_request(provider="external", stream=True, status="error", seconds=total_ms / 1000.0)
+            await _persist_failure(
+                database,
+                completion_id,
+                session_id,
+                runtime,
+                payload,
+                json.dumps(relay.error, ensure_ascii=False)[:2000],
+                stream=True,
+                stage="generation",
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                kb_id=target.kb_id,
+            )
+        else:
+            metrics_mod.record_chat_request(provider="external", stream=True, status="ok", seconds=total_ms / 1000.0)
+            generation_ms = relay.stage_durations.get(StageName.GENERATION) or round(
+                (time.perf_counter() - (first_token_at or started)) * 1000, 2
+            )
+            await _persist_success(
+                database=database,
+                run_id=completion_id,
+                session_id=session_id,
+                model=target.public_id,
+                generation_model=target.model,
+                core_model=target.model,
+                endpoint=target.backend.url,
+                question=_last_user_message(payload),
+                answer=relay.answer,
+                outcome=_external_outcome(payload, relay.sources, relay.stage_durations),
+                generation_ms=generation_ms,
+                total_ms=total_ms,
+                stream=True,
+                temperature=payload.temperature,
+                max_tokens=payload.max_tokens or 0,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                arena=payload.arena,
+                kb_id=target.kb_id,
+                trace_writer=request.app.state.trace_writer,
+            )
+    except Exception as exc:
+        classified = classify_error(exc)
+        logger.exception(
+            "external_stream_failed",
+            request_id=completion_id,
+            backend=target.backend.id,
+            error=str(exc),
+            error_code=classified.code,
+        )
+        yield StageEvent(stage=StageName.GENERATION, status=StageStatus.FAILED, model_id=target.model).to_sse()
+        error = _classified_error_payload(classified, retry_id=completion_id, stage="generation")["error"]
+        yield sse_event("error", error)
+        err_chunk = openai_chunk(
+            completion_id=completion_id, created=created_ts, model=target.public_id, delta={}, finish_reason="error"
+        )
+        err_chunk["error"] = error
+        yield sse_data(err_chunk)
+        yield sse_data("[DONE]")
+        if bench:
+            metrics_mod.record_bench_request(status="error")
+        else:
+            metrics_mod.record_error(classified.code)
+            metrics_mod.record_chat_request(
+                provider="external", stream=True, status="error", seconds=time.perf_counter() - started
+            )
+            await _persist_failure(
+                database,
+                completion_id,
+                session_id,
+                runtime,
+                payload,
+                str(exc),
+                stream=True,
+                classified=classified,
+                stage="generation",
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                kb_id=target.kb_id,
+            )
+    finally:
+        if not bench:
+            metrics_mod.dec_chat_in_flight()
+        if on_finish is not None:
+            on_finish()
+
+
+async def _external_non_stream_response(
+    *,
+    request: Request,
+    payload: ChatCompletionRequest,
+    target: ExternalTarget,
+    runtime: PipelineRuntime,
+    completion_id: str,
+    session_id: str,
+    user_id: str | None,
+    guest_session_id: str | None,
+    bench: bool,
+):
+    registry = _external_registry(request.app)
+    database: Database = request.app.state.database
+    started = time.perf_counter()
+    if not bench:
+        metrics_mod.inc_chat_in_flight()
+    try:
+        upstream = await complete(registry.http, target, upstream_body(target, payload))
+        answer = upstream["choices"][0]["message"].get("content") or ""
+        sources = [s for s in upstream.get("sources") or [] if isinstance(s, dict)]
+        total_ms = round((time.perf_counter() - started) * 1000, 2)
+        if bench:
+            metrics_mod.record_bench_request(status="ok")
+        else:
+            metrics_mod.record_chat_request(provider="external", stream=False, status="ok", seconds=total_ms / 1000.0)
+            await _persist_success(
+                database=database,
+                run_id=completion_id,
+                session_id=session_id,
+                model=target.public_id,
+                generation_model=target.model,
+                core_model=target.model,
+                endpoint=target.backend.url,
+                question=_last_user_message(payload),
+                answer=answer,
+                outcome=_external_outcome(payload, sources, {}),
+                generation_ms=total_ms,
+                total_ms=total_ms,
+                stream=False,
+                temperature=payload.temperature,
+                max_tokens=payload.max_tokens or 0,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                arena=payload.arena,
+                kb_id=target.kb_id,
+                trace_writer=request.app.state.trace_writer,
+            )
+        return {**upstream, "id": completion_id, "model": target.public_id}
+    except Exception as exc:
+        classified = classify_error(exc)
+        logger.exception(
+            "external_non_stream_failed",
+            request_id=completion_id,
+            backend=target.backend.id,
+            error=str(exc),
+            error_code=classified.code,
+        )
+        if bench:
+            metrics_mod.record_bench_request(status="error")
+        else:
+            metrics_mod.record_error(classified.code)
+            metrics_mod.record_chat_request(
+                provider="external", stream=False, status="error", seconds=time.perf_counter() - started
+            )
+            await _persist_failure(
+                database,
+                completion_id,
+                session_id,
+                runtime,
+                payload,
+                str(exc),
+                stream=False,
+                classified=classified,
+                stage="generation",
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                kb_id=target.kb_id,
+            )
+        return _classified_error_response(classified, retry_id=completion_id, stage="generation")
+    finally:
+        if not bench:
+            metrics_mod.dec_chat_in_flight()
 
 
 def _extract_prompts(qa_messages: list[dict[str, str]]) -> tuple[str, str]:

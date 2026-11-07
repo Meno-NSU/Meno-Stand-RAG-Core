@@ -218,6 +218,10 @@ class Settings(BaseSettings):
         default="meno-lite=Менон 1.1 (meno-lite);gemma-4-12B-it=Менон 1.1 (Gemma 4)",
         validation_alias="V2_MODEL_ALIASES",
     )
+    # Other answer backends with the same chat API, offered as model entries "<model>@<id>" (JSON list:
+    # [{"id": "lab", "name": "...", "url": "http://host:port", "api_key": "...", "models": ["..."]}],
+    # api_key and models optional). See meno_rag/api/external.py.
+    external_backends: str = Field(default="", validation_alias="EXTERNAL_BACKENDS")
     # Where v2 is offered in the UI: models | kb | both.
     v2_expose_as: str = Field(default="models", validation_alias="V2_EXPOSE_AS")
     # Directory of the v2 chunk release.
