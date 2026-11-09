@@ -10,6 +10,7 @@ for a refresh."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -232,6 +233,15 @@ class StandRegistry:
             self._valid_until = time.monotonic() + FAILURE_RETRY_S
         finally:
             self._background = None
+
+    async def aclose(self) -> None:
+        """Cancels a refresh that is still running, in the background or not, and waits for it to end: at shutdown
+        nothing may use the http client once it is closed. Safe to call twice."""
+        for task in (self._background, self._refreshing):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     async def entries(self) -> list[dict[str, Any]]:
         # A due refresh runs in the background, one at a time, and this answers at once with what is known: a stand

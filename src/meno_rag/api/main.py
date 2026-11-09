@@ -361,6 +361,7 @@ async def lifespan(app: FastAPI):
     if v2_pipeline is not None:
         v2_pipeline.close()
     await http_client.aclose()
+    await stand_registry.aclose()  # a background discovery must not outlive the stand client
     await stand_http_client.aclose()
     await database.close()
     retrieval_executor.shutdown(wait=False, cancel_futures=True)

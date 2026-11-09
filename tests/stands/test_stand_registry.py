@@ -268,6 +268,29 @@ def test_the_discovery_of_a_stand_no_longer_in_the_file_returns_quietly(tmp_path
     assert calls == [] and "gone" not in reg._states
 
 
+def test_aclose_cancels_a_background_refresh_blocked_on_a_stand():
+    async def scenario():
+        asked = asyncio.Event()
+
+        async def never_answers(request):
+            asked.set()
+            await asyncio.Event().wait()
+
+        reg, _ = _registry(None, handler=never_answers, cache_ttl=0, deadline=60)
+        with capture_logs() as logs:
+            await reg.entries()  # the refresh is due: it starts in the background
+            await asyncio.wait_for(asked.wait(), 1)
+            background, running = reg._background, reg._refreshing
+            await asyncio.wait_for(reg.aclose(), 1)
+            await asyncio.wait_for(reg.aclose(), 1)  # a second call is harmless
+        return background, running, logs
+
+    background, running, logs = _run(scenario())
+    assert background is not None and background.done() and running is not None and running.cancelled()
+    assert not [e for e in logs if e["log_level"] in ("error", "critical")]
+    assert not [e for e in logs if e["event"] in ("stand_discovery_failed", "stand_refresh_failed")]
+
+
 def test_a_new_stand_in_the_file_appears_after_refresh(tmp_path):
     path = tmp_path / "stands.json"
     reg, _ = _registry(manifest(), path=path)
@@ -621,3 +644,24 @@ def test_stands_have_a_connection_pool_of_their_own(monkeypatch, tmp_path):
         assert shared.is_closed and stands.is_closed
     finally:
         get_settings.cache_clear()
+
+
+def test_the_shutdown_stops_the_registry_before_closing_the_stand_client(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from meno_rag.config import get_settings
+    from tests.v2.test_api_v2 import _make
+
+    client_closed_at_aclose = []
+
+    async def aclose(self):
+        client_closed_at_aclose.append(self.http.is_closed)
+
+    monkeypatch.setattr(StandRegistry, "aclose", aclose, raising=False)
+    main_mod, _ = _make(monkeypatch, tmp_path)
+    try:
+        with TestClient(main_mod.app):
+            assert client_closed_at_aclose == []
+    finally:
+        get_settings.cache_clear()
+    assert client_closed_at_aclose == [False]
