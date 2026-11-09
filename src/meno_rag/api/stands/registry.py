@@ -108,6 +108,7 @@ class StandRegistry:
             entries = []
         self._apply(entries)
         self._valid_until = 0.0
+        self._refreshing: asyncio.Task[None] | None = None
         self._background: asyncio.Task[None] | None = None
 
     def _stat(self) -> int | None:
@@ -159,7 +160,9 @@ class StandRegistry:
             return 200, bytes(body)
 
     async def _discover(self, stand: StandEntry) -> None:
-        state = self._states[stand.id]
+        state = self._states.get(stand.id)
+        if state is None:  # the file dropped the stand after this discovery was planned
+            return
         try:
             async with asyncio.timeout(self._deadline):
                 status, body = await self._get(stand, MANIFEST_PATH)
@@ -208,6 +211,14 @@ class StandRegistry:
             metrics.record_stand_violation(stand.id, "bad_manifest")
 
     async def refresh(self) -> None:
+        """Re-reads the file if it changed and asks every stand again. Refreshes never overlap: a caller that comes
+        while one runs (POST /v1/models/refresh during a background refresh) waits for it and starts none."""
+        if self._refreshing is None or self._refreshing.done():
+            self._refreshing = asyncio.create_task(self._refresh_now())
+        # A caller that gives up (a cancelled request) must not cancel the refresh the others are waiting for.
+        await asyncio.shield(self._refreshing)
+
+    async def _refresh_now(self) -> None:
         self._reload()
         await asyncio.gather(*(self._discover(s) for s in list(self._stands.values())))
         ttl = self._cache_ttl if all(s.up for s in self._states.values()) else min(self._cache_ttl, FAILURE_RETRY_S)

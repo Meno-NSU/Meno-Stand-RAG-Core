@@ -17,6 +17,7 @@ from structlog.testing import capture_logs
 
 from meno_rag.api import metrics
 from meno_rag.api.stands import registry as registry_mod
+from meno_rag.api.stands.config import parse_stands
 from meno_rag.api.stands.registry import StandRegistry
 from tests.stands._helpers import LAB, manifest, stand_client, stand_handler, write_stands
 from tests.v2.test_api_v2 import make_client  # noqa: F401  (fixture)
@@ -212,6 +213,59 @@ def test_a_failed_background_refresh_is_logged_and_waits_before_the_next():
     listed, logs, attempts = _run(scenario())
     assert [e["id"] for e in listed] == ["gemma@lab"] and attempts == 1
     assert any(e["event"] == "stand_refresh_failed" and e["log_level"] == "error" for e in logs)
+
+
+def test_two_refreshes_racing_a_file_change_end_without_an_error(tmp_path):
+    # POST /v1/models/refresh may come while entries() runs a refresh in the background. Here the second one starts
+    # after the first has planned the discovery of both stands and the file has dropped one of them meanwhile.
+    path = tmp_path / "stands.json"
+    stands = [{"id": "lab", "url": "http://lab.example"}, {"id": "ok", "url": "http://ok.example"}]
+
+    def drop_lab():
+        write_stands(path, stands[1:])
+        _bump_mtime(path)
+
+    async def scenario():
+        reg, calls = _registry(manifest(), path=path, stands=stands)
+        first = asyncio.create_task(reg.refresh())
+        asyncio.get_running_loop().call_soon(drop_lab)  # runs after the first refresh has started
+        second = asyncio.create_task(reg.refresh())
+        await asyncio.wait_for(asyncio.gather(first, second), 5)
+        return reg, [r.url.host for r in calls]
+
+    reg, asked = _run(scenario())
+    assert asked == ["ok.example"]  # one discovery: the second refresh waited for the first and started none
+    assert reg.resolve("gemma@ok") is not None and reg.resolve("gemma@lab") is None
+
+
+def test_a_refresh_that_comes_while_one_runs_waits_for_it():
+    async def scenario():
+        gate = asyncio.Event()
+        ok = stand_handler([], manifest=manifest())
+
+        async def handler(request):
+            await gate.wait()
+            return ok(request)
+
+        reg, calls = _registry(None, handler=handler)
+        first = asyncio.create_task(reg.refresh())
+        await asyncio.sleep(0.05)
+        second = asyncio.create_task(reg.refresh())
+        await asyncio.sleep(0.05)
+        waiting = not first.done() and not second.done()
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(first, second), 5)
+        return waiting, len(calls), reg
+
+    waiting, asked, reg = _run(scenario())
+    assert waiting and asked == 1 and reg.resolve("gemma@lab") is not None
+
+
+def test_the_discovery_of_a_stand_no_longer_in_the_file_returns_quietly(tmp_path):
+    reg, calls = _registry(manifest(), path=tmp_path / "stands.json")
+    gone = parse_stands(json.dumps([{"id": "gone", "url": "http://gone.example"}]))[0]
+    _run(reg._discover(gone))
+    assert calls == [] and "gone" not in reg._states
 
 
 def test_a_new_stand_in_the_file_appears_after_refresh(tmp_path):
