@@ -324,6 +324,7 @@ async def create_pipeline_run(
     error_stage: str | None = None,
     user_id: str | None = None,
     guest_session_id: str | None = None,
+    stand_build: str | None = None,
 ) -> None:
     """``user_id``/``guest_session_id`` tag the row with its subject so it can be found and
     erased even when ``session_id`` never gets a matching ``conversations`` row — the arena
@@ -352,6 +353,7 @@ async def create_pipeline_run(
             error_stage=error_stage,
             user_id=user_id,
             guest_session_id=guest_session_id,
+            stand_build=stand_build,
         )
     )
 

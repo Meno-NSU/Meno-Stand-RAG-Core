@@ -922,6 +922,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                         guest_session_id=guest_session_id,
                         on_finish=release_all,
                         bench=bench,
+                        capture_trace=capture_trace,
                     ),
                     media_type="text/event-stream",
                     headers=stream_headers,
@@ -960,6 +961,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                 user_id=user_id,
                 guest_session_id=guest_session_id,
                 bench=bench,
+                capture_trace=capture_trace,
             )
         return await _non_stream_response(
             request=request,
@@ -1410,19 +1412,56 @@ def _last_user_message(payload: ChatCompletionRequest) -> str:
     return next((m.content for m in reversed(payload.messages) if m.role == "user"), "")
 
 
-def _external_outcome(payload: ChatCompletionRequest, sources: list[dict], stage_durations: dict[str, float]) -> Any:
-    """What _persist_success reads from a pipeline outcome; the backend's search and prompt stay with it."""
+async def _has_improvement_consent(database: Database, *, user_id: str | None, guest_session_id: str | None) -> bool:
+    """Whether the subject allows MENO_IMPROVEMENT, i.e. whether a stand may be asked for run details.
+    A failing database means no: details are never requested on a guess."""
+    try:
+        async with database.sessionmaker() as session:
+            state = await repositories.current_consent_state(
+                session, user_id=user_id, guest_session_id=guest_session_id
+            )
+        return bool(state["MENO_IMPROVEMENT"])
+    except Exception as exc:
+        logger.warning("improvement_consent_read_failed", error=str(exc))
+        return False
+
+
+def _trace_str(trace: dict, key: str, limit: int | None = None) -> str | None:
+    value = trace.get(key)
+    if not isinstance(value, str):
+        return None
+    return value[:limit] if limit else value
+
+
+def _stand_outcome(payload: ChatCompletionRequest, relay: Relay, *, capture_trace: bool) -> Any:
+    """What _persist_success reads from a pipeline outcome. The stand's own trace (spec 7.5) fills the same
+    fields our pipelines fill; keys of the wrong type are ignored, the rest of the trace stays opaque."""
+    trace = relay.trace or {}
+    queries = trace.get("search_queries")
+    search_queries = [q for q in queries if isinstance(q, str)] if isinstance(queries, list) else None
+    system_prompt, user_prompt = _trace_str(trace, "system_prompt"), _trace_str(trace, "user_prompt")
+    qa_messages = (
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        if system_prompt is not None or user_prompt is not None
+        else []
+    )
+    retrieved = relay.contexts or trace.get("retrieved")
+    fewshots = trace.get("fewshots")
+    trace_details = trace.get("stage_details")
+    stage_details = relay.stage_details or (trace_details if isinstance(trace_details, dict) else {})
     return SimpleNamespace(
         question=_last_user_message(payload),
-        sources=sources,
-        search_queries=None,
-        stage_durations_ms={k: v for k, v in stage_durations.items() if k != StageName.GENERATION},
-        stage_details={},
-        qa_messages=[],
-        prepared_dialogue_history=None,
-        retrieved=None,
-        fewshots=None,
-        trace=None,
+        sources=relay.sources,
+        search_queries=search_queries,
+        stage_durations_ms={k: v for k, v in relay.stage_durations.items() if k != StageName.GENERATION},
+        stage_details=stage_details,
+        qa_messages=qa_messages,
+        prepared_dialogue_history=_trace_str(trace, "dialogue_history"),
+        retrieved=retrieved if isinstance(retrieved, list | dict) else None,
+        fewshots=fewshots if isinstance(fewshots, list | dict) else None,
+        generation_model=_trace_str(trace, "generation_model", 256) or relay.target.model,
+        core_model=_trace_str(trace, "core_model", 256) or relay.target.model,
+        trace={**trace, "contexts": relay.contexts} if capture_trace and relay.trace is not None else None,
     )
 
 
@@ -1439,6 +1478,7 @@ async def _stand_stream_response(
     guest_session_id: str | None,
     on_finish: Callable[[], None] | None,
     bench: bool,
+    capture_trace: bool = False,
 ):
     """Read the stand's stream, check it, send our client what passed and store the answer as for our own
     pipelines. Whatever the stand does wrong ends in the usual error path, never in a broken history."""
@@ -1456,6 +1496,10 @@ async def _stand_stream_response(
     if not bench:
         metrics_mod.inc_chat_in_flight()
     try:
+        # Run details are asked for only for a benchmark or a subject who allowed improvement.
+        want_trace = bench or await _has_improvement_consent(
+            database, user_id=user_id, guest_session_id=guest_session_id
+        )
         # aclosing: when the client leaves, the stand's connection closes here, before `finally` frees the slots.
         async with aclosing(
             relay_stream(
@@ -1464,7 +1508,7 @@ async def _stand_stream_response(
                 stand_request_body(target, payload),
                 relay,
                 request_id=completion_id,
-                trace=bench,
+                trace=want_trace,
                 total_timeout_s=request.app.state.settings.stand_total_timeout_seconds,
             )
         ) as stream:
@@ -1485,6 +1529,7 @@ async def _stand_stream_response(
             metrics_mod.record_bench_request(status="ok")
         else:
             metrics_mod.record_chat_request(provider="external", stream=True, status="ok", seconds=total_ms / 1000.0)
+            outcome = _stand_outcome(payload, relay, capture_trace=capture_trace)
             generation_ms = relay.stage_durations.get(StageName.GENERATION) or round(
                 (time.perf_counter() - (first_token_at or started)) * 1000, 2
             )
@@ -1493,12 +1538,12 @@ async def _stand_stream_response(
                 run_id=completion_id,
                 session_id=session_id,
                 model=target.public_id,
-                generation_model=target.model,
-                core_model=target.model,
+                generation_model=outcome.generation_model,
+                core_model=outcome.core_model,
                 endpoint=target.backend.url,
                 question=_last_user_message(payload),
                 answer=relay.answer,
-                outcome=_external_outcome(payload, relay.sources, relay.stage_durations),
+                outcome=outcome,
                 generation_ms=generation_ms,
                 total_ms=total_ms,
                 stream=True,
@@ -1509,6 +1554,7 @@ async def _stand_stream_response(
                 arena=payload.arena,
                 kb_id=target.kb_id,
                 trace_writer=request.app.state.trace_writer,
+                stand_build=target.build,
             )
     except Exception as exc:
         classified = exc.classified() if isinstance(exc, StandStreamError) else classify_error(exc)
@@ -1569,6 +1615,7 @@ async def _stand_non_stream_response(
     user_id: str | None,
     guest_session_id: str | None,
     bench: bool,
+    capture_trace: bool = False,
 ):
     """A client without streaming gets the answer collected from the stand's stream, checked like a streamed
     one. A failure is the usual error without the stand's own text (that stays in the log and the history)."""
@@ -1581,6 +1628,9 @@ async def _stand_non_stream_response(
     if not bench:
         metrics_mod.inc_chat_in_flight()
     try:
+        want_trace = bench or await _has_improvement_consent(
+            database, user_id=user_id, guest_session_id=guest_session_id
+        )
         async with aclosing(
             relay_stream(
                 registry.http,
@@ -1588,6 +1638,7 @@ async def _stand_non_stream_response(
                 stand_request_body(target, payload),
                 relay,
                 request_id=completion_id,
+                trace=want_trace,
                 total_timeout_s=request.app.state.settings.stand_total_timeout_seconds,
             )
         ) as stream:
@@ -1601,17 +1652,18 @@ async def _stand_non_stream_response(
             metrics_mod.record_bench_request(status="ok")
         else:
             metrics_mod.record_chat_request(provider="external", stream=False, status="ok", seconds=total_ms / 1000.0)
+            outcome = _stand_outcome(payload, relay, capture_trace=capture_trace)
             await _persist_success(
                 database=database,
                 run_id=completion_id,
                 session_id=session_id,
                 model=target.public_id,
-                generation_model=target.model,
-                core_model=target.model,
+                generation_model=outcome.generation_model,
+                core_model=outcome.core_model,
                 endpoint=target.backend.url,
                 question=_last_user_message(payload),
                 answer=answer,
-                outcome=_external_outcome(payload, relay.sources, relay.stage_durations),
+                outcome=outcome,
                 generation_ms=relay.stage_durations.get(StageName.GENERATION) or total_ms,
                 total_ms=total_ms,
                 stream=False,
@@ -1622,8 +1674,9 @@ async def _stand_non_stream_response(
                 arena=payload.arena,
                 kb_id=target.kb_id,
                 trace_writer=request.app.state.trace_writer,
+                stand_build=target.build,
             )
-        return {
+        body = {
             "id": completion_id,
             "object": "chat.completion",
             "created": created_ts,
@@ -1631,6 +1684,10 @@ async def _stand_non_stream_response(
             "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
             "sources": relay.sources,
         }
+        if bench:  # only a benchmark gets the details; a browser never does
+            body["contexts"] = relay.contexts
+            body["pipeline_trace"] = relay.trace
+        return body
     except Exception as exc:
         classified = exc.classified() if isinstance(exc, StandStreamError) else classify_error(exc)
         logger.exception(
@@ -1701,6 +1758,7 @@ async def _persist_success(
     arena: bool = False,
     kb_id: str = LEGACY_KB_ID,
     trace_writer: TraceWriter | None = None,
+    stand_build: str | None = None,
 ) -> None:
     try:
         async with database.sessionmaker() as session:
@@ -1788,6 +1846,7 @@ async def _persist_success(
                     stream=stream,
                     user_id=user_id,
                     guest_session_id=guest_session_id,
+                    stand_build=stand_build,
                 )
                 await session.flush()  # ensure pipeline_run id is visible for generation_record FK
                 for stage, duration_ms in outcome.stage_durations_ms.items():
