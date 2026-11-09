@@ -6,7 +6,10 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import httpx
+import pytest
 from sqlalchemy import text
+from structlog.testing import capture_logs
 
 from meno_rag.db import repositories
 from tests._dbhelpers import with_db
@@ -202,3 +205,67 @@ def test_the_opaque_trace_is_kept_inside_the_sample(make_client, tmp_path):  # n
     assert len(writer.calls) == 1
     kept = writer.calls[0]["trace"]
     assert kept["my_debug"] == 42 and kept["contexts"][0]["id"] == "1" and kept["answer"] == "Сессия в январе"
+
+
+# ---- a stand's error text follows the consent, like the question in the same row
+
+_ECHO_422 = {"detail": [{"type": "missing", "loc": ["body", "x"], "msg": "Field required", "input": ASK}]}
+
+
+def _failing(kind):
+    """A stand that fails with text holding the user's question: a FastAPI 422 echoing the request, or an error
+    event."""
+    inner = stand_handler([])
+
+    def handler(request):
+        if request.url.path != "/v1/chat/completions":
+            return inner(request)
+        if kind == "http_422":
+            return httpx.Response(422, json=_ECHO_422)
+        failing = sse(block("error", {"code": "oom", "message": "failed on: Когда сессия?"}), block(data="[DONE]"))
+        return httpx.Response(200, content=failing, headers={"content-type": "text/event-stream"})
+
+    return handler
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize(
+    "kind,code,stored",
+    [
+        ("http_422", "invalid_upstream_request", "invalid_upstream_request (HTTP 422)"),
+        ("error_event", "stand_error", "stand_error"),
+    ],
+)
+def test_without_consent_a_stand_error_keeps_only_its_code(make_client, tmp_path, stream, kind, code, stored):  # noqa: F811
+    c, db, _ = stand_client(make_client, tmp_path, _failing(kind))
+    with capture_logs() as logs:
+        r = c.post("/v1/chat/completions", json={**ASK, "stream": stream})
+    assert "Когда сессия?" not in r.text
+    run = _run_row(db)
+    assert (run.error, run.error_code, run.user_question) == (stored, code, "")
+    failed = [e for e in logs if e["event"] in ("stand_stream_failed", "stand_non_stream_failed")]
+    assert len(failed) == 1 and failed[0]["error"] == stored and failed[0]["log_level"] == "error"
+    assert not failed[0].get("exc_info")  # a traceback would carry the text again
+    assert not [e for e in logs if "сессия" in json.dumps(e, ensure_ascii=False, default=str)]
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("kind", ["http_422", "error_event"])
+def test_with_consent_a_stand_error_keeps_its_text(make_client, tmp_path, stream, kind):  # noqa: F811
+    c, db, _ = stand_client(make_client, tmp_path, _failing(kind))
+    headers = _consenting_guest(c, db)
+    with capture_logs() as logs:
+        c.post("/v1/chat/completions", json={**ASK, "stream": stream}, headers=headers)
+    run = _run_row(db)
+    assert "Когда сессия?" in run.error and len(run.error) < 600
+    failed = [e for e in logs if e["event"] in ("stand_stream_failed", "stand_non_stream_failed")]
+    assert "Когда сессия?" in failed[0]["error"]
+
+
+def test_a_long_error_event_text_is_cut():
+    from meno_rag.api.stands.relay import Relay, StandStreamError
+
+    r = Relay(completion_id="ours", created=1, target=None)  # type: ignore[arg-type]
+    with pytest.raises(StandStreamError) as e:
+        r._on_error({"code": "oom", "message": "x" * 10_000})
+    assert len(e.value.message) <= 500 and e.value.stand_text

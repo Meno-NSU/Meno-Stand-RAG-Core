@@ -47,19 +47,32 @@ logger = structlog.get_logger(__name__)
 RELAYED_FIELDS = ("max_tokens", "temperature", "top_p", "stop")  # request fields every OpenAI-style API takes
 HARD_BLOCK_BYTES = MAX_TRACE_BLOCK_BYTES  # a block this large (even unfinished) ends the stream
 THREAD_PARSE_BYTES = 256_000  # a larger block is parsed in a thread
+ERROR_TEXT_CHARS = 500  # of a stand's error text kept for the log and pipeline_runs.error
 _TIMEOUT = httpx.Timeout(connect=5.0, read=float(MAX_CHUNK_PAUSE_S), write=30.0, pool=5.0)
 _CODE_RE = re.compile(STAGE_NAME_PATTERN)
 
 
 class StandStreamError(Exception):
-    """The stand's answer cannot go on: its own error or a limit of the gateway."""
+    """The stand's answer cannot go on: its own error or a limit of the gateway. `stand_text`: the message holds the
+    stand's own text, which may echo the user's question; `http_status`: the stand's status before the stream."""
 
-    def __init__(self, code: str, message: str, retryable: bool = False, retry_after_sec: int | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        retryable: bool = False,
+        retry_after_sec: int | None = None,
+        *,
+        stand_text: bool = False,
+        http_status: int | None = None,
+    ) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
         self.retryable = retryable
         self.retry_after_sec = retry_after_sec
+        self.stand_text = stand_text
+        self.http_status = http_status
 
     def classified(self) -> ClassifiedError:
         return classify_stand_error(self.code, self.message, self.retryable, self.retry_after_sec)
@@ -234,7 +247,8 @@ class Relay:
         except ValidationError:
             event = ErrorEvent(message=str(error))
         code = event.code if _CODE_RE.match(event.code) else "stand_error"
-        raise StandStreamError(code, event.message, event.retryable, event.retry_after_sec)
+        message = event.message[:ERROR_TEXT_CHARS]
+        raise StandStreamError(code, message, event.retryable, event.retry_after_sec, stand_text=True)
 
     def _on_error(self, obj: dict) -> list[str]:
         self._raise_error(obj)
@@ -348,18 +362,16 @@ class Relay:
 
 
 def _status_error(status: int, body: str, headers: httpx.Headers) -> StandStreamError:
-    text = f"stand answered {status}: {body[:500]}"
+    text = f"stand answered {status}: {body[:ERROR_TEXT_CHARS]}"
+    code, retryable, retry_after = "transient_upstream_5xx", True, None
     if status == 429:
-        retry_after: int | None = None
         value = headers.get("Retry-After", "")
-        if value.strip().isdigit():
-            retry_after = int(value)
-        return StandStreamError("model_rate_limited", text, retryable=True, retry_after_sec=retry_after)
-    if status == 503:
-        return StandStreamError("model_unreachable", text, retryable=True)
-    if 400 <= status < 500:  # our request or the stand's key is wrong; asking again will not help
-        return StandStreamError("invalid_upstream_request", text)
-    return StandStreamError("transient_upstream_5xx", text, retryable=True)
+        code, retry_after = "model_rate_limited", int(value) if value.strip().isdigit() else None
+    elif status == 503:
+        code = "model_unreachable"
+    elif 400 <= status < 500:  # our request or the stand's key is wrong; asking again will not help
+        code, retryable = "invalid_upstream_request", False
+    return StandStreamError(code, text, retryable, retry_after, stand_text=True, http_status=status)
 
 
 async def _read_prefix(r: httpx.Response, timeout_s: float, limit: int = 2000) -> str:

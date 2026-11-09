@@ -1482,6 +1482,16 @@ async def _has_improvement_consent(database: Database, *, user_id: str | None, g
         return False
 
 
+def _stand_error_text(exc: Exception, classified: ClassifiedError, *, consent: bool) -> tuple[str, bool]:
+    """What a failed stand answer leaves in the log and in pipeline_runs.error, and whether the stand's own text was
+    left out. That text (a FastAPI 422 body echoes the question) follows the improvement consent, as the question in
+    the same row does; without it only the code and the stand's HTTP status remain."""
+    if consent or not (isinstance(exc, StandStreamError) and exc.stand_text):
+        return str(exc), False
+    status = f" (HTTP {exc.http_status})" if exc.http_status else ""
+    return f"{classified.code}{status}", True
+
+
 def _trace_str(trace: dict, key: str, limit: int | None = None) -> str | None:
     value = trace.get(key)
     if not isinstance(value, str):
@@ -1552,8 +1562,9 @@ async def _stand_stream_response(
     )
     if not bench:
         metrics_mod.inc_chat_in_flight()
+    want_trace = False
     try:
-        # Run details are asked for only for a benchmark or a subject who allowed improvement.
+        # Run details, and the stand's own error text, only for a benchmark or a subject who allowed improvement.
         want_trace = bench or await _has_improvement_consent(
             database, user_id=user_id, guest_session_id=guest_session_id
         )
@@ -1619,12 +1630,14 @@ async def _stand_stream_response(
             )
     except Exception as exc:
         classified = exc.classified() if isinstance(exc, StandStreamError) else classify_error(exc)
-        logger.exception(
+        error, withheld = _stand_error_text(exc, classified, consent=want_trace)
+        logger.error(
             "stand_stream_failed",
             request_id=completion_id,
             backend=target.backend.id,
-            error=str(exc),
+            error=error,
             error_code=classified.code,
+            exc_info=not withheld,  # a traceback would carry the text again
         )
         for text in _failure_sse(
             classified,
@@ -1653,7 +1666,7 @@ async def _stand_stream_response(
                 session_id,
                 runtime,
                 payload,
-                str(exc),
+                error,
                 stream=True,
                 classified=classified,
                 stage="generation",
@@ -1693,6 +1706,7 @@ async def _stand_non_stream_response(
     )
     if not bench:
         metrics_mod.inc_chat_in_flight()
+    want_trace = False
     try:
         want_trace = bench or await _has_improvement_consent(
             database, user_id=user_id, guest_session_id=guest_session_id
@@ -1758,12 +1772,14 @@ async def _stand_non_stream_response(
         return body
     except Exception as exc:
         classified = exc.classified() if isinstance(exc, StandStreamError) else classify_error(exc)
-        logger.exception(
+        error, withheld = _stand_error_text(exc, classified, consent=want_trace)
+        logger.error(
             "stand_non_stream_failed",
             request_id=completion_id,
             backend=target.backend.id,
-            error=str(exc),
+            error=error,
             error_code=classified.code,
+            exc_info=not withheld,
         )
         if bench:
             metrics_mod.record_bench_request(status="error")
@@ -1782,7 +1798,7 @@ async def _stand_non_stream_response(
                 session_id,
                 runtime,
                 payload,
-                str(exc),
+                error,
                 stream=False,
                 classified=classified,
                 stage="generation",
