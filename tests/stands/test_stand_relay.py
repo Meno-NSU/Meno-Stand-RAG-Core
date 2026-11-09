@@ -194,7 +194,8 @@ def test_an_error_from_the_stand_stops_the_answer_and_its_text_stays_private(eve
         _feed(_relay(), event, data)
     classified = e.value.classified()
     assert "CUDA" not in classified.user_message and "CUDA" in classified.message
-    assert classified.http_status == 502
+    assert classified.http_status == 502 and classified.code == "stand_error"
+    assert "oom" in classified.message  # the stand's own code goes to the log, not to a metric label
 
 
 def test_an_oversized_answer_stops_with_an_error():
@@ -235,7 +236,7 @@ def test_classify_stand_error_keeps_the_stand_text_out_of_the_user_message():
     known = classify_stand_error("model_rate_limited", "x", retryable=True, retry_after_sec=30)
     assert known.http_status == 429 and known.retry_after_sec == 30 and known.retryable
     other = classify_stand_error("weird", "secret detail")
-    assert other.http_status == 502 and "secret" not in other.user_message and other.message == "secret detail"
+    assert other.http_status == 502 and "secret" not in other.user_message and other.message == "weird: secret detail"
 
 
 def test_the_request_body_always_streams():
@@ -263,7 +264,9 @@ async def _run_relay(*, pieces=None, status=200, headers=None, trace=False, targ
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         if status != 200:
-            return httpx.Response(status, text="upstream says no", headers=headers)
+            return httpx.Response(
+                status, content=body() if pieces is not None else b"upstream says no", headers=headers
+            )
         return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
 
     target = target or _target(manifest(stages=_STAGES))
@@ -403,7 +406,8 @@ def test_the_stands_error_text_is_not_shown_to_the_client(make_client, tmp_path)
     c, db, _ = stand_client(make_client, tmp_path, stand_handler([], stream_body=broken))
     r = _ask(c)
     error = json.loads(next(b for n, b in _events(r) if n == "error").split("data: ", 1)[1])
-    assert error["code"] == "oom" and "CUDA" not in error["message"]
+    assert error["code"] == "stand_error" and "detail" not in error
+    assert "CUDA" not in r.text and "oom" not in r.text
     assert error["should_discard_partial"] is True
     assert r.text.rstrip().endswith("data: [DONE]")
     assert _answers(db) == []
@@ -423,3 +427,49 @@ def test_a_stream_closed_without_done_keeps_the_answer_and_counts_it(make_client
     assert "event: error" not in r.text and r.text.rstrip().endswith("data: [DONE]")
     assert _answers(db) == [("assistant", "Ответ")]
     assert _violations("lab", "no_done") == before + 1
+
+
+def test_an_unknown_stand_code_never_becomes_a_label_or_a_client_code():
+    unknown = classify_stand_error("err_4f8a1c", "boom")
+    assert unknown.code == "stand_error" and "err_4f8a1c" in unknown.message
+    assert classify_stand_error("model_rate_limited", "x").code == "model_rate_limited"
+    assert classify_stand_error("too_long", "x").code == "too_long"
+
+
+def test_a_violation_is_logged_with_its_reason_even_without_metrics():
+    from structlog.testing import capture_logs
+
+    r = _relay(record_metrics=False)
+    with capture_logs() as logs:
+        _feed(r, "stage", {"stage": "Bad Name", "status": "started"})
+    entry = next(e for e in logs if e["event"] == "stand_contract_violation")
+    assert entry["stand"] == "lab" and entry["kind"] == "bad_event" and entry["request_id"] == "ours"
+    assert entry["reason"]
+
+
+async def test_done_ends_the_answer_even_if_the_stand_stays_silent():
+    r = await _run_relay(
+        pieces=[sse(block(data=chunk("Ответ")), block(data="[DONE]")), 5.0, sse(block(data=chunk("лишнее")))],
+        total_timeout_s=0.3,
+    )
+    assert r.done and r.answer == "Ответ"
+
+
+async def test_text_after_done_is_not_part_of_the_answer():
+    r = await _run_relay(pieces=[sse(block(data=chunk("Ответ")), block(data="[DONE]"), block(data=chunk("лишнее")))])
+    assert r.answer == "Ответ"
+
+
+async def test_a_huge_error_body_is_read_only_in_part():
+    big = [b"x" * 1_000_000] * 3
+    with pytest.raises(StandStreamError) as e:
+        await _run_relay(status=500, pieces=big, total_timeout_s=0.05)
+    assert len(e.value.message) < 600
+
+
+async def test_a_stalled_error_body_does_not_outlive_the_total_limit():
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(StandStreamError) as e:
+        await _run_relay(status=500, pieces=[b"partial", 5.0, b"never"], total_timeout_s=0.1)
+    assert loop.time() - started < 2.0 and e.value.code == "transient_upstream_5xx"

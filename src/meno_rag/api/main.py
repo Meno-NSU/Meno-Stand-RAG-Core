@@ -1338,6 +1338,7 @@ def _failure_sse(
     completion_id: str,
     created_ts: int,
     public_model: str,
+    include_detail: bool = True,
 ) -> list[str]:
     """What the client gets when a streamed answer fails: the failed stage, the structured error event, the
     same error in an OpenAI chunk and [DONE]."""
@@ -1345,6 +1346,8 @@ def _failure_sse(
     # "started" and will keep spinning unless we explicitly mark it FAILED. Emit a stage event before the error
     # so any UI watching `event: stage` transitions closes the spinner.
     error = _classified_error_payload(classified, retry_id=completion_id, stage=stage)["error"]
+    if not include_detail:
+        error.pop("detail", None)  # a stand's text is for the log, not for the client
     # A dedicated SSE error event with the structured payload lets frontends show a Retry button and a
     # human-readable message without parsing free-form text.
     # The legacy openai-chunk format is kept too so existing clients close cleanly: the same payload is
@@ -1492,6 +1495,7 @@ async def _stand_stream_response(
             completion_id=completion_id,
             created_ts=created_ts,
             public_model=target.public_id,
+            include_detail=False,
         ):
             yield text
         if bench:

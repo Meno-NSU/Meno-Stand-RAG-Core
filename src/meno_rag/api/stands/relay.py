@@ -8,6 +8,7 @@ counted per stand. Whatever the stand sends cannot break the history, the arena 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -107,7 +108,16 @@ class Relay:
     def answer(self) -> str:
         return "".join(self.parts)
 
-    def violation(self, kind: str) -> None:
+    def violation(self, kind: str, reason: str) -> None:
+        """A departure from the contract: always logged (the stand author's debugging tool), counted only
+        when metrics are on."""
+        logger.warning(
+            "stand_contract_violation",
+            stand=self.target.backend.id,
+            kind=kind,
+            reason=reason,
+            request_id=self.completion_id,
+        )
         if self.record_metrics:
             metrics.record_stand_violation(self.target.backend.id, kind)
 
@@ -121,14 +131,14 @@ class Relay:
             return []  # the stand's summary and events from the future: ours replace or ignore them
         limit = MAX_TRACE_BLOCK_BYTES if block.event in ("contexts", "pipeline_trace") else MAX_BLOCK_BYTES
         if block.raw_size > limit:
-            self.violation("block_too_large")
+            self.violation("block_too_large", f"{block.event} block of {block.raw_size} bytes is over the limit")
             return []
         obj = _json(block.data)
         if obj is _BAD:
-            self.violation("bad_json")
+            self.violation("bad_json", "data is not JSON")
             return []
         if not isinstance(obj, dict):
-            self.violation("bad_event")
+            self.violation("bad_event", f"{block.event} data is not a JSON object")
             return []
         return handler(self, obj)
 
@@ -137,21 +147,21 @@ class Relay:
             self._raise_error(obj["error"])
         choices = obj.get("choices")
         if not isinstance(choices, list):
-            self.violation("bad_event")
+            self.violation("bad_event", "chunk has no choices list")
             return []
         if not choices:
             return []  # the usage chunk many servers send last
         first = choices[0]
         delta = first.get("delta") if isinstance(first, dict) else None
         if not isinstance(delta, dict):
-            self.violation("bad_event")
+            self.violation("bad_event", "chunk delta is not an object")
             return []
         out_delta: dict[str, Any] = {}
         if isinstance(delta.get("role"), str):
             out_delta["role"] = delta["role"]
         content = delta.get("content")
         if content is not None and not isinstance(content, str):
-            self.violation("bad_event")
+            self.violation("bad_event", "delta content is not a string")
             return []
         if content:
             self._chars += len(content)
@@ -190,8 +200,8 @@ class Relay:
     def _on_stage(self, obj: dict) -> list[str]:
         try:
             event = StageEvent.model_validate(obj)
-        except ValidationError:
-            self.violation("bad_event")
+        except ValidationError as exc:
+            self.violation("bad_event", f"stage event rejected: {exc.errors()[0]['msg']}")
             return []
         manifest = self.target.manifest
         payload: dict[str, Any] = {"stage": event.stage, "status": event.status}
@@ -200,7 +210,7 @@ class Relay:
             if label is not None:
                 payload["labels"] = label.model_dump()
             elif event.stage not in STANDARD_STAGES:
-                self.violation("unknown_stage")
+                self.violation("unknown_stage", f"stage {event.stage!r} is not in the manifest")
         if event.duration_ms is not None:
             payload["duration_ms"] = event.duration_ms
             self.stage_durations[event.stage] = self.stage_durations.get(event.stage, 0.0) + event.duration_ms
@@ -211,39 +221,39 @@ class Relay:
 
     def _on_sources(self, obj: dict) -> list[str]:
         if not isinstance(obj.get("sources"), list):
-            self.violation("bad_event")
+            self.violation("bad_event", "sources is not a list")
             return []
         rows, dropped = clean_sources(obj["sources"])
         if dropped:
-            self.violation("bad_event")
+            self.violation("bad_event", f"{dropped} sources dropped")
         self.sources = rows
         return [sse_event("sources", {"sources": rows})]
 
     def _on_thinking(self, obj: dict) -> list[str]:
         content = obj.get("content")
         if not isinstance(content, str):
-            self.violation("bad_event")
+            self.violation("bad_event", "thinking content is not a string")
             return []
         return [sse_event("thinking", {"content": content})]
 
     def _on_contexts(self, obj: dict) -> list[str]:
         raw = obj.get("contexts")
         if not isinstance(raw, list):
-            self.violation("bad_event")
+            self.violation("bad_event", "contexts is not a list")
             return []
         rows: list[dict] = []
         for item in raw:
             try:
                 rows.append(Context.model_validate(item).model_dump())
             except ValidationError:
-                self.violation("bad_event")
+                self.violation("bad_event", "a context was rejected")
         self.contexts = rows
         return [sse_event("contexts", {"contexts": rows})] if self.pass_trace else []
 
     def _on_trace(self, obj: dict) -> list[str]:
         trace = obj.get("pipeline_trace")
         if not isinstance(trace, dict):
-            self.violation("bad_event")
+            self.violation("bad_event", "pipeline_trace is not an object")
             return []
         self.trace = trace
         return [sse_event("pipeline_trace", {"pipeline_trace": trace})] if self.pass_trace else []
@@ -292,6 +302,22 @@ def _status_error(status: int, body: str, headers: httpx.Headers) -> StandStream
     return StandStreamError("transient_upstream_5xx", text, retryable=True)
 
 
+async def _read_prefix(r: httpx.Response, timeout_s: float, limit: int = 2000) -> str:
+    """The start of an error body, read within the time left and never more than `limit` bytes: the rest of
+    a stand's body is of no use and must not hold the slot or the memory."""
+    data = bytearray()
+
+    async def read() -> None:
+        async for piece in r.aiter_bytes():
+            data.extend(piece)
+            if len(data) >= limit:
+                return
+
+    with contextlib.suppress(TimeoutError, httpx.HTTPError):  # what arrived so far is enough for the log
+        await asyncio.wait_for(read(), timeout_s)
+    return bytes(data[:limit]).decode("utf-8", errors="replace")
+
+
 async def relay_stream(
     http: httpx.AsyncClient,
     target: StandTarget,
@@ -314,7 +340,7 @@ async def relay_stream(
     deadline = loop.time() + total_timeout_s
     async with http.stream("POST", url, json=body, headers=headers, timeout=_TIMEOUT) as r:
         if r.status_code >= 400:
-            text = (await r.aread()).decode("utf-8", errors="replace")
+            text = await _read_prefix(r, max(0.0, deadline - loop.time()))
             raise _status_error(r.status_code, text, r.headers)
         blocks = iter_blocks(r.aiter_text(), max_bytes=HARD_BLOCK_BYTES).__aiter__()
         try:
@@ -331,7 +357,9 @@ async def relay_stream(
                     raise StandStreamError("stand_block_too_large", str(exc)) from exc
                 for text in relay.handle(block):
                     yield text
+                if relay.done:
+                    break  # [DONE] ends the answer; whatever the stand does after it is not ours to wait for
         finally:
             await blocks.aclose()
     if not relay.done:
-        relay.violation("no_done")
+        relay.violation("no_done", "the stream ended without [DONE]")
