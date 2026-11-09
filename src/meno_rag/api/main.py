@@ -778,8 +778,6 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
         base_model, virtual = split_virtual_model(payload.model)
         # «Менон 1.1» model entries always run the v2 pipeline, whatever base the client sent.
         pipeline, kb_id = _select_pipeline(request.app, V2_KB_ID if virtual else payload.knowledge_base_id)
-        if pipeline is None and (kb_id or not any(p is not None for p in _pipelines(request.app.state).values())):
-            return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
 
     # Benchmark requests are recognised before anything else: they pick a
     # different admission budget, force trace capture, and skip persistence.
@@ -807,6 +805,14 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
     if external is not None and payload.arena and not external.arena:
         _record_preflight_failure("stand_not_in_arena", bench=bench)
         return _error_response(403, "This stand does not take part in the arena.", "stand_not_in_arena")
+
+    # Checked after the stand gates: an unknown stand id must say model_not_found, not blame our resources.
+    if (
+        external is None
+        and pipeline is None
+        and (kb_id or not any(p is not None for p in _pipelines(request.app.state).values()))
+    ):
+        return _error_response(503, "RAG resources are not initialized.", "service_unavailable")
 
     # Admission control: fast-fail under overload rather than queueing forever.
     admission: AdmissionController = request.app.state.bench_admission if bench else request.app.state.admission

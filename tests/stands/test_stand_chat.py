@@ -192,17 +192,30 @@ def test_slots_are_free_after_an_answer(make_client, tmp_path, stream):  # noqa:
 # ---- gates
 
 
+@pytest.mark.parametrize("pipelines_up", [True, False])
 @pytest.mark.parametrize("model", ["gone@lab", "gemma@removed"])
-def test_a_vanished_model_is_a_clear_error(make_client, tmp_path, model):  # noqa: F811
+def test_a_vanished_model_is_a_clear_error(make_client, tmp_path, model, pipelines_up):  # noqa: F811
     seen = []
-    c, _, _ = stand_client(make_client, tmp_path, stand_handler(seen))
-    c.app.state.pipeline = RecordingLegacy()
+    kw = {} if pipelines_up else {"legacy_up": False, "v2_up": False}
+    c, _, _ = stand_client(make_client, tmp_path, stand_handler(seen), client_kw=kw)
+    c.app.state.pipeline = RecordingLegacy() if pipelines_up else None
     r = c.post("/v1/chat/completions", json={**ASK, "model": model})
     assert r.status_code == 400 and r.json()["error"]["code"] == "model_not_found"
     assert r.json()["error"]["param"] == "model"
-    assert not c.app.state.pipeline.prepare_called
+    assert not (c.app.state.pipeline and c.app.state.pipeline.prepare_called)
     assert seen == []
     assert c.app.state.admission.active == 0
+
+
+def test_a_stand_without_a_manifest_is_kept_out_of_the_arena(make_client, tmp_path):  # noqa: F811
+    seen = []
+    c, _, reg = stand_client(make_client, tmp_path, stand_handler(seen, manifest=None), [{**LAB, "arena": True}])
+    assert reg.resolve("gemma@lab").manifest is None
+    r = c.post("/v1/chat/completions", json={**ASK, "arena": True})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "stand_not_in_arena"
+    assert seen == []
+    assert c.post("/v1/chat/completions", json=ASK).status_code == 200
+    _slots_free(c, reg.resolve("gemma@lab"))
 
 
 def test_a_stand_outside_the_arena_refuses_arena_requests(make_client, tmp_path):  # noqa: F811

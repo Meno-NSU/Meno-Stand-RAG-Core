@@ -101,9 +101,9 @@ def stand_handler(seen, *, stream_body=UPSTREAM_STREAM, manifest=_DEFAULT, down=
     return handler
 
 
-def stand_client(make_client, tmp_path, handler, stands=None):
+def stand_client(make_client, tmp_path, handler, stands=None, client_kw=None):
     """A gateway client whose stand registry reads `stands` (default: LAB) and talks to `handler`."""
-    c, db = make_client()
+    c, db = make_client(**(client_kw or {}))
     path = write_stands(Path(tmp_path) / "stands.json", [LAB] if stands is None else stands)
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     registry = StandRegistry(str(path), http_client=http)
