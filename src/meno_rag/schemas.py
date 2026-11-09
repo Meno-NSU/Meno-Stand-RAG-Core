@@ -105,8 +105,9 @@ class ConversationResponse(BaseModel):
 
 class VoteRequest(BaseModel):
     # An empty model string is nonsensical for arena (it makes leaderboard rows that can never be
-    # matched again) — reject it at the schema layer. kb_a/kb_b are only kept for older clients: the
-    # server decides the rating key (stand@version) itself and ignores them, so they may be empty.
+    # matched again) — reject it at the schema layer. kb_a/kb_b name one of our own bases for a vote on
+    # our own pipeline (see rating_kb) and may be empty; for a stand the server decides the rating key
+    # (stand@version) itself and ignores them.
     model_a: str = Field(..., min_length=1, max_length=256)
     kb_a: str = Field(default="", max_length=128)
     model_b: str = Field(..., min_length=1, max_length=256)

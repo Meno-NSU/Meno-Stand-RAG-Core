@@ -224,4 +224,4 @@ def test_db_row_has_v2_participant_label(make_client):
         return (await session.execute(text("SELECT knowledge_base_id FROM messages"))).scalars().all()
 
     # History is stored unconditionally (no improvement consent needed): user + assistant rows.
-    assert with_db(db_path, _read) == ["menon-1.1@unversioned"] * 2
+    assert with_db(db_path, _read) == [V2_KB_ID] * 2

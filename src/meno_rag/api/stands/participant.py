@@ -1,14 +1,15 @@
 """Who took part: a stand, its version and an LLM. The server decides it, never the client.
 
-The label `<stand>@<version>` is what history rows, ratings and metrics carry as the knowledge base. v1 and v2
-run inside this process and are described by the same kind of record."""
+A stand's history rows and ratings carry the label `<stand>@<version>` as the knowledge base. v1 and v2 run inside
+this process and are described by the same kind of record, with one difference: what is stored and rated for them is
+their knowledge base id, so that their existing rating rows go on. Their stand and version reach only the metrics."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
-from meno_rag.api.knowledge_bases import V2_KB_ID, split_virtual_model
+from meno_rag.api.knowledge_bases import LEGACY_KB_ID, V2_KB_ID, split_virtual_model
 from meno_rag.api.stands.config import STAND_ID
 from meno_rag.api.stands.registry import StandRegistry
 from meno_rag.config import Settings
@@ -24,10 +25,11 @@ class Participant:
     stand: str
     version: str
     llm: str
+    builtin_kb: str | None = None  # set for our own pipelines only
 
     @property
     def kb(self) -> str:
-        return f"{self.stand}@{self.version}"
+        return self.builtin_kb if self.builtin_kb is not None else f"{self.stand}@{self.version}"
 
 
 def participant_for(
@@ -39,13 +41,13 @@ def participant_for(
         return Participant(target.backend.id, target.version, target.model)
     base, virtual = split_virtual_model(public_model)
     if virtual:
-        return Participant(V2_STAND_ID, settings.v2_version, base or public_model)
+        return Participant(V2_STAND_ID, settings.v2_version, base or public_model, V2_KB_ID)
     llm, _, stand = public_model.rpartition("@")
     if llm and STAND_ID.fullmatch(stand):  # anything else is not a stand id and must not grow a label
         return Participant(stand, UNKNOWN_VERSION, llm)
     if kb_hint == V2_KB_ID:
-        return Participant(V2_STAND_ID, settings.v2_version, public_model)
-    return Participant(LEGACY_STAND_ID, settings.legacy_version, public_model)
+        return Participant(V2_STAND_ID, settings.v2_version, public_model, V2_KB_ID)
+    return Participant(LEGACY_STAND_ID, settings.legacy_version, public_model, LEGACY_KB_ID)
 
 
 def stored_participant(public_model: str, stored_kb: str | None) -> Participant | None:
@@ -59,11 +61,19 @@ def stored_participant(public_model: str, stored_kb: str | None) -> Participant 
     return Participant(stand, version, llm)
 
 
+def rating_kb(participant: Participant, client_kb: str | None) -> str:
+    """The knowledge base stored and rated for a participant. Today's frontend names our bases itself and their rows
+    go on under those names; no other client value is taken, so a vote cannot reach a stand's row through our model."""
+    if participant.builtin_kb is not None and client_kb in (LEGACY_KB_ID, V2_KB_ID):
+        return client_kb
+    return participant.kb
+
+
 def builtin_live_kbs(settings: Settings) -> set[str]:
-    """The labels of our own pipelines that are served now."""
+    """The knowledge base ids of our own pipelines that are served now."""
     live = set()
     if settings.legacy_enabled:
-        live.add(Participant(LEGACY_STAND_ID, settings.legacy_version, "").kb)
+        live.add(LEGACY_KB_ID)
     if settings.v2_enabled:
-        live.add(Participant(V2_STAND_ID, settings.v2_version, "").kb)
+        live.add(V2_KB_ID)
     return live

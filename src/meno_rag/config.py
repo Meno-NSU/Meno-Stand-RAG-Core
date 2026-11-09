@@ -213,7 +213,7 @@ class Settings(BaseSettings):
     legacy_enabled: bool = Field(default=True, validation_alias="LEGACY_ENABLED")
     # Serve the v2 pipeline (nsu-kb-2026-11).
     v2_enabled: bool = Field(default=False, validation_alias="V2_ENABLED")
-    # Versions of our own pipelines in history and rating labels ("menon-1.0@<legacy>", "menon-1.1@<v2>").
+    # Versions of our own pipelines in metric labels (stands "menon-1.0" and "menon-1.1"); not stored or rated.
     legacy_version: str = Field(default="2026-07", validation_alias="LEGACY_VERSION")
     v2_version: str = Field(default="unversioned", validation_alias="V2_VERSION")
     # Model entries offering the v2 pipeline: "base_id=display name;...".
