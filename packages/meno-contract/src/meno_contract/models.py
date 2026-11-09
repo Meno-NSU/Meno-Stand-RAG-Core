@@ -23,6 +23,10 @@ STANDARD_STAGES = frozenset(
 MAX_DETAIL_LINES = 50
 MAX_DETAIL_LINE_CHARS = 500
 MAX_SOURCES = 20
+# Gateway limits shared with the checker so that both judge a stand the same way.
+MAX_BLOCK_BYTES = 1_000_000  # one SSE block; contexts and pipeline_trace may be larger
+MAX_TRACE_BLOCK_BYTES = 16_000_000
+MAX_ANSWER_CHARS = 40_000
 
 VERSION_PATTERN = r"^[A-Za-z0-9._+-]{1,64}$"
 STAGE_NAME_PATTERN = r"^[a-z0-9_]{1,64}$"

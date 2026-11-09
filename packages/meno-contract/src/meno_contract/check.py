@@ -18,12 +18,21 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from meno_contract.models import PROTOCOL, STANDARD_STAGES, Context, Manifest, StageEvent, clean_sources
+from meno_contract.models import (
+    MAX_ANSWER_CHARS,
+    MAX_BLOCK_BYTES,
+    MAX_TRACE_BLOCK_BYTES,
+    PROTOCOL,
+    STANDARD_STAGES,
+    Context,
+    Manifest,
+    StageEvent,
+    clean_sources,
+)
 from meno_contract.sse import SseBlockTooLarge, iter_blocks
 
 QUESTION = "Привет! Расскажи коротко, что такое НГУ."
 UNKNOWN_MODEL = "meno-check-no-such-model"
-MAX_BLOCK_BYTES = 16 * 1024 * 1024
 
 
 @dataclass
@@ -77,6 +86,7 @@ class _Stream:
     contexts_events: int = 0
     errors: list[str] = field(default_factory=list)
     first_token_s: float | None = None
+    too_long: bool = False
     failure: str = ""  # connection-level failure; the other fields are then incomplete
 
 
@@ -98,13 +108,20 @@ async def _read_stream(
                 await response.aread()
                 seen.failure = f"Стенд ответил HTTP {response.status_code}: {response.text[:200]!r}"
                 return seen
-            async for block in iter_blocks(response.aiter_text(), max_bytes=MAX_BLOCK_BYTES):
+            async for block in iter_blocks(response.aiter_text(), max_bytes=MAX_TRACE_BLOCK_BYTES):
                 if seen.done:
                     seen.after_done += 1
                     continue
+                if block.event not in ("contexts", "pipeline_trace") and block.raw_size > MAX_BLOCK_BYTES:
+                    seen.problems.append(
+                        f"Блок {block.event!r} занимает {block.raw_size} байт, шлюз принимает не больше "
+                        f"{MAX_BLOCK_BYTES} (для contexts и pipeline_trace до {MAX_TRACE_BLOCK_BYTES}). "
+                        "Шлите ответ частями."
+                    )
+                    continue
                 _take_block(seen, block.event, block.data, started)
     except SseBlockTooLarge:
-        seen.problems.append("Блок SSE больше 16 МБ. Шлите ответ частями, а не одним блоком.")
+        seen.problems.append(f"Блок SSE больше {MAX_TRACE_BLOCK_BYTES} байт. Шлите ответ частями, а не одним блоком.")
     except httpx.TimeoutException:
         seen.failure = f"Стенд молчал дольше {first_token_limit_s:g} с. Первый токен нужно выдать быстрее."
     except httpx.HTTPError as exc:
@@ -130,6 +147,9 @@ def _take_block(seen: _Stream, event: str, data: str, started: float) -> None:
             if seen.first_token_s is None:
                 seen.first_token_s = time.monotonic() - started
             seen.content += text
+            if len(seen.content) > MAX_ANSWER_CHARS and not seen.too_long:
+                seen.too_long = True
+                seen.problems.append(f"Ответ длиннее {MAX_ANSWER_CHARS} символов: шлюз оборвёт его. Сократите ответ.")
         return
     if event not in ("stage", "sources", "contexts", "error"):
         return  # thinking, pipeline_trace and unknown events are allowed

@@ -109,3 +109,26 @@ async def test_think_in_the_answer_is_a_warning_only():
 
 def test_main_returns_nonzero_when_the_stand_is_down():
     assert main(["http://127.0.0.1:9"]) == 1
+
+
+def _oversize_client(event):
+    big = "x" * 1_100_000
+    payload = {"sources": [{"document_title": big, "source_url": ""}]} if event == "sources" else {"pad": big}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/meno/v1/manifest":
+            return httpx.Response(200, json=MANIFEST)
+        if json.loads(request.content)["model"] != "m1":
+            return httpx.Response(400, json={"error": {"message": "unknown model"}})
+        trace = request.headers.get("X-Meno-Trace") == "1"
+        text = _stream(None, trace).replace("data: [DONE]", _sse(payload, event) + "data: [DONE]")
+        return httpx.Response(200, content=text, headers={"content-type": "text/event-stream"})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_a_block_over_the_gateway_limit_fails_unless_it_is_contexts():
+    report = await run_checks(_oversize_client("sources"), "http://stand")
+    assert not report.ok and "шлюз принимает не больше" in format_report(report)
+    report = await run_checks(_oversize_client("pipeline_trace"), "http://stand")
+    assert report.ok, format_report(report)
