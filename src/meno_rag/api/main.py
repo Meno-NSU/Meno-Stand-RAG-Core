@@ -47,7 +47,13 @@ from meno_rag.api.runtime_resolver import (
     ModelUnreachableError,
     resolve_pipeline_runtime,
 )
-from meno_rag.api.stands.participant import Participant, listed_by_provider, participant_for
+from meno_rag.api.stands.participant import (
+    LEGACY_STAND_ID,
+    V2_STAND_ID,
+    Participant,
+    listed_by_provider,
+    participant_for,
+)
 from meno_rag.api.stands.registry import StandRegistry, StandTarget
 from meno_rag.api.stands.relay import Relay, StandStreamError, relay_stream, stand_request_body
 from meno_rag.api.validation import sanitize_validation_errors
@@ -252,13 +258,14 @@ async def lifespan(app: FastAPI):
 
     # A missing or broken STANDS_FILE is logged and counted (meno_stand_config_errors), and the service starts with
     # no stands, serving our own pipelines; the file is read again on refresh once it changes. The first discovery
-    # is awaited, bounded by the registry's deadline per stand.
+    # is awaited, bounded by the registry's deadline per stand. Our own stand ids are taken whatever is enabled: a
+    # stand under one of them would share the metric labels of our pipeline (and <llm>@menon-1.1 names in-process v2).
     stand_registry = StandRegistry(
         settings.stands_file,
         http_client=stand_http_client,
         timeout=settings.model_discovery_timeout_seconds,
         cache_ttl=settings.model_cache_ttl_seconds,
-        reserved_ids=frozenset({"menon-1.1"}) if settings.v2_enabled else frozenset(),
+        reserved_ids=frozenset({LEGACY_STAND_ID, V2_STAND_ID}),
     )
     await stand_registry.refresh()
 

@@ -481,6 +481,21 @@ def test_our_own_v2_id_is_reserved_when_v2_is_on(make_client, tmp_path, monkeypa
     assert _metric("meno_stand_config_errors_total") == before + 1
 
 
+@pytest.mark.parametrize("sid", ["menon-1.0", "menon-1.1"])
+@pytest.mark.parametrize("legacy,v2", [(True, True), (True, False), (False, True), (False, False)])
+def test_our_own_stand_ids_are_always_reserved(make_client, tmp_path, monkeypatch, caplog, sid, legacy, v2):  # noqa: F811
+    # The file is refused as any broken file at the start: logged, counted, and the service has no stands. The app
+    # start configures structlog anew, so the log is read from the standard logging records it ends in.
+    stands = [{"id": "lab", "url": "http://127.0.0.1:9"}, {"id": sid, "url": "http://127.0.0.1:9"}]
+    monkeypatch.setenv("STANDS_FILE", str(write_stands(tmp_path / "s.json", stands)))
+    before = _metric("meno_stand_config_errors_total")
+    c, _ = make_client(legacy=legacy, v2=v2)
+    assert not c.app.state.stand_registry._stands
+    assert _metric("meno_stand_config_errors_total") == before + 1
+    logged = [json.loads(r.getMessage()) for r in caplog.records if "stands_file_invalid" in r.getMessage()]
+    assert [e["event"] for e in logged] == ["stands_file_invalid"] and sid in logged[0]["error"]
+
+
 def test_models_refresh_picks_up_a_stand_added_after_the_start(make_client, tmp_path):  # noqa: F811
     c, _, reg = stand_client(make_client, tmp_path, stand_handler([]), stands=[])
     assert not [m for m in c.get("/v1/models").json()["data"] if m.get("provider") == "external"]

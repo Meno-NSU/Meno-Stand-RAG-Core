@@ -249,6 +249,7 @@ To connect one:
    `PYTHONPATH=packages/meno-contract/src python -m meno_contract.check http://host:port --key KEY`.
 2. Copy `stands.example.json` to a file outside git, add an entry (`id`, `url`, optional `api_key`, `arena`,
    `max_concurrent`, `name`), and point `STANDS_FILE` at it. Set `"arena": true` only after `check-backend` passes.
+   The ids `menon-1.0` and `menon-1.1` belong to our own pipelines: a file that uses one counts as broken.
 3. Apply it without a restart: `curl -X POST http://127.0.0.1:9006/v1/models/refresh`. A broken file keeps the
    previous list; at the start a missing or broken file means no stands, and our own models are served as usual.
    Either case is logged as an error and counted in `meno_stand_config_errors`; the file is read again once it
