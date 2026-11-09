@@ -26,11 +26,8 @@ from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
 from meno_rag.api.external import (
-    ExternalRegistry,
-    ExternalTarget,
     Relay,
     complete,
-    parse_external_backends,
     relay_stream,
     upstream_body,
 )
@@ -49,6 +46,7 @@ from meno_rag.api.runtime_resolver import (
     ModelUnreachableError,
     resolve_pipeline_runtime,
 )
+from meno_rag.api.stands.registry import StandRegistry, StandTarget
 from meno_rag.api.validation import sanitize_validation_errors
 from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings, parse_cors_origins
@@ -249,14 +247,15 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("openrouter_startup_discovery_failed", error=str(exc))
 
-    # Raises on a bad EXTERNAL_BACKENDS, so a typo stops the start instead of hiding the backends.
-    external_registry = ExternalRegistry(
-        parse_external_backends(settings.external_backends),
+    # Raises on a bad STANDS_FILE, so a typo stops the start instead of hiding the stands.
+    stand_registry = StandRegistry(
+        settings.stands_file,
         http_client=http_client,
         timeout=settings.model_discovery_timeout_seconds,
         cache_ttl=settings.model_cache_ttl_seconds,
+        reserved_ids=frozenset({"menon-1.1"}) if settings.v2_enabled else frozenset(),
     )
-    await external_registry.refresh()
+    await stand_registry.refresh()
 
     llm_router = LLMRouter(
         vllm=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
@@ -331,7 +330,7 @@ async def lifespan(app: FastAPI):
     app.state.openrouter_registry = openrouter_registry
     app.state.openrouter_client = openrouter_client
     app.state.model_status_store = status_store
-    app.state.external_registry = external_registry
+    app.state.stand_registry = stand_registry
     app.state.llm_router = llm_router
     app.state.admission = AdmissionController(settings.max_concurrent_chats)
     # Benchmark traffic draws from its own budget so a dev's benchmark run can
@@ -604,14 +603,14 @@ async def list_models(request: Request):
 
     if getattr(request.app.state, "v2_pipeline", None) is not None:
         merged.extend(virtual_model_entries(settings, merged))
-    external = _external_registry(request.app)
-    if external is not None:
-        merged.extend(await external.entries())
+    stands = _stand_registry(request.app)
+    if stands is not None:
+        merged.extend(await stands.entries())
 
     current_user = await auth.resolve_optional_user(request)
     if settings.auth_enabled and current_user is None:
         for entry in merged:
-            if entry.get("provider") == "openrouter":
+            if entry.get("provider") == "openrouter" or entry.get("auth_required"):
                 entry["requires_auth"] = True
 
     core_model_id = resolve_core_model_id_sync(
@@ -632,9 +631,9 @@ async def refresh_models(request: Request):
     refreshes: list[Any] = [vllm_registry.refresh()]
     if or_registry is not None:
         refreshes.append(or_registry.discover())
-    external = _external_registry(request.app)
-    if external is not None and external.backends:
-        refreshes.append(external.refresh())
+    stands = _stand_registry(request.app)
+    if stands is not None:
+        refreshes.append(stands.refresh())
     await asyncio.gather(*refreshes)
     return await list_models(request)
 
@@ -778,7 +777,7 @@ def _record_preflight_failure(code: str, *, bench: bool) -> None:
 @app.post("/v1/chat/completions")
 async def chat_completions(payload: ChatCompletionRequest, request: Request, response: Response):
     # A model entry of an external backend: the whole answer comes from that backend.
-    external = _external_target(request.app, payload.model)
+    external = _stand_target(request.app, payload.model)
     if external is not None:
         base_model, virtual, pipeline, kb_id = payload.model, False, None, external.kb_id
     else:
@@ -819,7 +818,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
         settings: Settings = request.app.state.settings
         try:
             if external is not None:
-                runtime = _external_runtime(external)
+                runtime = _stand_runtime(external)
             else:
                 runtime = await _resolve_runtime(request.app, base_model if virtual else payload.model)
         except ValueError as exc:
@@ -1351,16 +1350,16 @@ async def _stream_response(
             on_finish()
 
 
-def _external_registry(app: FastAPI) -> ExternalRegistry | None:
-    return getattr(app.state, "external_registry", None)
+def _stand_registry(app: FastAPI) -> StandRegistry | None:
+    return getattr(app.state, "stand_registry", None)
 
 
-def _external_target(app: FastAPI, model: str | None) -> ExternalTarget | None:
-    registry = _external_registry(app)
+def _stand_target(app: FastAPI, model: str | None) -> StandTarget | None:
+    registry = _stand_registry(app)
     return registry.resolve(model) if registry is not None else None
 
 
-def _external_runtime(target: ExternalTarget) -> PipelineRuntime:
+def _stand_runtime(target: StandTarget) -> PipelineRuntime:
     return PipelineRuntime.uniform(
         ModelRuntime(provider="external", model_id=target.model, base_url=target.backend.url)
     )
@@ -1390,7 +1389,7 @@ async def _external_stream_response(
     *,
     request: Request,
     payload: ChatCompletionRequest,
-    target: ExternalTarget,
+    target: StandTarget,
     runtime: PipelineRuntime,
     completion_id: str,
     created_ts: int,
@@ -1401,7 +1400,7 @@ async def _external_stream_response(
     bench: bool,
 ):
     """Relay the external backend's stream, then store the answer as for our own pipelines."""
-    registry = _external_registry(request.app)
+    registry = _stand_registry(request.app)
     database: Database = request.app.state.database
     started = time.perf_counter()
     first_token_at: float | None = None
@@ -1516,7 +1515,7 @@ async def _external_non_stream_response(
     *,
     request: Request,
     payload: ChatCompletionRequest,
-    target: ExternalTarget,
+    target: StandTarget,
     runtime: PipelineRuntime,
     completion_id: str,
     session_id: str,
@@ -1524,7 +1523,7 @@ async def _external_non_stream_response(
     guest_session_id: str | None,
     bench: bool,
 ):
-    registry = _external_registry(request.app)
+    registry = _stand_registry(request.app)
     database: Database = request.app.state.database
     started = time.perf_counter()
     if not bench:

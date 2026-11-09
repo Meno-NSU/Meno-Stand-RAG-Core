@@ -124,6 +124,23 @@ _BENCH_REQUESTS = Counter(
     labelnames=("status",),
     registry=REGISTRY,
 )
+_STAND_UP = Gauge(
+    "meno_stand_up",
+    "1 when the stand answered its last discovery request, else 0.",
+    labelnames=("stand",),
+    registry=REGISTRY,
+)
+_STAND_CONFIG_ERRORS = Counter(
+    "meno_stand_config_errors",
+    "Times the stands file could not be re-read; the previous list stays in use.",
+    registry=REGISTRY,
+)
+_STAND_VIOLATIONS = Counter(
+    "meno_stand_contract_violations",
+    "Departures of a stand from the meno-backend/1 contract, by kind.",
+    labelnames=("stand", "kind"),
+    registry=REGISTRY,
+)
 
 
 def _bool_label(value: bool) -> str:
@@ -195,6 +212,18 @@ def http_in_flight() -> Iterator[None]:
 def set_admission(*, active: int, limit: int) -> None:
     _ADMISSION_ACTIVE.set(active)
     _ADMISSION_LIMIT.set(limit)
+
+
+def set_stand_up(stand: str, up: bool) -> None:
+    _STAND_UP.labels(stand=stand).set(1 if up else 0)
+
+
+def record_stand_config_error() -> None:
+    _STAND_CONFIG_ERRORS.inc()
+
+
+def record_stand_violation(stand: str, kind: str) -> None:
+    _STAND_VIOLATIONS.labels(stand=stand, kind=kind).inc()
 
 
 def render() -> tuple[bytes, str]:

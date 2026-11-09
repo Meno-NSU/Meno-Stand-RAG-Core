@@ -1,0 +1,259 @@
+"""The stands of the registry file and what they offer: manifests, entries of /v1/models, id resolution.
+
+A stand with a manifest (GET /meno/v1/manifest) is a full stand; one that answers 404 there is a plain
+OpenAI endpoint, listed through GET /v1/models, kept out of the arena. The lists are cached; a stand that
+stops answering keeps its last list, marked unreachable. The file is re-read on refresh when it changed;
+a broken file leaves the previous list in place."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import time
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+import structlog
+from meno_contract.models import PROTOCOL, Manifest
+from pydantic import ValidationError
+
+from meno_rag.api import metrics
+from meno_rag.api.admission import AdmissionController
+from meno_rag.api.stands.config import StandEntry, read_stands_file
+
+logger = structlog.get_logger(__name__)
+
+PLAIN_VERSION = "plain"
+MANIFEST_PATH = "/meno/v1/manifest"
+FAILURE_RETRY_S = 10.0  # how soon a stand that did not answer is asked again
+
+
+@dataclass(frozen=True)
+class StandTarget:
+    """One LLM of one stand: the stand, its own model id and our id of the entry."""
+
+    backend: StandEntry
+    model: str
+    public_id: str
+    version: str
+    build: str | None
+    manifest: Manifest | None
+    limiter: AdmissionController
+    requires_auth: bool
+
+    @property
+    def kb_id(self) -> str:
+        """Stored as the knowledge base of the turn: the answer comes from that stand's own search."""
+        return f"{self.backend.id}@{self.version}"
+
+    @property
+    def arena(self) -> bool:
+        return self.backend.arena and self.manifest is not None
+
+
+class _State:
+    """What is known of one stand: its manifest or plain model list, and whether it answered last time."""
+
+    def __init__(self, limiter: AdmissionController) -> None:
+        self.limiter = limiter
+        self.manifest: Manifest | None = None
+        self.plain_models: list[dict[str, Any]] = []
+        self.known = False  # a manifest or a model list was received at some point
+        self.up = False
+        self.problem: str | None = None
+
+
+class StandRegistry:
+    def __init__(
+        self,
+        path: str,
+        *,
+        http_client: httpx.AsyncClient,
+        timeout: float = 5.0,
+        cache_ttl: float = 300.0,
+        reserved_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        self.http = http_client
+        self._path = path
+        self._reserved = reserved_ids
+        self._timeout = timeout
+        self._cache_ttl = cache_ttl
+        self._mtime = self._stat()
+        self._stands: dict[str, StandEntry] = {}
+        self._states: dict[str, _State] = {}
+        self._apply(read_stands_file(path, reserved_ids=reserved_ids))  # a bad file stops the start
+        self._valid_until = 0.0
+        self._lock = asyncio.Lock()
+
+    def _stat(self) -> int | None:
+        try:
+            return os.stat(self._path).st_mtime_ns if self._path else None
+        except OSError:
+            return None
+
+    def _apply(self, entries: list[StandEntry]) -> None:
+        states: dict[str, _State] = {}
+        for e in entries:
+            old = self._states.get(e.id)
+            if old is not None and old.limiter.max_concurrent == e.max_concurrent:
+                states[e.id] = old
+            else:
+                state = _State(AdmissionController(e.max_concurrent))
+                if old is not None:  # the limit changed: keep what is known of the stand
+                    state.manifest, state.plain_models = old.manifest, old.plain_models
+                    state.known, state.up, state.problem = old.known, old.up, old.problem
+                states[e.id] = state
+        self._stands = {e.id: e for e in entries}
+        self._states = states
+
+    def _reload(self) -> None:
+        mtime = self._stat()
+        if mtime == self._mtime:
+            return
+        self._mtime = mtime
+        try:
+            entries = read_stands_file(self._path, reserved_ids=self._reserved)
+        except ValueError as exc:
+            metrics.record_stand_config_error()
+            logger.error("stands_file_reload_failed", path=self._path, error=str(exc))
+            return
+        self._apply(entries)
+        logger.info("stands_file_reloaded", stands=list(self._stands))
+
+    async def _discover(self, stand: StandEntry) -> None:
+        state = self._states[stand.id]
+        try:
+            r = await self.http.get(f"{stand.url}{MANIFEST_PATH}", headers=stand.headers(), timeout=self._timeout)
+            if r.status_code == 404:
+                await self._discover_plain(stand, state)
+            elif r.status_code >= 500:
+                raise httpx.HTTPStatusError(f"HTTP {r.status_code}", request=r.request, response=r)
+            elif r.status_code != 200:
+                self._reject(stand, state, f"the manifest request answered HTTP {r.status_code}", violation=False)
+            else:
+                try:
+                    payload = r.json()
+                    if isinstance(payload, dict) and payload.get("protocol") != PROTOCOL:
+                        raise ValueError(f"protocol {payload.get('protocol')!r} is not {PROTOCOL}")
+                    manifest = Manifest.model_validate(payload)
+                except (ValueError, ValidationError) as exc:
+                    self._reject(stand, state, f"bad manifest: {_first_line(exc)}", violation=True)
+                else:
+                    state.manifest, state.plain_models = manifest, []
+                    state.known, state.up, state.problem = True, True, None
+                    logger.info("stand_manifest_loaded", stand=stand.id, version=manifest.version)
+        except Exception as exc:
+            state.up = False
+            logger.warning("stand_discovery_failed", stand=stand.id, error=str(exc))
+        metrics.set_stand_up(stand.id, state.up)
+
+    async def _discover_plain(self, stand: StandEntry, state: _State) -> None:
+        r = await self.http.get(f"{stand.url}/v1/models", headers=stand.headers(), timeout=self._timeout)
+        r.raise_for_status()
+        data = r.json().get("data") or []
+        state.plain_models = [m for m in data if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
+        state.manifest = None
+        state.known, state.up, state.problem = True, True, None
+        logger.info("stand_models_discovered", stand=stand.id, count=len(state.plain_models))
+
+    def _reject(self, stand: StandEntry, state: _State, reason: str, *, violation: bool) -> None:
+        state.manifest, state.plain_models = None, []
+        state.known, state.up, state.problem = False, False, reason
+        logger.warning("stand_rejected", stand=stand.id, reason=reason)
+        if violation:
+            metrics.record_stand_violation(stand.id, "bad_manifest")
+
+    async def refresh(self) -> None:
+        self._reload()
+        await asyncio.gather(*(self._discover(s) for s in list(self._stands.values())))
+        ttl = self._cache_ttl if all(s.up for s in self._states.values()) else min(self._cache_ttl, FAILURE_RETRY_S)
+        self._valid_until = time.monotonic() + ttl
+
+    async def entries(self) -> list[dict[str, Any]]:
+        # One discovery at a time, and no request waits for another's: while a refresh is running, the
+        # list known so far is served (stands listing each other would otherwise wait on each other).
+        if time.monotonic() > self._valid_until and not self._lock.locked():
+            async with self._lock:
+                if time.monotonic() > self._valid_until:
+                    await self.refresh()
+        out: list[dict[str, Any]] = []
+        for stand in self._stands.values():
+            state = self._states[stand.id]
+            if not state.known:
+                continue
+            m = state.manifest
+            version = m.version if m else PLAIN_VERSION
+            backend_name = (m.name if m else stand.name) or stand.id
+            for llm in _llms(state):
+                status = {"state": "available", "until": None, "last_error": None}
+                if llm.get("status"):
+                    status["state"], status["until"] = llm["status"].state, llm["status"].until
+                if not state.up:
+                    status["state"] = "unreachable"
+                out.append(
+                    {
+                        "id": f"{llm['id']}@{stand.id}",
+                        "object": "model",
+                        "created": llm.get("created") or int(time.time()),
+                        "owned_by": stand.id,
+                        "provider": "external",
+                        "featured": False,
+                        "stages": ["generation"],
+                        "status": status,
+                        "display_name": llm.get("name") or llm["id"],
+                        "context_length": llm.get("context_length"),
+                        "backend_id": stand.id,
+                        "backend_name": backend_name,
+                        "llm_id": llm["id"],
+                        "version": version,
+                        "arena": stand.arena and m is not None,
+                        "auth_required": bool(llm.get("requires_auth")),
+                    }
+                )
+        return out
+
+    def resolve(self, public_id: str | None) -> StandTarget | None:
+        if not public_id or "@" not in public_id:
+            return None
+        model, _, sid = public_id.rpartition("@")
+        stand, state = self._stands.get(sid), self._states.get(sid)
+        if stand is None or state is None or not state.known:
+            return None
+        llm = next((x for x in _llms(state) if x["id"] == model), None)
+        if llm is None:
+            return None
+        m = state.manifest
+        return StandTarget(
+            backend=stand,
+            model=model,
+            public_id=public_id,
+            version=m.version if m else PLAIN_VERSION,
+            build=m.build if m else None,
+            manifest=m,
+            limiter=state.limiter,
+            requires_auth=bool(llm.get("requires_auth")),
+        )
+
+    def live_kbs(self) -> set[str]:
+        """The knowledge-base labels of the stand versions known now."""
+        return {
+            f"{sid}@{s.manifest.version if s.manifest else PLAIN_VERSION}" for sid, s in self._states.items() if s.known
+        }
+
+    def problems(self) -> dict[str, str]:
+        return {sid: s.problem for sid, s in self._states.items() if s.problem}
+
+
+def _llms(state: _State) -> list[dict[str, Any]]:
+    """The LLMs of a stand as dicts, the default one first."""
+    m = state.manifest
+    if m is None:
+        return list(state.plain_models)
+    rows = [llm.model_dump() | {"status": llm.status} for llm in m.llms]
+    return sorted(rows, key=lambda x: x["id"] != m.default_llm)  # stable: the rest keep the manifest order
+
+
+def _first_line(exc: Exception) -> str:
+    lines = str(exc).strip().splitlines()
+    return lines[-1] if len(lines) > 1 else (lines[0] if lines else type(exc).__name__)

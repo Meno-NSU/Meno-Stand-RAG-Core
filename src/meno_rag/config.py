@@ -218,10 +218,11 @@ class Settings(BaseSettings):
         default="meno-lite=Менон 1.1 (meno-lite);gemma-4-12B-it=Менон 1.1 (Gemma 4)",
         validation_alias="V2_MODEL_ALIASES",
     )
-    # Other answer backends with the same chat API, offered as model entries "<model>@<id>" (JSON list:
-    # [{"id": "lab", "name": "...", "url": "http://host:port", "api_key": "...", "models": ["..."]}],
-    # api_key and models optional). See meno_rag/api/external.py.
-    external_backends: str = Field(default="", validation_alias="EXTERNAL_BACKENDS")
+    # JSON file listing the stands (separately run answer backends) offered as model entries "<llm>@<id>";
+    # empty: no stands. See meno_rag/api/stands/config.py.
+    stands_file: str = Field(default="", validation_alias="STANDS_FILE")
+    # The longest a whole stand answer may take, seconds.
+    stand_total_timeout_seconds: float = Field(default=900.0, validation_alias="STAND_TOTAL_TIMEOUT_SECONDS")
     # Where v2 is offered in the UI: models | kb | both.
     v2_expose_as: str = Field(default="models", validation_alias="V2_EXPOSE_AS")
     # Directory of the v2 chunk release.
