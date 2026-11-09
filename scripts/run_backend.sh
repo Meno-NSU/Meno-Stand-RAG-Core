@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# meno-contract has only dependencies the venv already holds; no install is needed on the server.
+export PYTHONPATH="$ROOT_DIR/packages/meno-contract/src${PYTHONPATH:+:$PYTHONPATH}"
+
 APP_HOST="${APP_HOST:-127.0.0.1}"
 APP_PORT="${APP_PORT:-9006}"
 MENO_WEB_PORT="${MENO_WEB_PORT:-9012}"

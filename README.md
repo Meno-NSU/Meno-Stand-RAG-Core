@@ -233,6 +233,24 @@ or `unreachable` status (with auto-expiry from `X-RateLimit-Reset` or
 exponential backoff). The model is greyed-out in the UI dropdown and excluded
 from random arena rounds until it recovers.
 
+## Stands
+
+A stand is a separately run RAG backend that speaks the `meno-backend/1` contract (or a plain OpenAI-compatible
+endpoint). The gateway lists its LLMs in `/v1/models` as `<llm>@<stand>`, relays the chat to it, checks the stream, and
+stores the answer in our history.
+
+To connect one:
+
+1. Check it: `check-backend http://host:port --key KEY`, or without installing anything:
+   `PYTHONPATH=packages/meno-contract/src python -m meno_contract.check http://host:port --key KEY`.
+2. Copy `stands.example.json` to a file outside git, add an entry (`id`, `url`, optional `api_key`, `arena`,
+   `max_concurrent`, `name`), and point `STANDS_FILE` at it. Set `"arena": true` only after `check-backend` passes.
+3. Apply it without a restart: `curl -X POST http://127.0.0.1:9006/v1/models/refresh`. A broken file keeps the
+   previous list. An entry makes the stand visible to all users.
+
+`STAND_TOTAL_TIMEOUT_SECONDS`, `LEGACY_VERSION` and `V2_VERSION` are described in `example.env`. The contract itself is in
+`docs/contract/meno-backend-v1.md`.
+
 ## API
 
 - `GET /healthz`

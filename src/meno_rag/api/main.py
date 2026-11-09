@@ -33,6 +33,14 @@ from meno_rag.api.events import (
     sse_data,
     sse_event,
 )
+from meno_rag.api.knowledge_bases import (
+    LEGACY_KB_ID,
+    V2_KB_ID,
+    default_kb_id,
+    knowledge_bases,
+    split_virtual_model,
+    virtual_model_entries,
+)
 from meno_rag.api.runtime_resolver import (
     CoreModelUnavailableError,
     ModelRateLimitedError,
@@ -58,14 +66,6 @@ from meno_rag.llm.router import LLMRouter
 from meno_rag.llm.status import InMemoryModelStatusStore, ModelStatusStore, RedisModelStatusStore
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest
-from meno_rag.api.knowledge_bases import (
-    LEGACY_KB_ID,
-    V2_KB_ID,
-    default_kb_id,
-    knowledge_bases,
-    split_virtual_model,
-    virtual_model_entries,
-)
 from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StandRagPipeline
 from meno_rag.stand.resources import load_stand_resources
 from meno_rag.stand.search import vectorize_search_query
@@ -455,7 +455,6 @@ async def metrics_endpoint(request: Request):
 @app.get("/healthz")
 async def healthz(request: Request):
     state = request.app.state
-    pipeline = state.pipeline
     db_status = "ok"
     try:
         async with state.database.engine.connect() as conn:
