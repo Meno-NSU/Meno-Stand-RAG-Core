@@ -74,6 +74,8 @@ class StandRegistry:
         cache_ttl: float = 300.0,
         reserved_ids: frozenset[str] = frozenset(),
     ) -> None:
+        if os.environ.get("EXTERNAL_BACKENDS"):
+            logger.warning("external_backends_ignored", detail="EXTERNAL_BACKENDS is no longer read; use STANDS_FILE")
         self.http = http_client
         self._path = path
         self._reserved = reserved_ids
@@ -201,7 +203,7 @@ class StandRegistry:
                         "featured": False,
                         "stages": ["generation"],
                         "status": status,
-                        "display_name": llm.get("name") or llm["id"],
+                        "display_name": llm.get("display_name") or llm.get("name") or llm["id"],
                         "context_length": llm.get("context_length"),
                         "backend_id": stand.id,
                         "backend_name": backend_name,
@@ -217,6 +219,8 @@ class StandRegistry:
         if not public_id or "@" not in public_id:
             return None
         model, _, sid = public_id.rpartition("@")
+        if not model:
+            return None
         stand, state = self._stands.get(sid), self._states.get(sid)
         if stand is None or state is None or not state.known:
             return None

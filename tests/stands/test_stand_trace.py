@@ -117,6 +117,15 @@ def test_with_consent_the_details_reach_the_analysis_tables(make_client, tmp_pat
     assert _json(detail) == {"round": 1}  # the trace's details, as the stage events carried none
 
 
+def test_the_trace_details_win_over_the_stage_event_details(make_client, tmp_path):  # noqa: F811
+    both = sse(block("stage", {"stage": "retrieval", "status": "completed", "detail": {"lines": ["from the stage"]}}))
+    handler = stand_handler([], stream_body=both + _traced_stream(TRACE))
+    c, db, _ = stand_client(make_client, tmp_path, handler)
+    assert c.post("/v1/chat/completions", json=ASK, headers=_consenting_guest(c, db)).status_code == 200
+    detail = _one(db, "SELECT detail FROM pipeline_stage_runs WHERE stage = 'retrieval'")["detail"]
+    assert _json(detail) == {"round": 1}
+
+
 def test_without_consent_nothing_is_asked_and_only_history_is_stored(make_client, tmp_path):  # noqa: F811
     seen = []
     c, db, _ = stand_client(make_client, tmp_path, stand_handler(seen, stream_body=_traced_stream(TRACE)))

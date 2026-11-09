@@ -128,6 +128,16 @@ def test_a_bad_stage_is_dropped_and_counted():
     assert _violations("lab", "bad_event") == before + 1
 
 
+@pytest.mark.parametrize("bad", ["1e999", "-1e999", "NaN"])
+def test_a_stage_with_a_non_finite_duration_is_dropped_and_counted(bad):
+    r, before = _relay(), _violations("lab", "bad_event")
+    raw = f'{{"stage": "retrieval", "status": "completed", "duration_ms": {bad}}}'
+    assert r.handle(parse_block(f"event: stage\ndata: {raw}")) == []
+    assert _violations("lab", "bad_event") == before + 1
+    assert r.stage_durations == {}
+    json.loads(r.summary(5.0).split("data: ", 1)[1], parse_constant=lambda c: pytest.fail(c))  # valid JSON
+
+
 def test_no_violations_are_counted_when_metrics_are_off():
     r, before = _relay(record_metrics=False), _violations("lab", "bad_event")
     assert _feed(r, "stage", {"stage": "Bad Name", "status": "started"}) == []
@@ -301,14 +311,21 @@ async def test_relay_stream_sends_the_contract_headers():
         (429, "model_rate_limited"),
         (503, "model_unreachable"),
         (400, "invalid_upstream_request"),
+        (401, "invalid_upstream_request"),
+        (403, "invalid_upstream_request"),
         (404, "invalid_upstream_request"),
+        (408, "invalid_upstream_request"),
+        (410, "invalid_upstream_request"),
+        (422, "invalid_upstream_request"),
         (500, "transient_upstream_5xx"),
+        (502, "transient_upstream_5xx"),
     ],
 )
 async def test_an_http_error_before_the_stream_maps_to_our_codes(status, code):
     with pytest.raises(StandStreamError) as e:
         await _run_relay(status=status)
     assert e.value.code == code
+    assert e.value.retryable == (code != "invalid_upstream_request")
     classified = e.value.classified()
     assert "upstream says no" in classified.message and "upstream says no" not in classified.user_message
 

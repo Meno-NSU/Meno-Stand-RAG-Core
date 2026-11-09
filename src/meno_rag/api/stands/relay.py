@@ -20,6 +20,7 @@ import structlog
 from meno_contract.models import (
     MAX_ANSWER_CHARS,
     MAX_BLOCK_BYTES,
+    MAX_CHUNK_PAUSE_S,
     MAX_TRACE_BLOCK_BYTES,
     STAGE_NAME_PATTERN,
     STANDARD_STAGES,
@@ -41,7 +42,7 @@ logger = structlog.get_logger(__name__)
 
 RELAYED_FIELDS = ("max_tokens", "temperature", "top_p", "stop")  # request fields every OpenAI-style API takes
 HARD_BLOCK_BYTES = MAX_TRACE_BLOCK_BYTES  # a block this large (even unfinished) ends the stream
-_TIMEOUT = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=5.0)  # read: the longest pause between chunks
+_TIMEOUT = httpx.Timeout(connect=5.0, read=float(MAX_CHUNK_PAUSE_S), write=30.0, pool=5.0)
 _CODE_RE = re.compile(STAGE_NAME_PATTERN)
 
 
@@ -307,7 +308,7 @@ def _status_error(status: int, body: str, headers: httpx.Headers) -> StandStream
         return StandStreamError("model_rate_limited", text, retryable=True, retry_after_sec=retry_after)
     if status == 503:
         return StandStreamError("model_unreachable", text, retryable=True)
-    if status in (400, 404):
+    if 400 <= status < 500:  # our request or the stand's key is wrong; asking again will not help
         return StandStreamError("invalid_upstream_request", text)
     return StandStreamError("transient_upstream_5xx", text, retryable=True)
 

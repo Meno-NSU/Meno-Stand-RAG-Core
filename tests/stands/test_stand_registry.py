@@ -73,6 +73,20 @@ def test_no_manifest_falls_back_to_the_model_list_and_stays_out_of_the_arena():
     assert reg.resolve("gemma@lab").kb_id == "lab@plain"
 
 
+def test_a_plain_endpoint_shows_the_display_name_of_its_model_list():
+    inner = stand_handler([], manifest=None)
+
+    def handler(request):
+        if request.url.path == "/v1/models":
+            data = [{"id": "a", "display_name": "Красивое A", "name": "n"}, {"id": "b", "name": "B name"}, {"id": "c"}]
+            return httpx.Response(200, json={"data": data})
+        return inner(request)
+
+    reg, _ = _registry(None, handler=handler)
+    names = {e["llm_id"]: e["display_name"] for e in _run(reg.entries())}
+    assert names == {"a": "Красивое A", "b": "B name", "c": "c"}
+
+
 def test_a_manifest_of_another_protocol_hides_the_stand_and_explains_why():
     before = _metric("meno_stand_contract_violations_total", stand="lab", kind="bad_manifest")
     reg, _ = _registry(manifest(protocol="meno-backend/2"))
@@ -190,6 +204,25 @@ def test_resolve_maps_an_id_to_its_target():
     assert (t.backend.id, t.model, t.kb_id, t.build, t.arena) == ("lab", "gemma", "lab@v1", "a1b2", True)
     assert reg.resolve("absent@lab") is None and reg.resolve("gemma@other") is None and reg.resolve("gemma") is None
     assert reg.resolve(None) is None
+
+
+def test_resolve_rejects_an_empty_llm_part():
+    reg, _ = _registry(manifest())
+    _run(reg.entries())
+    assert reg.resolve("@lab") is None
+
+
+def test_a_leftover_external_backends_variable_is_warned_about(monkeypatch):
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("EXTERNAL_BACKENDS", "[]")
+    with capture_logs() as logs:
+        _registry(manifest())
+    assert any(e["event"] == "external_backends_ignored" and e["log_level"] == "warning" for e in logs)
+    monkeypatch.delenv("EXTERNAL_BACKENDS")
+    with capture_logs() as logs:
+        _registry(manifest())
+    assert not any(e["event"] == "external_backends_ignored" for e in logs)
 
 
 def test_resolve_splits_at_the_last_at_sign():

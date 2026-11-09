@@ -1490,7 +1490,7 @@ def _stand_outcome(payload: ChatCompletionRequest, relay: Relay, *, capture_trac
     retrieved = relay.contexts or trace.get("retrieved")
     fewshots = trace.get("fewshots")
     trace_details = trace.get("stage_details")
-    stage_details = relay.stage_details or (trace_details if isinstance(trace_details, dict) else {})
+    stage_details = trace_details if isinstance(trace_details, dict) and trace_details else relay.stage_details
     return SimpleNamespace(
         question=_last_user_message(payload),
         sources=relay.sources,
