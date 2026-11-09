@@ -34,6 +34,7 @@ MANIFEST_PATH = "/meno/v1/manifest"
 FAILURE_RETRY_S = 10.0  # how soon a stand that did not answer is asked again
 MAX_PLAIN_NAME_CHARS = 128  # as a manifest's LLM name
 _LLM_ID = re.compile(LLM_ID_PATTERN)
+FileState = tuple[int, int] | None  # the stands file's mtime in ns and size; None: no file
 
 
 class _DiscoveryError(Exception):
@@ -96,7 +97,7 @@ class StandRegistry:
         # drips its answer hold the start of the service, or a refresh, for as long as it likes.
         self._deadline = deadline if deadline is not None else 2 * timeout
         self._cache_ttl = cache_ttl
-        self._mtime = self._stat()
+        self._file = self._stat()
         self._stands: dict[str, StandEntry] = {}
         self._states: dict[str, _State] = {}
         try:
@@ -109,14 +110,17 @@ class StandRegistry:
             entries = []
         self._apply(entries)
         self._valid_until = 0.0
-        self._refreshing: asyncio.Task[None] | None = None
+        self._refreshing: asyncio.Task[FileState] | None = None
         self._background: asyncio.Task[None] | None = None
 
-    def _stat(self) -> int | None:
+    def _stat(self) -> FileState:
+        """The file's mtime and size, so that a rewrite within one mtime tick is seen too (unless its size is the
+        same); None when there is no file."""
         try:
-            return os.stat(self._path).st_mtime_ns if self._path else None
+            st = os.stat(self._path) if self._path else None
         except OSError:
             return None
+        return (st.st_mtime_ns, st.st_size) if st is not None else None
 
     def _apply(self, entries: list[StandEntry]) -> None:
         states: dict[str, _State] = {}
@@ -134,10 +138,10 @@ class StandRegistry:
         self._states = states
 
     def _reload(self) -> None:
-        mtime = self._stat()
-        if mtime == self._mtime:
+        seen = self._stat()
+        if seen == self._file:
             return
-        self._mtime = mtime
+        self._file = seen
         try:
             entries = read_stands_file(self._path, reserved_ids=self._reserved)
         except ValueError as exc:
@@ -211,19 +215,32 @@ class StandRegistry:
         if violation:
             metrics.record_stand_violation(stand.id, "bad_manifest")
 
-    async def refresh(self) -> None:
+    async def refresh(self, *, current_file: bool = False) -> None:
         """Re-reads the file if it changed and asks every stand again. Refreshes never overlap: a caller that comes
-        while one runs (POST /v1/models/refresh during a background refresh) waits for it and starts none."""
-        if self._refreshing is None or self._refreshing.done():
-            self._refreshing = asyncio.create_task(self._refresh_now())
-        # A caller that gives up (a cancelled request) must not cancel the refresh the others are waiting for.
-        await asyncio.shield(self._refreshing)
+        while one runs waits for it. Then a background refresh or the start of the service starts none of its own;
+        with `current_file` (POST /v1/models/refresh, which must see the file as it is when called) one more runs
+        unless the file's mtime and size are still those the finished refresh read."""
+        running = self._refreshing
+        if running is not None and not running.done():
+            # A caller that gives up (a cancelled request) must not cancel the refresh the others are waiting for.
+            read = await asyncio.shield(running)
+            if not current_file or self._stat() == read:
+                return
+            running = self._refreshing
+            if running is not None and not running.done():  # another caller started one after this call: enough
+                await asyncio.shield(running)
+                return
+        running = self._refreshing = asyncio.create_task(self._refresh_now())
+        await asyncio.shield(running)
 
-    async def _refresh_now(self) -> None:
+    async def _refresh_now(self) -> FileState:
+        """One refresh; returns the mtime and size of the file it went by."""
         self._reload()
+        read = self._file
         await asyncio.gather(*(self._discover(s) for s in list(self._stands.values())))
         ttl = self._cache_ttl if all(s.up for s in self._states.values()) else min(self._cache_ttl, FAILURE_RETRY_S)
         self._valid_until = time.monotonic() + ttl
+        return read
 
     async def _refresh_in_background(self) -> None:
         try:

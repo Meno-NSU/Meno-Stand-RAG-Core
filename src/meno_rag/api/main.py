@@ -649,7 +649,7 @@ async def refresh_models(request: Request):
         refreshes.append(or_registry.discover())
     stands = _stand_registry(request.app)
     if stands is not None:
-        refreshes.append(stands.refresh())
+        refreshes.append(stands.refresh(current_file=True))
     await asyncio.gather(*refreshes)
     return await list_models(request)
 

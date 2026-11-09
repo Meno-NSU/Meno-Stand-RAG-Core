@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -259,6 +260,88 @@ def test_a_refresh_that_comes_while_one_runs_waits_for_it():
 
     waiting, asked, reg = _run(scenario())
     assert waiting and asked == 1 and reg.resolve("gemma@lab") is not None
+
+
+def test_models_refresh_sees_the_file_as_it_is_when_called(make_client, tmp_path):  # noqa: F811
+    # The file changes while a background refresh that read the old one is still asking the stands.
+    asked, slow = threading.Event(), {"on": False}
+    ok = stand_handler([], manifest=manifest())
+
+    async def handler(request):
+        if slow["on"]:
+            asked.set()
+            await asyncio.sleep(0.3)
+        return ok(request)
+
+    c, _, reg = stand_client(make_client, tmp_path, handler)
+    slow["on"] = True
+    reg._valid_until = 0.0  # the list is due: the next GET /v1/models refreshes it in the background
+    c.get("/v1/models")
+    assert asked.wait(5)  # the background refresh has read the file and is asking lab
+    _bump_mtime(write_stands(reg._path, [LAB, {"id": "second", "url": "http://second.example"}]))
+    ids = [m["id"] for m in c.post("/v1/models/refresh").json()["data"]]
+    assert "gemma@lab" in ids and "gemma@second" in ids
+
+
+def _gated_registry(path, stands):
+    """A registry whose stands answer only once the returned gate is set."""
+    gate = asyncio.Event()
+    ok = stand_handler([], manifest=manifest())
+
+    async def handler(request):
+        await gate.wait()
+        return ok(request)
+
+    reg, calls = _registry(None, path=path, stands=stands, handler=handler)
+    return reg, calls, gate
+
+
+def test_an_explicit_refresh_runs_no_other_when_the_file_is_unchanged(tmp_path):
+    async def scenario():
+        reg, calls, gate = _gated_registry(tmp_path / "stands.json", [{"id": "lab", "url": "http://lab.example"}])
+        running = asyncio.create_task(reg.refresh())
+        await asyncio.sleep(0.05)
+        explicit = asyncio.create_task(reg.refresh(current_file=True))
+        await asyncio.sleep(0.05)
+        waiting = not explicit.done()
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(running, explicit), 5)
+        return waiting, len(calls)
+
+    waiting, asked = _run(scenario())
+    assert waiting and asked == 1
+
+
+def test_explicit_refreshes_that_wait_together_run_one_more_between_them(tmp_path):
+    path = tmp_path / "stands.json"
+    lab, second = {"id": "lab", "url": "http://lab.example"}, {"id": "second", "url": "http://second.example"}
+
+    async def scenario():
+        reg, calls, gate = _gated_registry(path, [lab])
+        running = asyncio.create_task(reg.refresh())
+        await asyncio.sleep(0.05)
+        _bump_mtime(write_stands(path, [lab, second]))
+        explicit = [asyncio.create_task(reg.refresh(current_file=True)) for _ in range(2)]
+        background = asyncio.create_task(reg.refresh())  # not explicit: it only waits for the running one
+        await asyncio.sleep(0.05)
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(running, background, *explicit), 5)
+        return [r.url.host for r in calls], reg
+
+    asked, reg = _run(scenario())
+    assert sorted(asked) == ["lab.example", "lab.example", "second.example"]  # the running refresh and one more
+    assert reg.resolve("gemma@second") is not None
+
+
+def test_a_file_rewritten_within_one_mtime_is_read_again_when_its_size_changed(tmp_path):
+    path = tmp_path / "stands.json"
+    reg, _ = _registry(manifest(), path=path, stands=[{"id": "lab", "url": "http://lab.example"}])
+    _run(reg.refresh())
+    st = os.stat(path)
+    write_stands(path, [{"id": "lab", "url": "http://lab.example"}, {"id": "second", "url": "http://second.example"}])
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    _run(reg.refresh())
+    assert reg.resolve("gemma@second") is not None
 
 
 def test_the_discovery_of_a_stand_no_longer_in_the_file_returns_quietly(tmp_path):
