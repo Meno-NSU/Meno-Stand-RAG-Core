@@ -11,80 +11,17 @@ import json
 import httpx
 from sqlalchemy import text
 
-from meno_rag.api.external import Relay
 from tests._dbhelpers import with_db
-from tests.stands._helpers import LAB, stand_client
+from tests.stands._helpers import LAB, UPSTREAM_STREAM, stand_client
+from tests.stands._helpers import block as _block
+from tests.stands._helpers import chunk as _chunk
+from tests.stands._helpers import sse as _sse
 from tests.v2.test_api_v2 import make_client  # noqa: F401  (fixture)
 
 _MODELS = {"object": "list", "data": [{"id": "gemma", "object": "model"}]}
 
 
-# ---- relaying the stream
-
-
-def _block(event=None, data=None):
-    head = f"event: {event}\n" if event else ""
-    body = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
-    return f"{head}data: {body}"
-
-
-def _chunk(content=None, *, cid="up-1", model="gemma", finish=None):
-    delta = {"content": content} if content is not None else {}
-    return {
-        "id": cid,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-    }
-
-
-def test_relay_rewrites_ids_to_ours_and_collects_the_answer():
-    r = Relay(completion_id="chatcmpl-our", public_id="gemma@lab")
-    out = json.loads(r.block(_block(data=_chunk("При"))).removeprefix("data: "))
-    assert out["id"] == "chatcmpl-our" and out["model"] == "gemma@lab"
-    assert out["choices"][0]["delta"]["content"] == "При"
-    r.block(_block(data=_chunk("вет")))
-    assert r.answer == "Привет"
-    assert r.block(_block(data="[DONE]")) == "data: [DONE]"
-
-
-def test_relay_passes_meno_events_and_keeps_the_sources_and_stage_times():
-    r = Relay(completion_id="c", public_id="gemma@lab")
-    src = [{"document_title": "Устав", "source_url": "https://nsu.ru/x", "score": 0.9}, "junk"]
-    stage = {"stage": "retrieval", "status": "completed", "duration_ms": 12.5}
-    for ev, data in (("stage", stage), ("thinking", {"content": "…"}), ("sources", {"sources": src})):
-        assert r.block(_block(ev, data)) == _block(ev, data)
-    assert r.sources == [{"document_title": "Устав", "source_url": "https://nsu.ru/x", "score": 0.9}]
-    assert r.stage_durations == {"retrieval": 12.5}
-    assert r.error is None
-
-
-def test_relay_notes_an_upstream_error():
-    r = Relay(completion_id="c", public_id="gemma@lab")
-    r.block(_block("error", {"code": "overloaded", "message": "busy"}))
-    assert r.error == {"code": "overloaded", "message": "busy"}
-    r2 = Relay(completion_id="c", public_id="gemma@lab")
-    r2.block(_block(data={**_chunk(finish="error"), "error": {"code": "x", "message": "y"}}))
-    assert r2.error == {"code": "x", "message": "y"}
-
-
 # ---- through the API
-
-
-def _sse(*blocks):
-    return ("\n\n".join(blocks) + "\n\n").encode()
-
-
-UPSTREAM_STREAM = _sse(
-    _block("stage", {"stage": "retrieval", "status": "completed", "duration_ms": 7.0}),
-    _block(data={**_chunk(), "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}),
-    _block(data=_chunk("Сессия ")),
-    _block(data=_chunk("в январе")),
-    _block("sources", {"sources": [{"document_title": "График", "source_url": "https://nsu.ru/g"}]}),
-    _block(data=_chunk(finish="stop")),
-    _block("summary", {"total_ms": 30.0, "stages": {"retrieval": 7.0}}),
-    _block(data="[DONE]"),
-)
 
 
 def _chat_handler(seen, *, stream_body=UPSTREAM_STREAM, down=False):

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 import time
 import uuid
@@ -26,9 +25,7 @@ from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
 from meno_rag.api.external import (
-    Relay,
     complete,
-    relay_stream,
     upstream_body,
 )
 from meno_rag.api.events import (
@@ -47,6 +44,7 @@ from meno_rag.api.runtime_resolver import (
     resolve_pipeline_runtime,
 )
 from meno_rag.api.stands.registry import StandRegistry, StandTarget
+from meno_rag.api.stands.relay import Relay, StandStreamError, relay_stream, stand_request_body
 from meno_rag.api.validation import sanitize_validation_errors
 from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings, parse_cors_origins
@@ -511,8 +509,7 @@ async def healthz(request: Request):
         "embedder_device": embedder_device,
         "knowledge_base_id": default_kb_id(settings),
         "knowledge_bases": [
-            {"id": kb.id, "available": pipelines[kb.id] is not None}
-            for kb in knowledge_bases(settings)
+            {"id": kb.id, "available": pipelines[kb.id] is not None} for kb in knowledge_bases(settings)
         ],
         "openrouter": or_state,
     }
@@ -738,7 +735,8 @@ async def list_knowledge_bases(request: Request):
     settings: Settings = request.app.state.settings
     pipelines = _pipelines(request.app.state)
     kbs = [
-        kb for kb in knowledge_bases(settings)
+        kb
+        for kb in knowledge_bases(settings)
         if kb.id != V2_KB_ID or settings.v2_expose_as in ("kb", "both") or not settings.legacy_enabled
     ]
     default_id = default_kb_id(settings)
@@ -886,7 +884,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                 stream_headers["X-Bench-Mode"] = "1"
             if external is not None:
                 return StreamingResponse(
-                    _external_stream_response(
+                    _stand_stream_response(
                         request=request,
                         payload=payload,
                         target=external,
@@ -1286,33 +1284,15 @@ async def _stream_response(
             error_code=classified.code,
             error_stage=stage,
         )
-        # If the failure happened during token streaming, the frontend is
-        # still showing the GENERATION stage as "started" and will keep
-        # spinning unless we explicitly mark it FAILED. Emit a stage event
-        # before the error so any UI watching `event: stage` transitions
-        # closes the spinner.
-        yield StageEvent(
-            stage=StageName.GENERATION if stage == "generation" else stage,
-            status=StageStatus.FAILED,
+        for text in _failure_sse(
+            classified,
+            stage=stage,
             model_id=runtime.generation.model_id,
-        ).to_sse()
-        # Emit a dedicated SSE error event with the structured payload so
-        # frontends can show a Retry button and a human-readable message
-        # without parsing free-form text.
-        payload_dict = _classified_error_payload(classified, retry_id=completion_id, stage=stage)
-        yield sse_event("error", payload_dict["error"])
-        # Keep the legacy openai-chunk format too so existing clients close
-        # cleanly. Same payload duplicated as the chunk's `error` field.
-        err_chunk = openai_chunk(
             completion_id=completion_id,
-            created=created_ts,
-            model=_public_model(payload, runtime),
-            delta={},
-            finish_reason="error",
-        )
-        err_chunk["error"] = payload_dict["error"]
-        yield sse_data(err_chunk)
-        yield sse_data("[DONE]")
+            created_ts=created_ts,
+            public_model=_public_model(payload, runtime),
+        ):
+            yield text
         if bench:
             metrics_mod.record_bench_request(status="error")
         if not bench:
@@ -1350,6 +1330,37 @@ async def _stream_response(
             on_finish()
 
 
+def _failure_sse(
+    classified: ClassifiedError,
+    *,
+    stage: str,
+    model_id: str,
+    completion_id: str,
+    created_ts: int,
+    public_model: str,
+) -> list[str]:
+    """What the client gets when a streamed answer fails: the failed stage, the structured error event, the
+    same error in an OpenAI chunk and [DONE]."""
+    # If the failure happened during token streaming, the frontend is still showing the GENERATION stage as
+    # "started" and will keep spinning unless we explicitly mark it FAILED. Emit a stage event before the error
+    # so any UI watching `event: stage` transitions closes the spinner.
+    error = _classified_error_payload(classified, retry_id=completion_id, stage=stage)["error"]
+    # A dedicated SSE error event with the structured payload lets frontends show a Retry button and a
+    # human-readable message without parsing free-form text.
+    # The legacy openai-chunk format is kept too so existing clients close cleanly: the same payload is
+    # duplicated as the chunk's `error` field.
+    err_chunk = openai_chunk(
+        completion_id=completion_id, created=created_ts, model=public_model, delta={}, finish_reason="error"
+    )
+    err_chunk["error"] = error
+    return [
+        StageEvent(stage=stage, status=StageStatus.FAILED, model_id=model_id).to_sse(),
+        sse_event("error", error),
+        sse_data(err_chunk),
+        sse_data("[DONE]"),
+    ]
+
+
 def _stand_registry(app: FastAPI) -> StandRegistry | None:
     return getattr(app.state, "stand_registry", None)
 
@@ -1385,7 +1396,7 @@ def _external_outcome(payload: ChatCompletionRequest, sources: list[dict], stage
     )
 
 
-async def _external_stream_response(
+async def _stand_stream_response(
     *,
     request: Request,
     payload: ChatCompletionRequest,
@@ -1399,45 +1410,45 @@ async def _external_stream_response(
     on_finish: Callable[[], None] | None,
     bench: bool,
 ):
-    """Relay the external backend's stream, then store the answer as for our own pipelines."""
+    """Read the stand's stream, check it, send our client what passed and store the answer as for our own
+    pipelines. Whatever the stand does wrong ends in the usual error path, never in a broken history."""
     registry = _stand_registry(request.app)
     database: Database = request.app.state.database
     started = time.perf_counter()
     first_token_at: float | None = None
-    relay = Relay(completion_id=completion_id, public_id=target.public_id)
+    relay = Relay(
+        completion_id=completion_id,
+        created=created_ts,
+        target=target,
+        pass_trace=bench,
+        record_metrics=not bench,
+    )
     if not bench:
         metrics_mod.inc_chat_in_flight()
     try:
-        async for block in relay_stream(registry.http, target, upstream_body(target, payload), relay):
+        async for text in relay_stream(
+            registry.http,
+            target,
+            stand_request_body(target, payload),
+            relay,
+            request_id=completion_id,
+            trace=bench,
+            total_timeout_s=get_settings().stand_total_timeout_seconds,
+        ):
             if first_token_at is None and relay.parts:
                 first_token_at = time.perf_counter()
                 if not bench:
                     metrics_mod.record_time_to_first_token(provider="external", seconds=first_token_at - started)
-            yield block
+            yield text
+        if not relay.parts:
+            raise StandStreamError("stand_empty_answer", "the stand finished without any answer text", retryable=True)
+        for text in relay.closing():
+            yield text
         total_ms = round((time.perf_counter() - started) * 1000, 2)
+        yield relay.summary(total_ms)
+        yield sse_data("[DONE]")
         if bench:
-            metrics_mod.record_bench_request(status="error" if relay.error else "ok")
-        elif relay.error is not None:
-            # The backend already sent its error event to the client; keep the failed turn for diagnostics.
-            code = str(relay.error.get("code") or "external_backend_error")
-            logger.warning(
-                "external_stream_error_event", request_id=completion_id, backend=target.backend.id, code=code
-            )
-            metrics_mod.record_error(code)
-            metrics_mod.record_chat_request(provider="external", stream=True, status="error", seconds=total_ms / 1000.0)
-            await _persist_failure(
-                database,
-                completion_id,
-                session_id,
-                runtime,
-                payload,
-                json.dumps(relay.error, ensure_ascii=False)[:2000],
-                stream=True,
-                stage="generation",
-                user_id=user_id,
-                guest_session_id=guest_session_id,
-                kb_id=target.kb_id,
-            )
+            metrics_mod.record_bench_request(status="ok")
         else:
             metrics_mod.record_chat_request(provider="external", stream=True, status="ok", seconds=total_ms / 1000.0)
             generation_ms = relay.stage_durations.get(StageName.GENERATION) or round(
@@ -1466,23 +1477,23 @@ async def _external_stream_response(
                 trace_writer=request.app.state.trace_writer,
             )
     except Exception as exc:
-        classified = classify_error(exc)
+        classified = exc.classified() if isinstance(exc, StandStreamError) else classify_error(exc)
         logger.exception(
-            "external_stream_failed",
+            "stand_stream_failed",
             request_id=completion_id,
             backend=target.backend.id,
             error=str(exc),
             error_code=classified.code,
         )
-        yield StageEvent(stage=StageName.GENERATION, status=StageStatus.FAILED, model_id=target.model).to_sse()
-        error = _classified_error_payload(classified, retry_id=completion_id, stage="generation")["error"]
-        yield sse_event("error", error)
-        err_chunk = openai_chunk(
-            completion_id=completion_id, created=created_ts, model=target.public_id, delta={}, finish_reason="error"
-        )
-        err_chunk["error"] = error
-        yield sse_data(err_chunk)
-        yield sse_data("[DONE]")
+        for text in _failure_sse(
+            classified,
+            stage="generation",
+            model_id=target.model,
+            completion_id=completion_id,
+            created_ts=created_ts,
+            public_model=target.public_id,
+        ):
+            yield text
         if bench:
             metrics_mod.record_bench_request(status="error")
         else:
