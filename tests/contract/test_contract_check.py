@@ -52,7 +52,7 @@ def _stream(fault, trace):
     return "".join(blocks)
 
 
-def _client(fault=None, *, manifest=MANIFEST):
+def _client(fault=None, *, manifest=MANIFEST, content_type="text/event-stream", encoding="utf-8"):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/meno/v1/manifest":
             return httpx.Response(404) if manifest is None else httpx.Response(200, json=manifest)
@@ -62,7 +62,8 @@ def _client(fault=None, *, manifest=MANIFEST):
         if body["model"] != "m1" and fault != "unknown_model_ok":
             return httpx.Response(400, json={"error": {"message": "unknown model", "code": "model_not_found"}})
         trace = request.headers.get("X-Meno-Trace") == "1"
-        return httpx.Response(200, content=_stream(fault, trace), headers={"content-type": "text/event-stream"})
+        stream = _stream(fault, trace).encode(encoding)
+        return httpx.Response(200, content=stream, headers={"content-type": content_type})
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
@@ -108,6 +109,24 @@ async def test_a_wrong_protocol_is_reported():
 async def test_a_plain_endpoint_may_enter_the_menu_but_not_the_arena():
     report = await run_checks(_client(manifest=None), "http://stand")
     assert report.plain and not report.ok and "арен" in format_report(report)
+
+
+CP1251 = "text/event-stream; charset=windows-1251"
+
+
+async def test_a_stream_that_is_not_utf8_fails_whatever_charset_it_names():
+    # The gateway reads the stream as UTF-8, so these cp1251 bytes would reach the reader as U+FFFD.
+    report = await run_checks(_client(content_type=CP1251, encoding="cp1251"), "http://stand")
+    failed = format_report(report).split("Итог")[0]
+    assert not report.ok and "UTF-8" in failed and "windows-1251" in failed
+
+
+async def test_the_stream_is_read_as_utf8_whatever_charset_it_names():
+    async with _client(content_type=CP1251) as client:
+        seen = await _read_stream(client, "http://stand/v1/chat/completions", {}, "m1", 120.0)
+    assert seen.content == "Ответ" and not seen.problems
+    report = await run_checks(_client(content_type=CP1251), "http://stand")
+    assert report.ok, format_report(report)
 
 
 async def test_think_in_the_answer_is_a_warning_only():

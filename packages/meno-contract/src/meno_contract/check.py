@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import codecs
 import json
 import time
 import uuid
@@ -146,7 +147,7 @@ async def _consume(
             await response.aread()
             seen.failure = f"Стенд ответил HTTP {response.status_code}: {response.text[:200]!r}"
             return
-        async for block in iter_blocks(_counted(response.aiter_text(), seen), max_bytes=MAX_TRACE_BLOCK_BYTES):
+        async for block in iter_blocks(_as_the_gateway_reads(response, seen), max_bytes=MAX_TRACE_BLOCK_BYTES):
             if seen.done:
                 seen.after_done += 1
                 continue
@@ -160,15 +161,44 @@ async def _consume(
             _take_block(seen, block.event, block.data, started)
 
 
-async def _counted(pieces: AsyncIterator[str], seen: _Stream) -> AsyncIterator[str]:
-    """The stream, cut where the gateway would end it: after MAX_STREAM_BYTES, comments and thinking included."""
+async def _as_the_gateway_reads(response: httpx.Response, seen: _Stream) -> AsyncIterator[str]:
+    """The stream as the gateway reads it: UTF-8 whatever charset Content-Type names, a byte that is not UTF-8 turned
+    into U+FFFD, cut after MAX_STREAM_BYTES bytes (comments and thinking included). Bytes that are not UTF-8 are a
+    problem, since the reader would see U+FFFD in their place."""
+    shown = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    strict = codecs.getincrementaldecoder("utf-8")()
+    utf8 = True
     read = 0
-    async for piece in pieces:
-        read += len(piece.encode("utf-8", "surrogatepass"))
+    async for data in response.aiter_bytes():
+        read += len(data)
         if read > MAX_STREAM_BYTES:
             seen.problems.append(f"Поток длиннее {MAX_STREAM_BYTES} байт: шлюз оборвёт ответ. Сократите поток.")
             return
-        yield piece
+        if utf8 and not _decodes(strict, data):
+            utf8 = False
+            seen.problems.append(_not_utf8(response))
+        if text := shown.decode(data):
+            yield text
+    if utf8 and not _decodes(strict, b"", final=True):
+        seen.problems.append(_not_utf8(response))
+    if tail := shown.decode(b"", final=True):
+        yield tail
+
+
+def _decodes(decoder: codecs.IncrementalDecoder, data: bytes, *, final: bool = False) -> bool:
+    try:
+        decoder.decode(data, final)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _not_utf8(response: httpx.Response) -> str:
+    named = f" (Content-Type называет charset={response.charset_encoding})" if response.charset_encoding else ""
+    return (
+        f"Поток не в UTF-8{named}. Шлюз читает поток как UTF-8, какую бы кодировку ни называл Content-Type, "
+        "и вместо таких байтов читатель увидит «�». Шлите поток в UTF-8."
+    )
 
 
 def _take_block(seen: _Stream, event: str, data: str, started: float) -> None:
