@@ -81,7 +81,7 @@ def test_chat_virtual_uses_v2(make_client, monkeypatch):
         return (await session.execute(text("SELECT model, knowledge_base_id FROM messages"))).all()
 
     rows = with_db(db, _read)
-    assert rows and all(tuple(r) == ("meno-lite@menon-1.1", "menon-1.1@unversioned") for r in rows if r[0])
+    assert rows and all(tuple(r) == ("meno-lite@menon-1.1", V2_KB_ID) for r in rows if r[0])
 
 
 def test_chat_virtual_503_when_v2_down(make_client):
