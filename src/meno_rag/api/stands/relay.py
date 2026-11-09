@@ -352,7 +352,7 @@ async def relay_stream(
         if r.status_code >= 400:
             text = await _read_prefix(r, max(0.0, deadline - loop.time()))
             raise _status_error(r.status_code, text, r.headers)
-        blocks = iter_blocks(r.aiter_text(), max_bytes=HARD_BLOCK_BYTES).__aiter__()
+        blocks = iter_blocks(r.aiter_text(), max_bytes=HARD_BLOCK_BYTES)
         try:
             while True:
                 try:

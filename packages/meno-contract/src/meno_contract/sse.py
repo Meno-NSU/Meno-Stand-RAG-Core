@@ -5,7 +5,7 @@ No third-party imports on purpose: this module must work without fastapi or uvic
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
 
 
@@ -55,7 +55,7 @@ def _check_size(text: str, max_bytes: int) -> None:
         raise SseBlockTooLarge(f"SSE block is larger than {max_bytes} bytes")
 
 
-async def iter_blocks(pieces: AsyncIterator[str], *, max_bytes: int) -> AsyncIterator[SseBlock]:
+async def iter_blocks(pieces: AsyncIterator[str], *, max_bytes: int) -> AsyncGenerator[SseBlock, None]:
     """Turn decoded text pieces from the network into SSE blocks.
 
     Pieces may split a block (or a CRLF pair) anywhere. A trailing CR is held back until the
