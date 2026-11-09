@@ -8,6 +8,7 @@ callers never touch label ordering or prometheus_client internals."""
 from __future__ import annotations
 
 import contextlib
+import threading
 from collections.abc import Iterator
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
@@ -31,14 +32,14 @@ REGISTRY = CollectorRegistry()
 
 _CHAT_REQUESTS = Counter(
     "meno_chat_requests",
-    "Chat completion requests by provider, stream mode, and outcome.",
-    labelnames=("provider", "stream", "status"),
+    "Chat completion requests by provider, stream mode, outcome, stand, version and LLM.",
+    labelnames=("provider", "stream", "status", "stand", "version", "llm"),
     registry=REGISTRY,
 )
 _CHAT_REQUEST_SECONDS = Histogram(
     "meno_chat_request_seconds",
     "End-to-end chat completion latency in seconds.",
-    labelnames=("provider", "stream"),
+    labelnames=("provider", "stream", "stand", "version", "llm"),
     buckets=_LATENCY_BUCKETS,
     registry=REGISTRY,
 )
@@ -53,7 +54,14 @@ _TIME_TO_FIRST_TOKEN = Histogram(
     "actually feels. Distinct from meno_chat_request_seconds, which for a stream runs "
     "through to the LAST token and so grows with answer length, not with responsiveness. "
     "Streaming only: a non-streaming response has no first token.",
-    labelnames=("provider",),
+    labelnames=("provider", "stand", "version", "llm"),
+    buckets=_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
+_STAND_STAGE_SECONDS = Histogram(
+    "meno_stand_stage_seconds",
+    "Seconds a pipeline stage took, by stand and version. The stage is a declared name or 'other'.",
+    labelnames=("stand", "version", "stage"),
     buckets=_LATENCY_BUCKETS,
     registry=REGISTRY,
 )
@@ -147,18 +155,57 @@ def _bool_label(value: bool) -> str:
     return "true" if value else "false"
 
 
-def record_chat_request(*, provider: str, stream: bool, status: str, seconds: float) -> None:
+MAX_VERSIONS_PER_STAND = 32
+OTHER = "other"
+_versions_seen: dict[str, set[str]] = {}
+_versions_lock = threading.Lock()
+
+
+def bounded_version(stand: str, version: str) -> str:
+    """The version as a label value: the first 32 distinct versions of a stand keep their name, later new ones
+    become 'other' (and count as a too_many_versions violation), so a stand cannot grow the series without bound.
+    An empty version (a pipeline without one) takes no place."""
+    if not version:
+        return version
+    with _versions_lock:
+        seen = _versions_seen.setdefault(stand, set())
+        if version in seen:
+            return version
+        if len(seen) < MAX_VERSIONS_PER_STAND:
+            seen.add(version)
+            return version
+    record_stand_violation(stand, "too_many_versions")
+    return OTHER
+
+
+def record_chat_request(
+    *, provider: str, stream: bool, status: str, seconds: float, stand: str = "", version: str = "", llm: str = ""
+) -> None:
     stream_label = _bool_label(stream)
-    _CHAT_REQUESTS.labels(provider=provider, stream=stream_label, status=status).inc()
-    _CHAT_REQUEST_SECONDS.labels(provider=provider, stream=stream_label).observe(seconds)
+    version = bounded_version(stand, version)
+    _CHAT_REQUESTS.labels(
+        provider=provider, stream=stream_label, status=status, stand=stand, version=version, llm=llm
+    ).inc()
+    _CHAT_REQUEST_SECONDS.labels(provider=provider, stream=stream_label, stand=stand, version=version, llm=llm).observe(
+        seconds
+    )
+
+
+def record_stand_stage(*, stand: str, version: str, stage: str, seconds: float) -> None:
+    """The caller passes a stage name it has checked against what the stand declares (else 'other')."""
+    _STAND_STAGE_SECONDS.labels(stand=stand, version=bounded_version(stand, version), stage=stage).observe(seconds)
 
 
 def record_bench_request(*, status: str) -> None:
     _BENCH_REQUESTS.labels(status=status).inc()
 
 
-def record_time_to_first_token(*, provider: str, seconds: float) -> None:
-    _TIME_TO_FIRST_TOKEN.labels(provider=provider).observe(seconds)
+def record_time_to_first_token(
+    *, provider: str, seconds: float, stand: str = "", version: str = "", llm: str = ""
+) -> None:
+    _TIME_TO_FIRST_TOKEN.labels(
+        provider=provider, stand=stand, version=bounded_version(stand, version), llm=llm
+    ).observe(seconds)
 
 
 def record_llm_call(*, provider: str, endpoint: str, stage: str, outcome: str, seconds: float) -> None:

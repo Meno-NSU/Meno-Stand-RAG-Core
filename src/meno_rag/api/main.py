@@ -1016,6 +1016,23 @@ async def _resolve_runtime(app: FastAPI, requested_model: str | None) -> Pipelin
     )
 
 
+def _metric_labels(participant: Participant | None) -> dict[str, str]:
+    """The stand, version and LLM labels of the chat series; empty values when nobody is known."""
+    if participant is None:
+        return {"stand": "", "version": "", "llm": ""}
+    return {"stand": participant.stand, "version": participant.version, "llm": participant.llm}
+
+
+def _record_stage_times(participant: Participant | None, stages: dict[str, float]) -> None:
+    """Per-stage times (ms) of one of our own pipelines, by stand and version."""
+    if participant is None:
+        return
+    for stage, duration_ms in stages.items():
+        metrics_mod.record_stand_stage(
+            stand=participant.stand, version=participant.version, stage=str(stage), seconds=duration_ms / 1000.0
+        )
+
+
 async def _non_stream_response(
     *,
     request: Request,
@@ -1095,6 +1112,7 @@ async def _non_stream_response(
                 stream=False,
                 status="error",
                 seconds=time.perf_counter() - started,
+                **_metric_labels(participant),
             )
             await _persist_failure(
                 database,
@@ -1125,6 +1143,14 @@ async def _non_stream_response(
             stream=False,
             status="ok",
             seconds=total_ms / 1000.0,
+            **_metric_labels(participant),
+        )
+        _record_stage_times(
+            participant,
+            {
+                **(outcome.stage_durations_ms if outcome is not None else {}),
+                StageName.GENERATION: generation_ms,
+            },
         )
     response: dict[str, Any] = {
         "id": completion_id,
@@ -1235,6 +1261,7 @@ async def _stream_response(
                     metrics_mod.record_time_to_first_token(
                         provider=runtime.generation.provider,
                         seconds=time.perf_counter() - started,
+                        **_metric_labels(participant),
                     )
             answer_parts.append(token)
             yield sse_data(
@@ -1293,7 +1320,9 @@ async def _stream_response(
                 stream=True,
                 status="ok",
                 seconds=total_ms / 1000.0,
+                **_metric_labels(participant),
             )
+            _record_stage_times(participant, stage_durations)
             await _persist_success(
                 database=database,
                 run_id=completion_id,
@@ -1344,6 +1373,7 @@ async def _stream_response(
                 stream=True,
                 status="error",
                 seconds=time.perf_counter() - started,
+                **_metric_labels(participant),
             )
             await _persist_failure(
                 database,
@@ -1499,6 +1529,7 @@ async def _stand_stream_response(
     database: Database = request.app.state.database
     started = time.perf_counter()
     first_token_at: float | None = None
+    who = Participant(target.backend.id, target.version, target.model)
     relay = Relay(
         completion_id=completion_id,
         created=created_ts,
@@ -1529,7 +1560,9 @@ async def _stand_stream_response(
                 if first_token_at is None and relay.parts:
                     first_token_at = time.perf_counter()
                     if not bench:
-                        metrics_mod.record_time_to_first_token(provider="external", seconds=first_token_at - started)
+                        metrics_mod.record_time_to_first_token(
+                            provider="external", seconds=first_token_at - started, **_metric_labels(who)
+                        )
                 yield text
         if not relay.parts:
             raise StandStreamError("stand_empty_answer", "the stand finished without any answer text", retryable=True)
@@ -1541,7 +1574,9 @@ async def _stand_stream_response(
         if bench:
             metrics_mod.record_bench_request(status="ok")
         else:
-            metrics_mod.record_chat_request(provider="external", stream=True, status="ok", seconds=total_ms / 1000.0)
+            metrics_mod.record_chat_request(
+                provider="external", stream=True, status="ok", seconds=total_ms / 1000.0, **_metric_labels(who)
+            )
             outcome = _stand_outcome(payload, relay, capture_trace=capture_trace)
             generation_ms = relay.stage_durations.get(StageName.GENERATION) or round(
                 (time.perf_counter() - (first_token_at or started)) * 1000, 2
@@ -1593,7 +1628,11 @@ async def _stand_stream_response(
         else:
             metrics_mod.record_error(classified.code)
             metrics_mod.record_chat_request(
-                provider="external", stream=True, status="error", seconds=time.perf_counter() - started
+                provider="external",
+                stream=True,
+                status="error",
+                seconds=time.perf_counter() - started,
+                **_metric_labels(who),
             )
             await _persist_failure(
                 database,
@@ -1635,6 +1674,7 @@ async def _stand_non_stream_response(
     registry = _stand_registry(request.app)
     database: Database = request.app.state.database
     started = time.perf_counter()
+    who = Participant(target.backend.id, target.version, target.model)
     relay = Relay(
         completion_id=completion_id, created=created_ts, target=target, pass_trace=False, record_metrics=not bench
     )
@@ -1664,7 +1704,9 @@ async def _stand_non_stream_response(
         if bench:
             metrics_mod.record_bench_request(status="ok")
         else:
-            metrics_mod.record_chat_request(provider="external", stream=False, status="ok", seconds=total_ms / 1000.0)
+            metrics_mod.record_chat_request(
+                provider="external", stream=False, status="ok", seconds=total_ms / 1000.0, **_metric_labels(who)
+            )
             outcome = _stand_outcome(payload, relay, capture_trace=capture_trace)
             await _persist_success(
                 database=database,
@@ -1715,7 +1757,11 @@ async def _stand_non_stream_response(
         else:
             metrics_mod.record_error(classified.code)
             metrics_mod.record_chat_request(
-                provider="external", stream=False, status="error", seconds=time.perf_counter() - started
+                provider="external",
+                stream=False,
+                status="error",
+                seconds=time.perf_counter() - started,
+                **_metric_labels(who),
             )
             await _persist_failure(
                 database,

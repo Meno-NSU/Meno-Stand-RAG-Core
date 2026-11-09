@@ -205,8 +205,10 @@ class Relay:
             return []
         manifest = self.target.manifest
         payload: dict[str, Any] = {"stage": event.stage, "status": event.status}
+        declared = event.stage in STANDARD_STAGES
         if manifest is not None:
             label = manifest.stages.get(event.stage)
+            declared = declared or label is not None
             if label is not None:
                 payload["labels"] = label.model_dump()
             elif event.stage not in STANDARD_STAGES:
@@ -214,6 +216,14 @@ class Relay:
         if event.duration_ms is not None:
             payload["duration_ms"] = event.duration_ms
             self.stage_durations[event.stage] = self.stage_durations.get(event.stage, 0.0) + event.duration_ms
+            if self.record_metrics and event.status == "completed":
+                # A name the stand did not declare is 'other': a stand cannot grow the series by inventing stages.
+                metrics.record_stand_stage(
+                    stand=self.target.backend.id,
+                    version=self.target.version,
+                    stage=event.stage if declared else "other",
+                    seconds=event.duration_ms / 1000.0,
+                )
         if event.detail is not None:
             payload["detail"] = {"lines": event.detail.lines}
             self.stage_details[event.stage] = {"lines": event.detail.lines}

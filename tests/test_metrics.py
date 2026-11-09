@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from tests.v2 import test_api_v2
+
+make_client = test_api_v2.make_client  # the pytest fixture of the stand tests
+
 
 def test_render_returns_prometheus_exposition():
     from meno_rag.api import metrics
@@ -16,9 +20,9 @@ def test_record_chat_request_increments_labeled_counter():
 
     metrics.record_chat_request(provider="vllm", stream=False, status="ok", seconds=0.5)
     text = metrics.render()[0].decode()
-    assert 'meno_chat_requests_total{provider="vllm",status="ok",stream="false"}' in text
+    assert 'meno_chat_requests_total{llm="",provider="vllm",stand="",status="ok",stream="false",version=""}' in text
     # latency histogram observed too
-    assert 'meno_chat_request_seconds_count{provider="vllm",stream="false"}' in text
+    assert 'meno_chat_request_seconds_count{llm="",provider="vllm",stand="",stream="false",version=""}' in text
 
 
 def test_record_llm_call_tracks_count_and_latency_per_endpoint():
@@ -183,7 +187,10 @@ def test_non_stream_chat_records_provider_labeled_request(monkeypatch):
         )
         assert r.status_code == 200
         text = c.get("/metrics").text
-    assert 'meno_chat_requests_total{provider="itnostream",status="ok",stream="false"}' in text
+    assert (
+        'meno_chat_requests_total{llm="m",provider="itnostream",stand="menon-1.0",status="ok",stream="false",version="2026-07"}'
+        in text
+    )
     assert "meno_chat_in_flight 0.0" in text
 
 
@@ -200,7 +207,10 @@ def test_stream_chat_records_request_and_settles_in_flight(monkeypatch):
         assert r.status_code == 200
         assert "[DONE]" in r.text  # stream completed normally
         text = c.get("/metrics").text
-    assert 'meno_chat_requests_total{provider="itstream",status="ok",stream="true"}' in text
+    assert (
+        'meno_chat_requests_total{llm="m",provider="itstream",stand="menon-1.0",status="ok",stream="true",version="2026-07"}'
+        in text
+    )
     assert "meno_chat_in_flight 0.0" in text
 
 
@@ -244,7 +254,10 @@ def test_stream_records_time_to_first_token(monkeypatch):
         )
         assert r.status_code == 200
         text = c.get("/metrics").text
-    assert 'meno_chat_time_to_first_token_seconds_count{provider="ttft"} 1.0' in text
+    assert (
+        'meno_chat_time_to_first_token_seconds_count{llm="m",provider="ttft",stand="menon-1.0",version="2026-07"} 1.0'
+        in text
+    )
 
 
 def test_non_stream_records_no_time_to_first_token(monkeypatch):
@@ -293,6 +306,164 @@ def test_chat_latency_excludes_persistence(monkeypatch):
     recorded = next(
         float(line.rsplit(" ", 1)[1])
         for line in text.splitlines()
-        if line.startswith('meno_chat_request_seconds_sum{provider="slowpersist"')
+        if line.startswith('meno_chat_request_seconds_sum{llm="m",provider="slowpersist"')
     )
     assert recorded < 0.3, f"latency {recorded:.3f}s includes the 0.4s persist write"
+
+
+# ---- stand, version and LLM labels
+
+
+def _render() -> str:
+    from meno_rag.api import metrics
+
+    return metrics.render()[0].decode()
+
+
+def _sample_sum(name: str) -> float:
+    from meno_rag.api import metrics
+
+    return sum(s.value for m in metrics.REGISTRY.collect() for s in m.samples if s.name == name)
+
+
+def test_chat_metrics_carry_the_participant():
+    from meno_rag.api import metrics
+
+    metrics.record_chat_request(
+        provider="external", stream=True, status="ok", seconds=1.0, stand="ragu", version="v1", llm="gemma"
+    )
+    metrics.record_time_to_first_token(provider="external", seconds=0.2, stand="ragu", version="v1", llm="gemma")
+    text = _render()
+    assert 'llm="gemma",provider="external",stand="ragu",status="ok",stream="true",version="v1"' in text
+    assert (
+        'meno_chat_request_seconds_count{llm="gemma",provider="external",stand="ragu",stream="true",version="v1"}'
+        in text
+    )
+    assert (
+        'meno_chat_time_to_first_token_seconds_count{llm="gemma",provider="external",stand="ragu",version="v1"}' in text
+    )
+
+
+def test_versions_are_capped_per_stand():
+    from meno_rag.api import metrics
+
+    for i in range(33):
+        last = metrics.bounded_version("many", f"v{i}")
+    assert metrics.bounded_version("many", "v0") == "v0" and last == "other"
+    assert metrics.bounded_version("other-stand", "v33") == "v33"
+    assert 'meno_stand_contract_violations_total{kind="too_many_versions",stand="many"}' in _render()
+
+
+def test_an_empty_version_counts_toward_nothing():
+    from meno_rag.api import metrics
+
+    assert metrics.bounded_version("", "") == ""
+    assert metrics.bounded_version("emptyfirst", "") == ""
+    for i in range(32):
+        assert metrics.bounded_version("emptyfirst", f"v{i}") == f"v{i}"  # all 32 fit: "" took no place
+    assert metrics.bounded_version("emptyfirst", "v32") == "other"
+
+
+def test_a_stage_time_is_recorded_per_version():
+    from meno_rag.api import metrics
+
+    metrics.record_stand_stage(stand="stg", version="v1", stage="retrieval", seconds=0.5)
+    metrics.record_stand_stage(stand="stg", version="v2", stage="retrieval", seconds=0.7)
+    text = _render()
+    assert 'meno_stand_stage_seconds_count{stage="retrieval",stand="stg",version="v1"} 1.0' in text
+    assert 'meno_stand_stage_seconds_count{stage="retrieval",stand="stg",version="v2"} 1.0' in text
+
+
+def _stage_stream():
+    from tests.stands._helpers import UPSTREAM_STREAM, block, sse
+
+    extra = sse(block("stage", {"stage": "mystery_stage", "status": "completed", "duration_ms": 3.0}))
+    head, _, tail = UPSTREAM_STREAM.partition(b"\n\n")
+    return head + b"\n\n" + extra + tail
+
+
+def test_a_stand_answer_is_labelled_end_to_end(make_client, tmp_path):
+    from tests.stands._helpers import manifest, stand_client, stand_handler
+
+    seen: list = []
+    c, _db, _reg = stand_client(
+        make_client, tmp_path, stand_handler(seen, stream_body=_stage_stream(), manifest=manifest(version="v1"))
+    )
+    body = {"model": "gemma@lab", "stream": True, "messages": [{"role": "user", "content": "q"}]}
+    r = c.post("/v1/chat/completions", json=body)
+    assert r.status_code == 200 and "[DONE]" in r.text
+    r = c.post("/v1/chat/completions", json={**body, "stream": False})
+    assert r.status_code == 200
+    text = c.get("/metrics").text
+    assert 'llm="gemma",provider="external",stand="lab",status="ok",stream="true",version="v1"' in text
+    assert 'llm="gemma",provider="external",stand="lab",status="ok",stream="false",version="v1"' in text
+    assert (
+        'meno_chat_time_to_first_token_seconds_count{llm="gemma",provider="external",stand="lab",version="v1"}' in text
+    )
+    assert 'meno_stand_stage_seconds_count{stage="retrieval",stand="lab",version="v1"}' in text
+    assert 'meno_stand_stage_seconds_count{stage="other",stand="lab",version="v1"}' in text
+    assert "mystery_stage" not in text.replace('kind="unknown_stage"', "")
+
+
+def test_a_failed_stand_answer_is_labelled_too(make_client, tmp_path):
+    from tests.stands._helpers import manifest, stand_client, stand_handler
+
+    c, _db, _reg = stand_client(
+        make_client, tmp_path, stand_handler([], stream_body=b"", manifest=manifest(version="vbroken"))
+    )
+    for stream in (True, False):
+        c.post(
+            "/v1/chat/completions",
+            json={"model": "gemma@lab", "stream": stream, "messages": [{"role": "user", "content": "q"}]},
+        )
+    text = c.get("/metrics").text
+    assert 'llm="gemma",provider="external",stand="lab",status="error",stream="true",version="vbroken"' in text
+    assert 'llm="gemma",provider="external",stand="lab",status="error",stream="false",version="vbroken"' in text
+
+
+def test_in_process_answers_are_labelled_too(make_client, monkeypatch):
+    from tests.v2.test_virtual_models import FakeRegistry
+
+    c, _db = make_client()
+    c.app.state.vllm_registry = FakeRegistry(("gemma",))
+    version = c.app.state.settings.v2_version if hasattr(c.app.state, "settings") else "unversioned"
+    for stream in (True, False):
+        r = c.post(
+            "/v1/chat/completions",
+            json={"model": "gemma@menon-1.1", "stream": stream, "messages": [{"role": "user", "content": "q"}]},
+        )
+        assert r.status_code == 200
+    text = c.get("/metrics").text
+    assert f'llm="gemma",provider="vllm",stand="menon-1.1",status="ok",stream="true",version="{version}"' in text
+    assert f'llm="gemma",provider="vllm",stand="menon-1.1",status="ok",stream="false",version="{version}"' in text
+    assert (
+        f'meno_chat_time_to_first_token_seconds_count{{llm="gemma",provider="vllm",stand="menon-1.1",version="{version}"}}'
+        in text
+    )
+    assert f'meno_stand_stage_seconds_count{{stage="retrieval",stand="menon-1.1",version="{version}"}}' in text
+    assert f'meno_stand_stage_seconds_count{{stage="generation",stand="menon-1.1",version="{version}"}}' in text
+
+
+def test_a_benchmark_moves_no_stand_series(make_client, tmp_path):
+    from tests.stands._helpers import manifest, stand_client, stand_handler
+    from tests.v2.test_api_v2 import BENCH_TOKEN
+
+    c, _db, _reg = stand_client(
+        make_client, tmp_path, stand_handler([], stream_body=_stage_stream(), manifest=manifest(version="vbench"))
+    )
+    names = (
+        "meno_chat_requests_total",
+        "meno_chat_request_seconds_count",
+        "meno_chat_time_to_first_token_seconds_count",
+        "meno_stand_stage_seconds_count",
+    )
+    before = [_sample_sum(n) for n in names]
+    for stream in (True, False):
+        r = c.post(
+            "/v1/chat/completions",
+            json={"model": "gemma@lab", "stream": stream, "messages": [{"role": "user", "content": "q"}]},
+            headers={"Authorization": f"Bearer {BENCH_TOKEN}"},
+        )
+        assert r.status_code == 200
+    assert [_sample_sum(n) for n in names] == before
+    assert 'version="vbench"' not in _render()
