@@ -181,6 +181,9 @@ class Settings(BaseSettings):
 
     httpx_max_connections: int = Field(default=200, validation_alias="HTTPX_MAX_CONNECTIONS")
     httpx_max_keepalive: int = Field(default=100, validation_alias="HTTPX_MAX_KEEPALIVE")
+    # The stands' own pool (discovery and chat), apart from the one above that vLLM and OpenRouter use.
+    stand_httpx_max_connections: int = Field(default=100, validation_alias="STAND_HTTPX_MAX_CONNECTIONS")
+    stand_httpx_max_keepalive: int = Field(default=20, validation_alias="STAND_HTTPX_MAX_KEEPALIVE")
 
     redis_url: str | None = Field(default=None, validation_alias="REDIS_URL")
 

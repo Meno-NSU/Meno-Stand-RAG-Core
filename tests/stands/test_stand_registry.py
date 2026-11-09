@@ -544,3 +544,26 @@ def test_our_own_models_are_listed_whatever_the_stands_do(make_client, tmp_path,
     assert r.status_code == 200
     data = r.json()["data"]
     assert data and not [m for m in data if m.get("provider") == "external"]
+
+
+def test_stands_have_a_connection_pool_of_their_own(monkeypatch, tmp_path):
+    # Hung stands fill only their own pool; the one vLLM and OpenRouter use for our pipelines stays free.
+    from fastapi.testclient import TestClient
+
+    from meno_rag.config import get_settings
+    from tests.v2.test_api_v2 import _make
+
+    monkeypatch.setenv("STAND_HTTPX_MAX_CONNECTIONS", "7")
+    monkeypatch.setenv("STAND_HTTPX_MAX_KEEPALIVE", "3")
+    main_mod, _ = _make(monkeypatch, tmp_path)
+    try:
+        with TestClient(main_mod.app) as c:
+            shared, stands = c.app.state.http_client, c.app.state.stand_registry.http
+            assert stands is c.app.state.stand_http_client and stands is not shared
+            pool = stands._transport._pool
+            assert (pool._max_connections, pool._max_keepalive_connections) == (7, 3)
+            assert shared._transport._pool._max_connections == c.app.state.settings.httpx_max_connections
+            assert not shared.is_closed and not stands.is_closed
+        assert shared.is_closed and stands.is_closed
+    finally:
+        get_settings.cache_clear()

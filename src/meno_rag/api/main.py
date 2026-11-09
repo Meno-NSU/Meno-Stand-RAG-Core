@@ -177,6 +177,14 @@ async def lifespan(app: FastAPI):
         ),
         timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
     )
+    # Stands get a pool of their own, so that a few hung stands cannot take the connections our pipelines need.
+    stand_http_client = httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_connections=settings.stand_httpx_max_connections,
+            max_keepalive_connections=settings.stand_httpx_max_keepalive,
+        ),
+        timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
+    )
 
     redis = None
     try:
@@ -247,7 +255,7 @@ async def lifespan(app: FastAPI):
     # is awaited, bounded by the registry's deadline per stand.
     stand_registry = StandRegistry(
         settings.stands_file,
-        http_client=http_client,
+        http_client=stand_http_client,
         timeout=settings.model_discovery_timeout_seconds,
         cache_ttl=settings.model_cache_ttl_seconds,
         reserved_ids=frozenset({"menon-1.1"}) if settings.v2_enabled else frozenset(),
@@ -318,6 +326,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.database = database
     app.state.http_client = http_client
+    app.state.stand_http_client = stand_http_client
     app.state.vllm_registry = registry
     app.state.resources = resources
     app.state.pipeline = pipeline
@@ -352,6 +361,7 @@ async def lifespan(app: FastAPI):
     if v2_pipeline is not None:
         v2_pipeline.close()
     await http_client.aclose()
+    await stand_http_client.aclose()
     await database.close()
     retrieval_executor.shutdown(wait=False, cancel_futures=True)
 
