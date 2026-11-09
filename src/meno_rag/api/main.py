@@ -16,7 +16,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 
 from meno_rag.api import arena, auth, feedback, guest, history, legal, privacy
@@ -56,6 +56,7 @@ from meno_rag.api.stands.participant import (
 )
 from meno_rag.api.stands.registry import StandRegistry, StandTarget
 from meno_rag.api.stands.relay import Relay, StandStreamError, relay_stream, stand_request_body
+from meno_rag.api.streaming import ReleasingStreamingResponse, once
 from meno_rag.api.validation import sanitize_validation_errors
 from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings, parse_cors_origins
@@ -861,7 +862,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
 
     # The slots (the shared one and the stand's) are released here for every synchronous outcome (errors and
     # the non-stream success path). For streaming we hand the release to the generator via `on_finish`,
-    # since the work outlives this function.
+    # since the work outlives this function, and to the response, for a generator that never starts (see
+    # meno_rag.api.streaming); a once-guard keeps it to one release.
     released = False
     try:
         settings: Settings = request.app.state.settings
@@ -941,7 +943,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             )
 
         if payload.stream:
-            released = True  # the streaming generator now owns the release
+            released = True  # the streaming generator and its response now own the release
             # A StreamingResponse is returned directly, so the `response.headers` set
             # above (for the non-stream dict-wrapping case) is never merged onto it —
             # this needs its own entry.
@@ -949,7 +951,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             if bench:
                 stream_headers["X-Bench-Mode"] = "1"
             if external is not None:
-                return StreamingResponse(
+                release_stand = once(release_all)
+                return ReleasingStreamingResponse(
                     _stand_stream_response(
                         request=request,
                         payload=payload,
@@ -960,14 +963,16 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                         session_id=session_id,
                         user_id=user_id,
                         guest_session_id=guest_session_id,
-                        on_finish=release_all,
+                        on_finish=release_stand,
                         bench=bench,
                         capture_trace=capture_trace,
                     ),
+                    release=release_stand,
                     media_type="text/event-stream",
                     headers=stream_headers,
                 )
-            return StreamingResponse(
+            release_ours = once(admission.release)
+            return ReleasingStreamingResponse(
                 _stream_response(
                     request=request,
                     payload=payload,
@@ -979,13 +984,14 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                     temperature=temperature,
                     user_id=user_id,
                     guest_session_id=guest_session_id,
-                    on_finish=admission.release,
+                    on_finish=release_ours,
                     capture_trace=capture_trace,
                     bench=bench,
                     pipeline=pipeline,
                     kb_id=kb_id,
                     participant=participant,
                 ),
+                release=release_ours,
                 media_type="text/event-stream",
                 headers=stream_headers,
             )
