@@ -64,19 +64,31 @@ async def iter_blocks(pieces: AsyncIterator[str], *, max_bytes: int) -> AsyncGen
     """
     buffer = ""
     held_cr = ""
+    # What was already looked at is not scanned or measured again: a large block arriving in small pieces would make
+    # that quadratic. `scanned` chars of the buffer hold no separator; `size` is the buffer's length in UTF-8 bytes.
+    scanned = size = 0
     async for piece in pieces:
         text = held_cr + piece
         held_cr = ""
         if text.endswith("\r"):
             text, held_cr = text[:-1], "\r"
-        buffer += _normalize(text)
-        *complete, buffer = buffer.split("\n\n")
-        for raw in complete:
+        text = _normalize(text)
+        buffer += text
+        size += len(text.encode("utf-8", "surrogatepass"))
+        start, pos = 0, max(scanned - 1, 0)  # a separator may begin with the last "\n" of the previous piece
+        while (end := buffer.find("\n\n", pos)) != -1:
+            raw = buffer[start:end]
             _check_size(raw, max_bytes)
             block = parse_block(raw)
             if block is not None:
                 yield block
-        _check_size(buffer, max_bytes)
+            start = pos = end + 2
+        if start:
+            size -= len(buffer[:start].encode("utf-8", "surrogatepass"))
+            buffer = buffer[start:]
+        scanned = len(buffer)
+        if size > max_bytes:
+            raise SseBlockTooLarge(f"SSE block is larger than {max_bytes} bytes")
     buffer += _normalize(held_cr)
     # The stream may end without the final blank line: the rest is still a block.
     for raw in buffer.split("\n\n"):

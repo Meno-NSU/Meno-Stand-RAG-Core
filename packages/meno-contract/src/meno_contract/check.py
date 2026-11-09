@@ -12,6 +12,7 @@ import asyncio
 import json
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,6 +24,8 @@ from meno_contract.models import (
     MAX_ANSWER_S,
     MAX_BLOCK_BYTES,
     MAX_CHUNK_PAUSE_S,
+    MAX_STAGE_NAMES,
+    MAX_STREAM_BYTES,
     MAX_TRACE_BLOCK_BYTES,
     PROTOCOL,
     STANDARD_STAGES,
@@ -143,7 +146,7 @@ async def _consume(
             await response.aread()
             seen.failure = f"Стенд ответил HTTP {response.status_code}: {response.text[:200]!r}"
             return
-        async for block in iter_blocks(response.aiter_text(), max_bytes=MAX_TRACE_BLOCK_BYTES):
+        async for block in iter_blocks(_counted(response.aiter_text(), seen), max_bytes=MAX_TRACE_BLOCK_BYTES):
             if seen.done:
                 seen.after_done += 1
                 continue
@@ -155,6 +158,17 @@ async def _consume(
                 )
                 continue
             _take_block(seen, block.event, block.data, started)
+
+
+async def _counted(pieces: AsyncIterator[str], seen: _Stream) -> AsyncIterator[str]:
+    """The stream, cut where the gateway would end it: after MAX_STREAM_BYTES, comments and thinking included."""
+    read = 0
+    async for piece in pieces:
+        read += len(piece.encode("utf-8", "surrogatepass"))
+        if read > MAX_STREAM_BYTES:
+            seen.problems.append(f"Поток длиннее {MAX_STREAM_BYTES} байт: шлюз оборвёт ответ. Сократите поток.")
+            return
+        yield piece
 
 
 def _take_block(seen: _Stream, event: str, data: str, started: float) -> None:
@@ -347,6 +361,14 @@ def _stage_items(prefix: str, seen: _Stream, labels: set[str] | None) -> list[Ch
         )
     else:
         items.append(CheckItem(f"{prefix}: парность этапов", True))
+    if len({e.stage for e in events}) > MAX_STAGE_NAMES:
+        items.append(
+            CheckItem(
+                f"{prefix}: число этапов",
+                False,
+                f"Больше {MAX_STAGE_NAMES} разных имён этапов в одном ответе: остальные шлюз пропустит.",
+            )
+        )
     if labels is not None:
         names = {e.stage for e in events}
         missing = sorted(n for n in names if n not in STANDARD_STAGES and n not in labels)

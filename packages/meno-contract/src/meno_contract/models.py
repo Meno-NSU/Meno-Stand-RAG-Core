@@ -29,6 +29,10 @@ MAX_TRACE_BLOCK_BYTES = 16_000_000
 MAX_ANSWER_CHARS = 40_000
 MAX_CHUNK_PAUSE_S = 300  # the longest silence between two chunks of a stream
 MAX_ANSWER_S = 900  # the longest whole answer
+# Budgets of one stream: what passes them is ignored or ends the answer, so a stand cannot make one answer costly.
+MAX_STREAM_BYTES = 64_000_000  # read from one stream, comments and thinking included; then the answer ends
+MAX_STAGE_NAMES = 64  # distinct stage names in one answer; the others are ignored
+MAX_LOGGED_VIOLATIONS = 5  # departures from the contract that the gateway logs per answer (all are counted)
 MAX_LLMS = 32
 MAX_TITLE_CHARS = 500
 MAX_URL_CHARS = 2000

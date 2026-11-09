@@ -30,6 +30,10 @@ def _stream(fault, trace):
             blocks.append(_sse({"stage": "retrieval", "status": "completed", "duration_ms": 3}, "stage"))
         blocks.append(_sse({"stage": "echo", "status": "started"}, "stage"))
         blocks.append(_sse({"stage": "echo", "status": "completed"}, "stage"))
+    if fault == "many_stage_names":
+        for i in range(65):
+            blocks.append(_sse({"stage": f"retrieval{i}", "status": "started"}, "stage"))
+            blocks.append(_sse({"stage": f"retrieval{i}", "status": "completed"}, "stage"))
     if fault == "unlabelled_stage":
         blocks.append(_sse({"stage": "mystery", "status": "started"}, "stage"))
         blocks.append(_sse({"stage": "mystery", "status": "completed"}, "stage"))
@@ -86,6 +90,7 @@ async def test_the_fake_good_stand_passes():
         ("no_contexts_with_trace", "contexts"),
         ("contexts_without_trace", "contexts"),
         ("unknown_model_ok", "неизвестн"),
+        ("many_stage_names", "разных имён этапов"),
     ],
 )
 async def test_a_bad_stand_fails_with_a_clear_reason(fault, expected):
@@ -200,3 +205,11 @@ async def test_an_answer_over_the_total_limit_is_a_failed_item():
     async with _paced_client([(0, _chunk_block("а")), (5, _chunk_block("б"))]) as client:
         seen = await _read_stream(client, "http://stand/v1/chat/completions", {}, "m1", 120.0, answer_limit_s=0.2)
     assert "дольше 0.2 с" in seen.failure
+
+
+async def test_a_stream_over_the_byte_limit_fails(monkeypatch):
+    from meno_contract import check
+
+    monkeypatch.setattr(check, "MAX_STREAM_BYTES", 300)
+    report = await run_checks(_client(), "http://stand")
+    assert not report.ok and "байт" in format_report(report)

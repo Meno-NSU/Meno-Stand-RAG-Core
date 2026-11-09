@@ -1,3 +1,5 @@
+import time
+
 import httpx
 import pytest
 from meno_contract.example_stand import create_app
@@ -66,3 +68,19 @@ async def test_example_stand_answers_by_the_contract():
     bad = await client.post("/v1/chat/completions", json={**body, "model": "absent"})
     assert bad.status_code == 400 and bad.json()["error"]["code"] == "model_not_found"
     assert (await client.get("/v1/models")).json()["data"][0]["id"] == "echo"
+
+
+async def test_iter_blocks_finds_a_separator_split_between_reads():
+    blocks = await _collect("data: a\n", "\ndata: b\n", "\ndata: c\n\ndata: d\n", "\n")
+    assert [b.data for b in blocks] == ["a", "b", "c", "d"]
+
+
+async def test_a_large_block_in_small_pieces_is_read_in_linear_time():
+    # The buffer used to be split again on every read: quadratic in the size of a block arriving in small pieces.
+    payload = "x" * 2_000_000
+    text = f"data: {payload}\n\ndata: next\n\n"
+    pieces = [text[i : i + 100] for i in range(0, len(text), 100)]
+    started = time.perf_counter()
+    blocks = await _collect(*pieces, max_bytes=16_000_000)
+    assert [len(b.data) for b in blocks] == [len(payload), 4]
+    assert time.perf_counter() - started < 2.0

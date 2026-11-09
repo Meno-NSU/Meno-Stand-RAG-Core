@@ -8,6 +8,7 @@ counted per stand. Whatever the stand sends cannot break the history, the arena 
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import json
 import re
@@ -21,6 +22,9 @@ from meno_contract.models import (
     MAX_ANSWER_CHARS,
     MAX_BLOCK_BYTES,
     MAX_CHUNK_PAUSE_S,
+    MAX_LOGGED_VIOLATIONS,
+    MAX_STAGE_NAMES,
+    MAX_STREAM_BYTES,
     MAX_TRACE_BLOCK_BYTES,
     STAGE_NAME_PATTERN,
     STANDARD_STAGES,
@@ -42,6 +46,7 @@ logger = structlog.get_logger(__name__)
 
 RELAYED_FIELDS = ("max_tokens", "temperature", "top_p", "stop")  # request fields every OpenAI-style API takes
 HARD_BLOCK_BYTES = MAX_TRACE_BLOCK_BYTES  # a block this large (even unfinished) ends the stream
+THREAD_PARSE_BYTES = 256_000  # a larger block is parsed in a thread
 _TIMEOUT = httpx.Timeout(connect=5.0, read=float(MAX_CHUNK_PAUSE_S), write=30.0, pool=5.0)
 _CODE_RE = re.compile(STAGE_NAME_PATTERN)
 
@@ -76,13 +81,34 @@ def stand_request_body(target: StandTarget, payload: ChatCompletionRequest) -> d
 
 
 _BAD = object()
+_UNPARSED = object()
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _clean(value: Any) -> Any:
+    """Text that a client and the database can take. A lone surrogate (JSON lets a stand escape one; a valid pair is
+    one character once parsed) cannot be encoded as UTF-8 and becomes U+FFFD; NUL, which PostgreSQL refuses in text,
+    is dropped."""
+    if isinstance(value, str):
+        if "\x00" in value:
+            value = value.replace("\x00", "")
+        return value if value.isascii() else _SURROGATE.sub("�", value)
+    if isinstance(value, list):
+        return [_clean(v) for v in value]
+    if isinstance(value, dict):
+        return {_clean(k): _clean(v) for k, v in value.items()}
+    return value
 
 
 def _json(data: str) -> Any:
     try:
-        return json.loads(data)
-    except ValueError:
+        return _clean(json.loads(data))
+    except (ValueError, RecursionError):  # deep nesting is bad JSON too, not the end of the answer
         return _BAD
+
+
+def _block_limit(event: str) -> int:
+    return MAX_TRACE_BLOCK_BYTES if event in ("contexts", "pipeline_trace") else MAX_BLOCK_BYTES
 
 
 @dataclass
@@ -104,37 +130,53 @@ class Relay:
     finished: bool = False  # the stand sent a finish_reason
     done: bool = False  # the stand sent [DONE]
     _chars: int = 0
+    _stage_names: set[str] = field(default_factory=set)
+    _stage_names_full: bool = False
+    _violations_seen: int = 0
 
     @property
     def answer(self) -> str:
         return "".join(self.parts)
 
     def violation(self, kind: str, reason: str) -> None:
-        """A departure from the contract: always logged (the stand author's debugging tool), counted only
-        when metrics are on."""
-        logger.warning(
-            "stand_contract_violation",
-            stand=self.target.backend.id,
-            kind=kind,
-            reason=reason,
-            request_id=self.completion_id,
-        )
+        """A departure from the contract: logged (the stand author's debugging tool) up to MAX_LOGGED_VIOLATIONS
+        per stream, then one line says the rest are not; every one is counted when metrics are on."""
+        self._violations_seen += 1
+        stand = self.target.backend.id
+        if self._violations_seen <= MAX_LOGGED_VIOLATIONS:
+            logger.warning(
+                "stand_contract_violation", stand=stand, kind=kind, reason=reason, request_id=self.completion_id
+            )
+        elif self._violations_seen == MAX_LOGGED_VIOLATIONS + 1:
+            logger.warning(
+                "stand_contract_violations_suppressed",
+                stand=stand,
+                request_id=self.completion_id,
+                logged=MAX_LOGGED_VIOLATIONS,
+            )
         if self.record_metrics:
-            metrics.record_stand_violation(self.target.backend.id, kind)
+            metrics.record_stand_violation(stand, kind)
 
-    def handle(self, block: SseBlock) -> list[str]:
-        """The SSE text for the client that this block produces (often none)."""
+    async def handle_async(self, block: SseBlock) -> list[str]:
+        """handle(), with a large block parsed in a thread: a 16 MB contexts or trace block parsed on the event
+        loop would stall every user of the gateway."""
+        if THREAD_PARSE_BYTES < block.raw_size <= _block_limit(block.event) and block.event in self._HANDLERS:
+            return self.handle(block, await asyncio.to_thread(_json, block.data))
+        return self.handle(block)
+
+    def handle(self, block: SseBlock, parsed: Any = _UNPARSED) -> list[str]:
+        """The SSE text for the client that this block produces (often none). `parsed`: the data, if already
+        parsed by _json."""
         if block.event == "message" and block.data.strip() == "[DONE]":
             self.done = True
             return []
         handler = self._HANDLERS.get(block.event)
         if handler is None:
             return []  # the stand's summary and events from the future: ours replace or ignore them
-        limit = MAX_TRACE_BLOCK_BYTES if block.event in ("contexts", "pipeline_trace") else MAX_BLOCK_BYTES
-        if block.raw_size > limit:
+        if block.raw_size > _block_limit(block.event):
             self.violation("block_too_large", f"{block.event} block of {block.raw_size} bytes is over the limit")
             return []
-        obj = _json(block.data)
+        obj = _json(block.data) if parsed is _UNPARSED else parsed
         if obj is _BAD:
             self.violation("bad_json", "data is not JSON")
             return []
@@ -204,6 +246,13 @@ class Relay:
         except ValidationError as exc:
             self.violation("bad_event", f"stage event rejected: {exc.errors()[0]['msg']}")
             return []
+        if event.stage not in self._stage_names:  # every name becomes a stored row and a client event
+            if len(self._stage_names) >= MAX_STAGE_NAMES:
+                if not self._stage_names_full:
+                    self._stage_names_full = True
+                    self.violation("too_many_stages", f"more than {MAX_STAGE_NAMES} stage names, the rest are ignored")
+                return []
+            self._stage_names.add(event.stage)
         manifest = self.target.manifest
         payload: dict[str, Any] = {"stage": event.stage, "status": event.status}
         declared = event.stage in STANDARD_STAGES
@@ -329,6 +378,21 @@ async def _read_prefix(r: httpx.Response, timeout_s: float, limit: int = 2000) -
     return bytes(data[:limit]).decode("utf-8", errors="replace")
 
 
+async def _text_within_budget(r: httpx.Response) -> AsyncIterator[str]:
+    """The stream as UTF-8 text, ended with an error once more than MAX_STREAM_BYTES were read: the limits per
+    block do not stop a stand that sends endless thinking or comments within its time."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    read = 0
+    async for data in r.aiter_bytes():
+        read += len(data)
+        if read > MAX_STREAM_BYTES:
+            raise StandStreamError("stand_stream_too_large", f"the stream is longer than {MAX_STREAM_BYTES} bytes")
+        if text := decoder.decode(data):
+            yield text
+    if tail := decoder.decode(b"", final=True):
+        yield tail
+
+
 async def relay_stream(
     http: httpx.AsyncClient,
     target: StandTarget,
@@ -353,7 +417,7 @@ async def relay_stream(
         if r.status_code >= 400:
             text = await _read_prefix(r, max(0.0, deadline - loop.time()))
             raise _status_error(r.status_code, text, r.headers)
-        blocks = iter_blocks(r.aiter_text(), max_bytes=HARD_BLOCK_BYTES)
+        blocks = iter_blocks(_text_within_budget(r), max_bytes=HARD_BLOCK_BYTES)
         try:
             while True:
                 try:
@@ -366,7 +430,7 @@ async def relay_stream(
                     ) from exc
                 except SseBlockTooLarge as exc:
                     raise StandStreamError("stand_block_too_large", str(exc)) from exc
-                for text in relay.handle(block):
+                for text in await relay.handle_async(block):
                     yield text
                 if relay.done:
                     break  # [DONE] ends the answer; whatever the stand does after it is not ours to wait for

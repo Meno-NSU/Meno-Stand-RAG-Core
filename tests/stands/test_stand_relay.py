@@ -14,6 +14,7 @@ from sqlalchemy import text
 from meno_rag.api import metrics
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import classify_stand_error
+from meno_rag.api.stands import relay as relay_mod
 from meno_rag.api.stands.config import StandEntry
 from meno_rag.api.stands.registry import StandTarget
 from meno_rag.api.stands.relay import Relay, StandStreamError, relay_stream, stand_request_body
@@ -490,3 +491,137 @@ async def test_a_stalled_error_body_does_not_outlive_the_total_limit():
     with pytest.raises(StandStreamError) as e:
         await _run_relay(status=500, pieces=[b"partial", 5.0, b"never"], total_timeout_s=0.1)
     assert loop.time() - started < 2.0 and e.value.code == "transient_upstream_5xx"
+
+
+# ---- a misbehaving stream stays cheap
+
+
+def _raw(relay, event, raw_json):
+    """Feed a block whose data is JSON text as the stand wrote it (escapes included)."""
+    return relay.handle(parse_block((f"event: {event}\n" if event else "") + f"data: {raw_json}"))
+
+
+def _with_content(raw_text):
+    """A chunk whose content is the JSON string body `raw_text`, escapes kept as written."""
+    return json.dumps(chunk("PLACEHOLDER")).replace("PLACEHOLDER", raw_text)
+
+
+def test_lone_surrogates_and_nul_are_cleaned_and_an_emoji_is_kept():
+    r = _relay()
+    out = _raw(r, None, _with_content(r"a\ud83d b\u0000c 😀 \udc00"))
+    assert r.answer == "a� bc \U0001f600 �"
+    "".join(out).encode("utf-8")  # a client can be sent it
+    thinking = _raw(r, "thinking", r'{"content": "x\ud83dy\u0000"}')
+    assert _payload(thinking[0]) == {"content": "x�y"}
+    "".join(thinking).encode("utf-8")
+    sources = _raw(r, "sources", r'{"sources": [{"document_title": "T\udfff\u0000", "source_url": "https://a"}]}')
+    assert r.sources == [{"document_title": "T�", "source_url": "https://a"}]
+    "".join(sources).encode("utf-8")
+    _raw(r, "pipeline_trace", r'{"pipeline_trace": {"k\ud800": ["v\u0000", {"n": 1}]}}')
+    assert r.trace == {"k�": ["v", {"n": 1}]}
+
+
+def test_bad_characters_reach_neither_the_client_nor_the_history(make_client, tmp_path):  # noqa: F811
+    body = sse(
+        block(data=_with_content(r"О\ud83dт\u0000в 😀")),
+        block("thinking", r'{"content": "\udc00"}'),
+        block("sources", r'{"sources": [{"document_title": "\ud83d", "source_url": "https://a"}]}'),
+        block(data="[DONE]"),
+    )
+    c, db, _ = stand_client(make_client, tmp_path, stand_handler([], stream_body=body))
+    r = _ask(c)
+    assert r.status_code == 200 and "event: error" not in r.text
+    assert "�" in r.content.decode("utf-8")
+    assert _answers(db) == [("assistant", "О�тв \U0001f600")]
+
+
+def test_deeply_nested_json_is_dropped_as_bad_json():
+    r, before = _relay(), _violations("lab", "bad_json")
+    assert _raw(r, "pipeline_trace", '{"pipeline_trace": ' + "[" * 100_000 + "]" * 100_000 + "}") == []
+    assert _violations("lab", "bad_json") == before + 1
+
+
+def test_the_stream_budgets_are_contract_constants():
+    from meno_contract import models
+
+    assert (models.MAX_STAGE_NAMES, models.MAX_LOGGED_VIOLATIONS, models.MAX_STREAM_BYTES) == (64, 5, 64_000_000)
+
+
+def test_more_stage_names_than_the_budget_are_ignored_with_one_violation():
+    from meno_contract.models import MAX_STAGE_NAMES
+
+    r, before = _relay(record_metrics=True), _violations("lab", "too_many_stages")
+    sent = [_feed(r, "stage", {"stage": f"s{i}", "status": "completed", "duration_ms": 1.0}) for i in range(70)]
+    assert all(sent[:MAX_STAGE_NAMES]) and not any(sent[MAX_STAGE_NAMES:])
+    assert len(r.stage_durations) == MAX_STAGE_NAMES
+    assert _feed(r, "stage", {"stage": "s0", "status": "completed", "duration_ms": 1.0})  # a known name still passes
+    assert _violations("lab", "too_many_stages") == before + 1
+
+
+def test_violations_are_logged_up_to_the_budget_and_all_counted():
+    from structlog.testing import capture_logs
+
+    r, before = _relay(), _violations("lab", "bad_json")
+    with capture_logs() as logs:
+        for _ in range(8):
+            _feed(r, data="{not json")
+    events = [e["event"] for e in logs]
+    assert events.count("stand_contract_violation") == 5
+    assert events.count("stand_contract_violations_suppressed") == 1
+    assert _violations("lab", "bad_json") == before + 8
+
+
+@pytest.mark.parametrize(
+    "piece",
+    [
+        sse(block("thinking", {"content": "т" * 1000})),  # thinking is not kept, but its bytes are read
+        b": " + b"p" * 2000 + b"\n\n",  # nor are comments
+    ],
+    ids=["thinking", "comments"],
+)
+async def test_a_stream_ends_once_it_has_sent_more_than_the_byte_budget(monkeypatch, piece):
+    monkeypatch.setattr(relay_mod, "MAX_STREAM_BYTES", 20_000)
+    sent = {"bytes": 0}
+
+    async def body():
+        for _ in range(1000):
+            sent["bytes"] += len(piece)
+            yield piece
+
+    def handler(request):
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+
+    target = _target(manifest(stages=_STAGES))
+    relay = Relay(completion_id="ours", created=1, target=target)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(StandStreamError) as e:
+            async for _ in relay_stream(http, target, {"model": "gemma"}, relay, request_id="chatcmpl-1"):
+                pass
+    assert e.value.code == "stand_stream_too_large" and e.value.classified().code == "stand_stream_too_large"
+    assert sent["bytes"] <= 20_000 + len(piece)
+
+
+def test_a_stream_over_the_byte_budget_ends_in_the_usual_error(make_client, tmp_path, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(relay_mod, "MAX_STREAM_BYTES", 20_000)
+    body = sse(*[block("thinking", {"content": "т" * 1000})] * 30, block(data=chunk("Ответ")), block(data="[DONE]"))
+    c, db, reg = stand_client(make_client, tmp_path, stand_handler([], stream_body=body))
+    r = _ask(c)
+    error = json.loads(next(b for n, b in _events(r) if n == "error").split("data: ", 1)[1])
+    assert error["code"] == "stand_stream_too_large" and r.text.rstrip().endswith("data: [DONE]")
+    assert _answers(db) == []
+    assert reg.resolve("gemma@lab").limiter.active == 0 and c.app.state.admission.active == 0
+
+
+async def test_a_large_block_is_parsed_off_the_event_loop(monkeypatch):
+    parsed_in_thread = []
+    real = asyncio.to_thread
+
+    async def spy(func, *args, **kwargs):
+        parsed_in_thread.append(len(args[0].encode()))
+        return await real(func, *args, **kwargs)
+
+    monkeypatch.setattr(relay_mod.asyncio, "to_thread", spy)
+    big = {"contexts": [{"id": "1", "text": "я" * 200_000}]}  # about 400 KB
+    r = await _run_relay(pieces=[sse(block(data=chunk("а")), block("contexts", big), block(data="[DONE]"))])
+    assert r.contexts[0]["text"] == "я" * 200_000 and r.answer == "а"
+    assert len(parsed_in_thread) == 1 and parsed_in_thread[0] > relay_mod.THREAD_PARSE_BYTES

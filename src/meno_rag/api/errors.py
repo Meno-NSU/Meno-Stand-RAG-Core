@@ -256,7 +256,9 @@ _STAND_KNOWN: dict[str, tuple[str, int]] = {
 }
 
 # Codes the gateway gives for its own limits; the user text is the generic one.
-_STAND_OWN = frozenset({"too_long", "stand_empty_answer", "stand_block_too_large", "stand_error"})
+_STAND_OWN = frozenset(
+    {"too_long", "stand_empty_answer", "stand_block_too_large", "stand_stream_too_large", "stand_error"}
+)
 
 
 def classify_stand_error(
