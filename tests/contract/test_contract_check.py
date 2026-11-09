@@ -110,7 +110,19 @@ async def test_think_in_the_answer_is_a_warning_only():
     assert report.ok and "<think>" in format_report(report)
 
 
-def test_main_returns_nonzero_when_the_stand_is_down():
+@pytest.fixture
+def current_event_loop_kept():
+    """main() ends in asyncio.run, which leaves the thread with no current event loop for good, so a later test in the
+    same process that calls asyncio.get_event_loop() dies (tests/test_chat_or_errors.py). See tests/_dbhelpers.py."""
+    try:
+        previous = asyncio.get_event_loop_policy().get_event_loop()
+    except RuntimeError:
+        previous = None
+    yield
+    asyncio.set_event_loop(previous)
+
+
+def test_main_returns_nonzero_when_the_stand_is_down(current_event_loop_kept):
     assert main(["http://127.0.0.1:9"]) == 1
 
 

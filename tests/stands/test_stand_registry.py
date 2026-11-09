@@ -40,13 +40,32 @@ def _registry(served, *, path=None, arena=False, api_key="", name="", stands=Non
     return StandRegistry(str(path), http_client=http), calls
 
 
+_last_mtime_ns = 0
+
+
 def _bump_mtime(path):
+    """Marks the file as changed. Two writes can land in one filesystem timestamp tick, so every bump goes past the
+    last one given out: adding a fixed step to the file's own time would give both writes the same mtime."""
+    global _last_mtime_ns
     st = os.stat(path)
-    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    _last_mtime_ns = max(st.st_mtime_ns, _last_mtime_ns) + 5_000_000_000
+    os.utime(path, ns=(st.st_atime_ns, _last_mtime_ns))
 
 
 def _metric(name, **labels):
     return metrics.REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+def test_bump_mtime_is_strictly_increasing_for_writes_in_one_timestamp_tick(tmp_path):
+    path = tmp_path / "f"
+    path.write_text("a")
+    tick = os.stat(path).st_mtime_ns
+    _bump_mtime(path)
+    first = os.stat(path).st_mtime_ns
+    path.write_text("b")
+    os.utime(path, ns=(tick, tick))  # the second write landed in the tick of the first
+    _bump_mtime(path)
+    assert os.stat(path).st_mtime_ns > first
 
 
 def test_a_manifest_gives_the_menu_entries():
