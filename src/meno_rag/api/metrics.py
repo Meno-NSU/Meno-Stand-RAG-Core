@@ -156,8 +156,11 @@ def _bool_label(value: bool) -> str:
 
 
 MAX_VERSIONS_PER_STAND = 32
+MAX_LLMS_PER_STAND = 64
+MAX_LLM_LABEL_CHARS = 128
 OTHER = "other"
 _versions_seen: dict[str, set[str]] = {}
+_llms_seen: dict[str, set[str]] = {}
 _versions_lock = threading.Lock()
 
 
@@ -178,11 +181,31 @@ def bounded_version(stand: str, version: str) -> str:
     return OTHER
 
 
+def bounded_llm(stand: str, llm: str) -> str:
+    """The LLM as a label value. It can be what a client sent (while the vLLM list is empty any id is accepted), so
+    the first 64 distinct names of a stand keep their name, later new ones become 'other' (and count as a too_many_llms
+    violation), as does anything over 128 characters. An empty name (nobody is known) takes no place."""
+    if not llm:
+        return llm
+    if len(llm) > MAX_LLM_LABEL_CHARS:
+        return OTHER
+    with _versions_lock:
+        seen = _llms_seen.setdefault(stand, set())
+        if llm in seen:
+            return llm
+        if len(seen) < MAX_LLMS_PER_STAND:
+            seen.add(llm)
+            return llm
+    record_stand_violation(stand, "too_many_llms")
+    return OTHER
+
+
 def record_chat_request(
     *, provider: str, stream: bool, status: str, seconds: float, stand: str = "", version: str = "", llm: str = ""
 ) -> None:
     stream_label = _bool_label(stream)
     version = bounded_version(stand, version)
+    llm = bounded_llm(stand, llm)
     _CHAT_REQUESTS.labels(
         provider=provider, stream=stream_label, status=status, stand=stand, version=version, llm=llm
     ).inc()
@@ -204,7 +227,7 @@ def record_time_to_first_token(
     *, provider: str, seconds: float, stand: str = "", version: str = "", llm: str = ""
 ) -> None:
     _TIME_TO_FIRST_TOKEN.labels(
-        provider=provider, stand=stand, version=bounded_version(stand, version), llm=llm
+        provider=provider, stand=stand, version=bounded_version(stand, version), llm=bounded_llm(stand, llm)
     ).observe(seconds)
 
 

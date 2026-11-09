@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tests.v2 import test_api_v2
 
 make_client = test_api_v2.make_client  # the pytest fixture of the stand tests
@@ -467,3 +469,57 @@ def test_a_benchmark_moves_no_stand_series(make_client, tmp_path):
         assert r.status_code == 200
     assert [_sample_sum(n) for n in names] == before
     assert 'version="vbench"' not in _render()
+
+
+def _llm_labels(stand: str) -> set[str]:
+    return set(re.findall(rf'meno_chat_requests_total\{{llm="([^"]*)",provider="[^"]*",stand="{stand}"', _render()))
+
+
+def test_llm_labels_are_capped_per_stand():
+    from meno_rag.api import metrics
+
+    for i in range(70):
+        metrics.record_chat_request(
+            provider="external", stream=True, status="ok", seconds=0.1, stand="llmcap", version="v1", llm=f"m{i}"
+        )
+    assert _llm_labels("llmcap") == {f"m{i}" for i in range(64)} | {"other"}
+    assert metrics.bounded_llm("llmcap", "m0") == "m0"  # a name that already has its place keeps it
+    assert metrics.bounded_llm("another-stand", "m69") == "m69"
+    assert 'meno_stand_contract_violations_total{kind="too_many_llms",stand="llmcap"}' in _render()
+
+
+def test_a_long_llm_name_becomes_other_and_an_empty_one_stays_empty():
+    from meno_rag.api import metrics
+
+    assert metrics.bounded_llm("llmlen", "x" * 128) == "x" * 128
+    assert metrics.bounded_llm("llmlen", "x" * 129) == "other"
+    assert metrics.bounded_llm("llmlen", "") == ""
+    for i in range(63):
+        assert metrics.bounded_llm("llmlen", f"m{i}") == f"m{i}"  # the empty and the long names took no place
+
+
+def test_the_first_token_series_is_capped_too():
+    from meno_rag.api import metrics
+
+    metrics.record_time_to_first_token(provider="external", seconds=0.1, stand="llmttft", version="v1", llm="y" * 300)
+    text = _render()
+    assert "y" * 129 not in text
+    assert 'meno_chat_time_to_first_token_seconds_count{llm="other",provider="external",stand="llmttft"' in text
+
+
+def test_a_long_model_id_from_a_client_does_not_reach_the_labels(monkeypatch):
+    # With the vLLM list empty (nothing listens on the endpoint here) resolve_model returns the id the client sent.
+    from meno_rag.api import main as main_mod
+
+    async def fake_persist(**kwargs):
+        return None
+
+    monkeypatch.setattr(main_mod, "_persist_success", fake_persist)
+    long_id = "z" * 300
+    with TestClient(main_mod.app) as c:
+        c.app.state.pipeline = _FakeNonStreamPipeline()
+        body = {"model": long_id, "messages": [{"role": "user", "content": "q"}], "stream": False}
+        assert c.post("/v1/chat/completions", json=body).status_code == 200
+        text = c.get("/metrics").text
+    assert long_id not in text and "z" * 129 not in text
+    assert 'llm="other",provider="vllm",stand="menon-1.0",status="ok",stream="false"' in text
