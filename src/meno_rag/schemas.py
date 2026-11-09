@@ -107,9 +107,9 @@ class VoteRequest(BaseModel):
     # An empty model string is nonsensical for arena (it makes leaderboard rows that can never be
     # matched again) — reject it at the schema layer. kb_a/kb_b are only kept for older clients: the
     # server decides the rating key (stand@version) itself and ignores them, so they may be empty.
-    model_a: str = Field(..., min_length=1)
+    model_a: str = Field(..., min_length=1, max_length=256)
     kb_a: str = Field(default="", max_length=128)
-    model_b: str = Field(..., min_length=1)
+    model_b: str = Field(..., min_length=1, max_length=256)
     kb_b: str = Field(default="", max_length=128)
     winner: Literal["a", "b", "tie", "both_bad"]
     response_a: str | None = None
@@ -123,7 +123,7 @@ class VoteRequest(BaseModel):
 
 class ArenaSide(BaseModel):
     key: Literal["a", "b"]
-    model: str | None = None
+    model: str | None = Field(default=None, max_length=256)
     knowledge_base_id: str | None = None
     # Generous enough for a real answer even in the least token-efficient realistic case:
     # settings.max_output_tokens defaults to 8192 tokens, and a mostly-Latin/code-heavy

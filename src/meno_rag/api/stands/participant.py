@@ -5,15 +5,18 @@ run inside this process and are described by the same kind of record."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from meno_rag.api.knowledge_bases import V2_KB_ID, split_virtual_model
+from meno_rag.api.stands.config import STAND_ID
 from meno_rag.api.stands.registry import StandRegistry
 from meno_rag.config import Settings
 
 LEGACY_STAND_ID = "menon-1.0"
 V2_STAND_ID = "menon-1.1"
 UNKNOWN_VERSION = "unknown"
+VERSION = re.compile(r"[A-Za-z0-9._+-]{1,64}")  # the contract's version pattern; keeps a label within 128 characters
 
 
 @dataclass(frozen=True)
@@ -37,8 +40,8 @@ def participant_for(
     base, virtual = split_virtual_model(public_model)
     if virtual:
         return Participant(V2_STAND_ID, settings.v2_version, base or public_model)
-    if "@" in public_model:
-        llm, _, stand = public_model.rpartition("@")
+    llm, _, stand = public_model.rpartition("@")
+    if llm and STAND_ID.fullmatch(stand):  # anything else is not a stand id and must not grow a label
         return Participant(stand, UNKNOWN_VERSION, llm)
     if kb_hint == V2_KB_ID:
         return Participant(V2_STAND_ID, settings.v2_version, public_model)
@@ -50,7 +53,7 @@ def stored_participant(public_model: str, stored_kb: str | None) -> Participant 
     if not stored_kb or "@" not in stored_kb:
         return None
     stand, _, version = stored_kb.rpartition("@")
-    if not stand or not version:
+    if not STAND_ID.fullmatch(stand) or not VERSION.fullmatch(version):
         return None
     llm = public_model.rpartition("@")[0] if "@" in public_model else public_model
     return Participant(stand, version, llm)

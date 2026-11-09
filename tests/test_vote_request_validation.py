@@ -35,6 +35,13 @@ def test_empty_string_rejected(field):
         VoteRequest(**_valid_payload(**{field: ""}))
 
 
+@pytest.mark.parametrize("field", ["model_a", "model_b"])
+def test_overlong_model_rejected(field):
+    assert getattr(VoteRequest(**_valid_payload(**{field: "m" * 256})), field) == "m" * 256
+    with pytest.raises(ValidationError):
+        VoteRequest(**_valid_payload(**{field: "m" * 257}))
+
+
 @pytest.mark.parametrize("field", ["kb_a", "kb_b"])
 def test_empty_kb_allowed_and_long_kb_rejected(field):
     # The server decides the rating key; the client's kb is only kept for older clients.

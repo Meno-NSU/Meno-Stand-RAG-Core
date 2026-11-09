@@ -198,3 +198,30 @@ def test_the_leaderboard_marks_live_rows(make_client, tmp_path):  # noqa: F811
     rows = {(r["model"], r["knowledge_base"]): r["live"] for r in c.get("/v1/arena/leaderboard").json()["data"]}
     assert rows[("gemma", "lab@v1")] is True
     assert rows[("meno-lite", "nsu-stand-faiss-bm25")] is False
+
+
+# ---- labels always fit their columns (String(128))
+
+
+def test_an_overlong_stand_part_never_makes_a_long_label():
+    got = participant_for("x@" + "y" * 200, registry=None, settings=_settings())
+    assert got == Participant("menon-1.0", "2026-07", "x@" + "y" * 200)
+    assert len(got.kb) <= 128
+
+
+def test_stored_participant_rejects_an_overlong_stand_or_version():
+    assert stored_participant("gemma@lab", "y" * 33 + "@v1") is None
+    assert stored_participant("gemma@lab", "lab@" + "v" * 65) is None
+    assert stored_participant("gemma@lab", "lab@v 1") is None
+
+
+def test_a_vote_with_an_overlong_model_id_gets_a_short_rating_label(make_client, tmp_path):  # noqa: F811
+    c, db, _ = _arena_client(make_client, tmp_path, version="v1")
+    model = "x@" + "y" * 200
+    assert _vote(c, model_a=model, model_b="gemma@lab", session=None).status_code == 200
+    assert all(len(kb) <= 128 for _, kb in _ratings(db))
+
+
+def test_a_vote_with_a_model_over_256_characters_is_refused(make_client, tmp_path):  # noqa: F811
+    c, _, _ = _arena_client(make_client, tmp_path, version="v1")
+    assert _vote(c, model_a="m" * 257, session=None).status_code == 422
