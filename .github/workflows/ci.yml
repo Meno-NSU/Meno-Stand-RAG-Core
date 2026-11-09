@@ -45,24 +45,31 @@ jobs:
         run: uv lock --check
 
       - name: Install dependencies
+        id: install
         run: uv sync --all-groups --frozen
 
+      # Each check below runs and reports on its own: a lint or format failure must not hide the test results.
       - name: Lint
         run: uv run --frozen ruff check --output-format=github .
 
       - name: Format check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen ruff format --check .
 
       - name: Type check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen mypy
 
       - name: Compile Python sources
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen python -m compileall -q src tests
 
       - name: Build package
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv build --sdist --wheel
 
       - name: Test
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen pytest -q
 
   contract:
