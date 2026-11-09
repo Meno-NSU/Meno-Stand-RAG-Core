@@ -118,7 +118,21 @@ async def test_a_stream_that_is_not_utf8_fails_whatever_charset_it_names():
     # The gateway reads the stream as UTF-8, so these cp1251 bytes would reach the reader as U+FFFD.
     report = await run_checks(_client(content_type=CP1251, encoding="cp1251"), "http://stand")
     failed = format_report(report).split("Итог")[0]
-    assert not report.ok and "UTF-8" in failed and "windows-1251" in failed
+    assert not report.ok and "windows-1251" in failed and "Контракт требует UTF-8 во всём потоке" in failed
+
+
+async def test_bytes_that_are_not_utf8_fail_even_in_a_comment_the_gateway_skips():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/meno/v1/manifest":
+            return httpx.Response(200, json=MANIFEST)
+        if json.loads(request.content)["model"] != "m1":
+            return httpx.Response(400, json={"error": {"message": "unknown model"}})
+        trace = request.headers.get("X-Meno-Trace") == "1"
+        stream = _stream(None, trace).encode().replace(b": start", ": старт".encode("cp1251"))
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+
+    report = await run_checks(httpx.AsyncClient(transport=httpx.MockTransport(handler)), "http://stand")
+    assert not report.ok and "UTF-8" in format_report(report)
 
 
 async def test_the_stream_is_read_as_utf8_whatever_charset_it_names():

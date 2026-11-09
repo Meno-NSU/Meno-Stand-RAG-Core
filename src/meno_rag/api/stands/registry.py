@@ -259,6 +259,8 @@ class StandRegistry:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        # A background task cancelled before its first step never runs the finally that clears its reference.
+        self._background = self._refreshing = None
 
     async def entries(self) -> list[dict[str, Any]]:
         # A due refresh runs in the background, one at a time, and this answers at once with what is known: a stand

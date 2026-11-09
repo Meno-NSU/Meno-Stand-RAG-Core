@@ -164,7 +164,8 @@ async def _consume(
 async def _as_the_gateway_reads(response: httpx.Response, seen: _Stream) -> AsyncIterator[str]:
     """The stream as the gateway reads it: UTF-8 whatever charset Content-Type names, a byte that is not UTF-8 turned
     into U+FFFD, cut after MAX_STREAM_BYTES bytes (comments and thinking included). Bytes that are not UTF-8 are a
-    problem, since the reader would see U+FFFD in their place."""
+    problem anywhere in the stream, even where the gateway skips them (a comment, anything after [DONE]): the
+    contract asks for UTF-8 throughout."""
     shown = codecs.getincrementaldecoder("utf-8")(errors="replace")
     strict = codecs.getincrementaldecoder("utf-8")()
     utf8 = True
@@ -196,8 +197,9 @@ def _decodes(decoder: codecs.IncrementalDecoder, data: bytes, *, final: bool = F
 def _not_utf8(response: httpx.Response) -> str:
     named = f" (Content-Type называет charset={response.charset_encoding})" if response.charset_encoding else ""
     return (
-        f"Поток не в UTF-8{named}. Шлюз читает поток как UTF-8, какую бы кодировку ни называл Content-Type, "
-        "и вместо таких байтов читатель увидит «�». Шлите поток в UTF-8."
+        f"Поток не в UTF-8{named}. Контракт требует UTF-8 во всём потоке. Шлюз читает поток как UTF-8, какую бы "
+        "кодировку ни называл Content-Type, и заменяет такие байты на «�»: если они попадут в текст ответа, "
+        "источники или этапы, читатель увидит «�» вместо букв. Шлите поток в UTF-8."
     )
 
 

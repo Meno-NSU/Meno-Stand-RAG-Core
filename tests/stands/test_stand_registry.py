@@ -344,6 +344,96 @@ def test_a_file_rewritten_within_one_mtime_is_read_again_when_its_size_changed(t
     assert reg.resolve("gemma@second") is not None
 
 
+@pytest.mark.parametrize("cancelled", ["starter", "waiter"])
+def test_a_caller_that_gives_up_leaves_the_shared_refresh_to_the_others(tmp_path, cancelled):
+    # A refresh is shared by everyone who waits for it, so cancelling one of them (a client that disconnects from
+    # POST /v1/models/refresh) must not cancel it for the others.
+    async def scenario():
+        reg, _, gate = _gated_registry(tmp_path / "stands.json", [{"id": "lab", "url": "http://lab.example"}])
+        callers = {"starter": asyncio.create_task(reg.refresh())}
+        await asyncio.sleep(0.05)
+        shared = reg._refreshing
+        callers["waiter"] = asyncio.create_task(reg.refresh())
+        await asyncio.sleep(0.05)
+        callers[cancelled].cancel()
+        await asyncio.sleep(0.05)
+        gate.set()
+        other = callers["waiter" if cancelled == "starter" else "starter"]
+        await asyncio.wait_for(other, 5)
+        return callers[cancelled], other, shared, reg
+
+    gone, other, shared, reg = _run(scenario())
+    assert gone.cancelled() and other.done() and not other.cancelled()
+    assert shared.done() and not shared.cancelled() and reg.resolve("gemma@lab") is not None
+
+
+def test_an_explicit_caller_that_gives_up_on_a_later_refresh_leaves_it_running(tmp_path):
+    # Two explicit callers wait for a refresh that read the file before it changed. The first then starts one more,
+    # and the second waits for that one; cancelling the second must not cancel it.
+    path = tmp_path / "stands.json"
+    lab = {"id": "lab", "url": "http://lab.example"}
+
+    async def scenario():
+        first_gate, later_gate = asyncio.Event(), asyncio.Event()
+        ok = stand_handler([], manifest=manifest())
+
+        async def handler(request):
+            await (first_gate if len(calls) == 1 else later_gate).wait()
+            return ok(request)
+
+        reg, calls = _registry(None, path=path, stands=[lab], handler=handler)
+        running = asyncio.create_task(reg.refresh())
+        await asyncio.sleep(0.05)
+        _bump_mtime(path)
+        first, second = (asyncio.create_task(reg.refresh(current_file=True)) for _ in range(2))
+        await asyncio.sleep(0.05)
+        first_gate.set()
+        await asyncio.sleep(0.05)  # the first explicit caller has started one more refresh, the second waits for it
+        later = reg._refreshing
+        second.cancel()
+        await asyncio.sleep(0.05)
+        later_gate.set()
+        await asyncio.wait_for(asyncio.gather(running, first), 5)
+        return second, later, len(calls)
+
+    second, later, asked = _run(scenario())
+    assert second.cancelled() and later.done() and not later.cancelled() and asked == 2
+
+
+def test_an_error_in_the_shared_refresh_reaches_every_caller(tmp_path, monkeypatch):
+    async def scenario():
+        stands = [{"id": "ok", "url": "http://ok.example"}, {"id": "bad", "url": "http://bad.example"}]
+        reg, _, gate = _gated_registry(tmp_path / "stands.json", stands)
+        discover = reg._discover
+
+        async def bad_raises(stand):
+            if stand.id == "bad":
+                await gate.wait()
+                raise RuntimeError("boom")
+            await discover(stand)
+
+        monkeypatch.setattr(reg, "_discover", bad_raises)
+        starter = asyncio.create_task(reg.refresh())
+        await asyncio.sleep(0.05)
+        waiter = asyncio.create_task(reg.refresh())
+        await asyncio.sleep(0.05)
+        gate.set()
+        return await asyncio.wait_for(asyncio.gather(starter, waiter, return_exceptions=True), 5)
+
+    errors = _run(scenario())
+    assert [(type(e), str(e)) for e in errors] == [(RuntimeError, "boom")] * 2
+
+
+def test_aclose_before_the_background_refresh_has_started_keeps_no_task():
+    async def scenario():
+        reg, _ = _registry(manifest(), cache_ttl=0)
+        await reg.entries()  # creates the background refresh; it has not run a step yet
+        await reg.aclose()
+        return reg._background, reg._refreshing
+
+    assert _run(scenario()) == (None, None)
+
+
 def test_the_discovery_of_a_stand_no_longer_in_the_file_returns_quietly(tmp_path):
     reg, calls = _registry(manifest(), path=tmp_path / "stands.json")
     gone = parse_stands(json.dumps([{"id": "gone", "url": "http://gone.example"}]))[0]
