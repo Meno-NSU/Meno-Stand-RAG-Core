@@ -5,14 +5,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from sqlalchemy import text
 
 from meno_rag.api import main as main_mod
+from meno_rag.api.knowledge_bases import LEGACY_KB_ID
 from meno_rag.schemas import ChatCompletionRequest
+from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime
 from tests._dbhelpers import with_db
 from tests.stands._helpers import (
     LAB,
@@ -205,6 +209,68 @@ def test_a_vanished_model_is_a_clear_error(make_client, tmp_path, model, pipelin
     assert not (c.app.state.pipeline and c.app.state.pipeline.prepare_called)
     assert seen == []
     assert c.app.state.admission.active == 0
+
+
+def _provider_lists(c, *, vllm=(), openrouter=()):
+    c.app.state.vllm_registry.list_models = AsyncMock(return_value=[{"id": m, "endpoint": "http://v"} for m in vllm])
+    c.app.state.openrouter_registry = SimpleNamespace(
+        list_models=AsyncMock(return_value=[{"id": m} for m in openrouter])
+    )
+
+
+@pytest.mark.parametrize("provider", ["vllm", "openrouter"])
+def test_a_provider_may_list_an_id_with_an_at_sign(make_client, tmp_path, provider):  # noqa: F811
+    seen = []
+    c, _, _ = stand_client(make_client, tmp_path, stand_handler(seen))
+    _provider_lists(c, **{provider: ["org/model@v2"]})
+    r = c.post("/v1/chat/completions", json={**ASK, "model": "org/model@v2", "stream": False})
+    assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "Старый"
+    assert seen == []
+
+
+def test_an_id_nobody_lists_keeps_its_400(make_client, tmp_path):  # noqa: F811
+    c, _, _ = stand_client(make_client, tmp_path, stand_handler([]))
+    _provider_lists(c, vllm=["org/model@v2"], openrouter=["free/x@1"])
+    r = c.post("/v1/chat/completions", json={**ASK, "model": "org/model@v3", "stream": False})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "model_not_found"
+
+
+def test_a_provider_list_that_cannot_be_read_means_not_listed(make_client, tmp_path):  # noqa: F811
+    c, _, _ = stand_client(make_client, tmp_path, stand_handler([]))
+    c.app.state.vllm_registry.list_models = AsyncMock(side_effect=RuntimeError("boom"))
+    r = c.post("/v1/chat/completions", json={**ASK, "model": "org/model@v2", "stream": False})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "model_not_found"
+
+
+def test_the_gate_reads_the_cached_list(make_client, tmp_path, monkeypatch):  # noqa: F811
+    c, _, _ = stand_client(make_client, tmp_path, stand_handler([]))
+    vllm = c.app.state.vllm_registry
+    vllm._cache, vllm._cache_valid_until = [{"id": "org/model@v2", "endpoint": "http://v"}], time.monotonic() + 100
+    discover = AsyncMock()
+    monkeypatch.setattr(vllm, "discover", discover)
+    for model, status in (("org/model@v2", 200), ("org/model@v3", 400)):
+        assert c.post("/v1/chat/completions", json={**ASK, "model": model, "stream": False}).status_code == status
+    discover.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_an_answer_on_a_listed_id_is_stored_as_ours(make_client, tmp_path, monkeypatch, stream):  # noqa: F811
+    c, db, _ = stand_client(make_client, tmp_path, stand_handler([]))
+    _provider_lists(c, vllm=["org/model@v2"])
+    runtime = PipelineRuntime.uniform(ModelRuntime(provider="vllm", model_id="org/model@v2", base_url="http://v/v1"))
+    monkeypatch.setattr(main_mod, "_resolve_runtime", AsyncMock(return_value=runtime))
+    assert c.post("/v1/chat/completions", json={**ASK, "model": "org/model@v2", "stream": stream}).status_code == 200
+    assert {r[2:4] for r in _rows(db)} == {("org/model@v2", LEGACY_KB_ID)}
+    text = c.get("/metrics").text
+    assert 'llm="org/model@v2",provider="vllm",stand="menon-1.0"' in text and 'stand="v2"' not in text
+
+
+def test_a_stand_of_that_id_still_wins_over_a_provider(make_client, tmp_path):  # noqa: F811
+    seen = []
+    c, _, _ = stand_client(make_client, tmp_path, stand_handler(seen))
+    _provider_lists(c, vllm=["gemma@lab"])
+    assert c.post("/v1/chat/completions", json={**ASK, "stream": False}).status_code == 200
+    assert len(seen) == 1
 
 
 def test_a_stand_without_a_manifest_is_kept_out_of_the_arena(make_client, tmp_path):  # noqa: F811

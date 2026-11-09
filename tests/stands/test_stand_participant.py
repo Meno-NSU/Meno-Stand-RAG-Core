@@ -3,6 +3,8 @@ leaderboard, and is fixed when a round is stored so that a late vote counts for 
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import httpx
 import pytest
 from sqlalchemy import text
@@ -392,3 +394,30 @@ def test_the_metric_labels_of_our_pipelines_still_name_the_stand():
     assert (got.stand, got.version, got.llm, got.kb) == ("menon-1.0", "2026-07", "meno-lite", LEGACY_KB_ID)
     got = participant_for("gemma@gone", registry=None, settings=_settings())
     assert got.builtin_kb is None and got.kb == "gone@unknown"
+
+
+# ---- an id with "@" that a provider lists is ours, not a stand's
+
+
+def _provider_lists(c, model):
+    c.app.state.vllm_registry.list_models = AsyncMock(return_value=[{"id": model, "endpoint": "http://v"}])
+
+
+def test_a_vote_on_a_listed_id_keeps_its_row(make_client, tmp_path):  # noqa: F811
+    c, db, _ = _arena_client(make_client, tmp_path)
+    _provider_lists(c, "org/model@v2")
+    r = _vote(c, model_a="org/model@v2", kb_a=V2_KB_ID, model_b="qwen", kb_b=LEGACY_KB_ID, session=None)
+    assert r.status_code == 200
+    assert _ratings(db) == {("org/model@v2", V2_KB_ID), ("qwen", LEGACY_KB_ID)}
+
+
+def test_a_stored_side_of_a_listed_id_keeps_its_kb(make_client, tmp_path):  # noqa: F811
+    c, db, _ = _arena_client(make_client, tmp_path)
+    _provider_lists(c, "org/model@v2")
+    sides = [
+        {"key": "a", "model": "org/model@v2", "knowledge_base_id": V2_KB_ID, "content": "A", "sources": []},
+        {"key": "b", "model": "qwen", "knowledge_base_id": LEGACY_KB_ID, "content": "B", "sources": []},
+    ]
+    body = {"session_id": "c1", "question": "Q?", "turn_index": 0, "sides": sides}
+    assert c.post("/v1/arena/turn", json=body).status_code == 200
+    assert _stored_sides(db)[0]["knowledge_base_id"] == V2_KB_ID

@@ -3,7 +3,14 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from meno_rag.api import auth, guest
-from meno_rag.api.stands.participant import builtin_live_kbs, participant_for, rating_kb, stored_participant
+from meno_rag.api.stands.participant import (
+    BUILTIN_KBS,
+    builtin_live_kbs,
+    current_participant,
+    participant_for,
+    rating_kb,
+    stored_participant,
+)
 from meno_rag.db import repositories
 from meno_rag.db.orm import Conversation
 from meno_rag.schemas import ArenaTurnRequest, VoteRequest
@@ -48,9 +55,14 @@ async def submit_vote(vote: VoteRequest, request: Request):
             side = next((s for s in stored or [] if s.get("key") == side_key and s.get("model") == model), None)
             stored_kb = side.get("knowledge_base_id") if side else None
             participant = stored_participant(model, stored_kb)
-            if participant is None:
+            if participant is None and stored_kb in BUILTIN_KBS:  # stored as one of ours, whatever lists it now
                 participant = participant_for(
+                    model, registry=None, settings=request.app.state.settings, kb_hint=stored_kb, listed=True
+                )
+            if participant is None:
+                participant = await current_participant(
                     model,
+                    state=request.app.state,
                     registry=_registry(request),
                     settings=request.app.state.settings,
                     kb_hint=stored_kb or client_kb,
@@ -115,7 +127,7 @@ async def record_turn(payload: ArenaTurnRequest, request: Request):
             session,
             conversation_id=payload.session_id,
             question=payload.question,
-            sides=_sides_with_participants(payload, request),
+            sides=await _sides_with_participants(payload, request),
             turn_index=payload.turn_index,
             user_id=user_id,
             guest_session_id=guest_id,
@@ -125,7 +137,7 @@ async def record_turn(payload: ArenaTurnRequest, request: Request):
     return {"status": "ok", "stored": True}
 
 
-def _sides_with_participants(payload: ArenaTurnRequest, request: Request) -> list[dict]:
+async def _sides_with_participants(payload: ArenaTurnRequest, request: Request) -> list[dict]:
     """The stored sides: the participant is fixed now (the vote may come much later). A stand's label is the server's;
     for our own pipelines the client names one of our bases, anything else is dropped."""
     settings = request.app.state.settings
@@ -133,8 +145,12 @@ def _sides_with_participants(payload: ArenaTurnRequest, request: Request) -> lis
     for side in payload.sides:
         stored = side.model_dump()
         if side.model:
-            participant = participant_for(
-                side.model, registry=_registry(request), settings=settings, kb_hint=side.knowledge_base_id
+            participant = await current_participant(
+                side.model,
+                state=request.app.state,
+                registry=_registry(request),
+                settings=settings,
+                kb_hint=side.knowledge_base_id,
             )
             stored["knowledge_base_id"] = rating_kb(participant, side.knowledge_base_id)
         sides.append(stored)

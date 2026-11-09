@@ -47,7 +47,7 @@ from meno_rag.api.runtime_resolver import (
     ModelUnreachableError,
     resolve_pipeline_runtime,
 )
-from meno_rag.api.stands.participant import Participant, participant_for
+from meno_rag.api.stands.participant import Participant, listed_by_provider, participant_for
 from meno_rag.api.stands.registry import StandRegistry, StandTarget
 from meno_rag.api.stands.relay import Relay, StandStreamError, relay_stream, stand_request_body
 from meno_rag.api.validation import sanitize_validation_errors
@@ -797,8 +797,15 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
         response.headers["X-Bench-Mode"] = "1"
 
     # An id of the form <llm>@<stand> that the registry no longer knows (the LLM left the manifest, the stand
-    # left the file) is an error of its own: it must not fall through to our pipelines.
-    if external is None and payload.model and "@" in payload.model and not split_virtual_model(payload.model)[1]:
+    # left the file) is an error of its own: it must not fall through to our pipelines. vLLM and OpenRouter may
+    # list ids with "@" too; those are ours.
+    if (
+        external is None
+        and payload.model
+        and "@" in payload.model
+        and not split_virtual_model(payload.model)[1]
+        and not await listed_by_provider(request.app.state, payload.model)
+    ):
         _record_preflight_failure("model_not_found", bench=bench)
         return _error_response(400, f"Unknown model {payload.model!r}.", "model_not_found", param="model")
     # The arena only holds stands that take part in it; the frontend then picks another participant.
@@ -893,11 +900,13 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
         )
 
         # Who answers, for the history label: decided here, not by the client (stand answers store target.kb_id).
+        # Past the gate above, an id with "@" that no stand serves is one a provider lists: ours.
         participant = participant_for(
             _public_model(payload, runtime),
             registry=_stand_registry(request.app),
             settings=settings,
             kb_hint=kb_id,
+            listed=external is None,
         )
 
         if pipeline is None and external is None:
