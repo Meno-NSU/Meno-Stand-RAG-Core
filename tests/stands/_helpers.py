@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from meno_rag.api.stands.registry import StandRegistry
+from tests.v2.test_api_v2 import FakeLegacy
 
 LAB = {"id": "lab", "url": "http://lab.example:9006/", "api_key": "k-123", "name": "Менон лаборатории"}
 
@@ -109,3 +110,14 @@ def stand_client(make_client, tmp_path, handler, stands=None):
     c.app.state.stand_registry = registry
     c.portal.call(registry.refresh)
     return c, db, registry
+
+
+class RecordingLegacy(FakeLegacy):
+    """The in-process pipeline, remembering whether a request ever reached it."""
+
+    def __init__(self) -> None:
+        self.prepare_called = False
+
+    async def prepare(self, **kw):
+        self.prepare_called = True
+        return await super().prepare(**kw)

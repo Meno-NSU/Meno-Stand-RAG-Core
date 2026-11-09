@@ -6,7 +6,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,10 +24,6 @@ from meno_rag.api import bench as bench_mod
 from meno_rag.api import metrics as metrics_mod
 from meno_rag.api.admission import AdmissionController
 from meno_rag.api.errors import ClassifiedError, classify_error
-from meno_rag.api.external import (
-    complete,
-    upstream_body,
-)
 from meno_rag.api.events import (
     StageEvent,
     StageName,
@@ -802,15 +798,34 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
         # never mistaken for a successful, damage-doing production write.
         response.headers["X-Bench-Mode"] = "1"
 
+    # An id of the form <llm>@<stand> that the registry no longer knows (the LLM left the manifest, the stand
+    # left the file) is an error of its own: it must not fall through to our pipelines.
+    if external is None and payload.model and "@" in payload.model and not split_virtual_model(payload.model)[1]:
+        _record_preflight_failure("model_not_found", bench=bench)
+        return _error_response(400, f"Unknown model {payload.model!r}.", "model_not_found", param="model")
+    # The arena only holds stands that take part in it; the frontend then picks another participant.
+    if external is not None and payload.arena and not external.arena:
+        _record_preflight_failure("stand_not_in_arena", bench=bench)
+        return _error_response(403, "This stand does not take part in the arena.", "stand_not_in_arena")
+
     # Admission control: fast-fail under overload rather than queueing forever.
     admission: AdmissionController = request.app.state.bench_admission if bench else request.app.state.admission
     if not admission.try_acquire():
         _record_preflight_failure("overloaded", bench=bench)
         return _overloaded_response(active=admission.active, limit=admission.max_concurrent)
+    if external is not None and not external.limiter.try_acquire():
+        admission.release()
+        _record_preflight_failure("overloaded", bench=bench)
+        return _overloaded_response(active=external.limiter.active, limit=external.limiter.max_concurrent)
 
-    # The slot is released here for every synchronous outcome (errors and the
-    # non-stream success path). For streaming we hand the release to the
-    # generator via `on_finish`, since the work outlives this function.
+    def release_all() -> None:
+        if external is not None:
+            external.limiter.release()
+        admission.release()
+
+    # The slots (the shared one and the stand's) are released here for every synchronous outcome (errors and
+    # the non-stream success path). For streaming we hand the release to the generator via `on_finish`,
+    # since the work outlives this function.
     released = False
     try:
         settings: Settings = request.app.state.settings
@@ -839,6 +854,11 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             _record_preflight_failure("auth_required", bench=bench)
             return _error_response(
                 403, "This model requires signing in. Register or log in to use OpenRouter models.", "auth_required"
+            )
+        if external is not None and external.requires_auth and settings.auth_enabled and current_user is None:
+            _record_preflight_failure("auth_required", bench=bench)
+            return _error_response(
+                403, "This model requires signing in. Register or log in to use it.", "auth_required"
             )
         user_id = current_user.id if current_user is not None else None
         # M1: resolve_guest_session UPDATEs guest_sessions.expires_at/last_seen_at and
@@ -894,7 +914,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                         session_id=session_id,
                         user_id=user_id,
                         guest_session_id=guest_session_id,
-                        on_finish=admission.release,
+                        on_finish=release_all,
                         bench=bench,
                     ),
                     media_type="text/event-stream",
@@ -923,12 +943,13 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             )
 
         if external is not None:
-            return await _external_non_stream_response(
+            return await _stand_non_stream_response(
                 request=request,
                 payload=payload,
                 target=external,
                 runtime=runtime,
                 completion_id=completion_id,
+                created_ts=created_ts,
                 session_id=session_id,
                 user_id=user_id,
                 guest_session_id=guest_session_id,
@@ -952,7 +973,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
         )
     finally:
         if not released:
-            admission.release()
+            release_all()
 
 
 def _public_model(payload: ChatCompletionRequest, runtime: PipelineRuntime) -> str:
@@ -1429,20 +1450,24 @@ async def _stand_stream_response(
     if not bench:
         metrics_mod.inc_chat_in_flight()
     try:
-        async for text in relay_stream(
-            registry.http,
-            target,
-            stand_request_body(target, payload),
-            relay,
-            request_id=completion_id,
-            trace=bench,
-            total_timeout_s=get_settings().stand_total_timeout_seconds,
-        ):
-            if first_token_at is None and relay.parts:
-                first_token_at = time.perf_counter()
-                if not bench:
-                    metrics_mod.record_time_to_first_token(provider="external", seconds=first_token_at - started)
-            yield text
+        # aclosing: when the client leaves, the stand's connection closes here, before `finally` frees the slots.
+        async with aclosing(
+            relay_stream(
+                registry.http,
+                target,
+                stand_request_body(target, payload),
+                relay,
+                request_id=completion_id,
+                trace=bench,
+                total_timeout_s=request.app.state.settings.stand_total_timeout_seconds,
+            )
+        ) as stream:
+            async for text in stream:
+                if first_token_at is None and relay.parts:
+                    first_token_at = time.perf_counter()
+                    if not bench:
+                        metrics_mod.record_time_to_first_token(provider="external", seconds=first_token_at - started)
+                yield text
         if not relay.parts:
             raise StandStreamError("stand_empty_answer", "the stand finished without any answer text", retryable=True)
         for text in relay.closing():
@@ -1526,27 +1551,45 @@ async def _stand_stream_response(
             on_finish()
 
 
-async def _external_non_stream_response(
+async def _stand_non_stream_response(
     *,
     request: Request,
     payload: ChatCompletionRequest,
     target: StandTarget,
     runtime: PipelineRuntime,
     completion_id: str,
+    created_ts: int,
     session_id: str,
     user_id: str | None,
     guest_session_id: str | None,
     bench: bool,
 ):
+    """A client without streaming gets the answer collected from the stand's stream, checked like a streamed
+    one. A failure is the usual error without the stand's own text (that stays in the log and the history)."""
     registry = _stand_registry(request.app)
     database: Database = request.app.state.database
     started = time.perf_counter()
+    relay = Relay(
+        completion_id=completion_id, created=created_ts, target=target, pass_trace=False, record_metrics=not bench
+    )
     if not bench:
         metrics_mod.inc_chat_in_flight()
     try:
-        upstream = await complete(registry.http, target, upstream_body(target, payload))
-        answer = upstream["choices"][0]["message"].get("content") or ""
-        sources = [s for s in upstream.get("sources") or [] if isinstance(s, dict)]
+        async with aclosing(
+            relay_stream(
+                registry.http,
+                target,
+                stand_request_body(target, payload),
+                relay,
+                request_id=completion_id,
+                total_timeout_s=request.app.state.settings.stand_total_timeout_seconds,
+            )
+        ) as stream:
+            async for _ in stream:  # the client gets no blocks; the relay keeps the answer and the sources
+                pass
+        if not relay.parts:
+            raise StandStreamError("stand_empty_answer", "the stand finished without any answer text", retryable=True)
+        answer = relay.answer
         total_ms = round((time.perf_counter() - started) * 1000, 2)
         if bench:
             metrics_mod.record_bench_request(status="ok")
@@ -1562,8 +1605,8 @@ async def _external_non_stream_response(
                 endpoint=target.backend.url,
                 question=_last_user_message(payload),
                 answer=answer,
-                outcome=_external_outcome(payload, sources, {}),
-                generation_ms=total_ms,
+                outcome=_external_outcome(payload, relay.sources, relay.stage_durations),
+                generation_ms=relay.stage_durations.get(StageName.GENERATION) or total_ms,
                 total_ms=total_ms,
                 stream=False,
                 temperature=payload.temperature,
@@ -1574,11 +1617,18 @@ async def _external_non_stream_response(
                 kb_id=target.kb_id,
                 trace_writer=request.app.state.trace_writer,
             )
-        return {**upstream, "id": completion_id, "model": target.public_id}
+        return {
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created_ts,
+            "model": target.public_id,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
+            "sources": relay.sources,
+        }
     except Exception as exc:
-        classified = classify_error(exc)
+        classified = exc.classified() if isinstance(exc, StandStreamError) else classify_error(exc)
         logger.exception(
-            "external_non_stream_failed",
+            "stand_non_stream_failed",
             request_id=completion_id,
             backend=target.backend.id,
             error=str(exc),
@@ -1605,7 +1655,7 @@ async def _external_non_stream_response(
                 guest_session_id=guest_session_id,
                 kb_id=target.kb_id,
             )
-        return _classified_error_response(classified, retry_id=completion_id, stage="generation")
+        return _classified_error_response(classified, retry_id=completion_id, stage="generation", include_detail=False)
     finally:
         if not bench:
             metrics_mod.dec_chat_in_flight()
@@ -1873,11 +1923,13 @@ def _classified_error_payload(classified: ClassifiedError, *, retry_id: str, sta
     }
 
 
-def _classified_error_response(classified: ClassifiedError, *, retry_id: str, stage: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=classified.http_status,
-        content=_classified_error_payload(classified, retry_id=retry_id, stage=stage),
-    )
+def _classified_error_response(
+    classified: ClassifiedError, *, retry_id: str, stage: str, include_detail: bool = True
+) -> JSONResponse:
+    content = _classified_error_payload(classified, retry_id=retry_id, stage=stage)
+    if not include_detail:
+        content["error"].pop("detail", None)  # a stand's text is for the log, not for the client
+    return JSONResponse(status_code=classified.http_status, content=content)
 
 
 def _overloaded_response(
