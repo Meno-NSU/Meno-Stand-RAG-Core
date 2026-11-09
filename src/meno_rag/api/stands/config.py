@@ -14,6 +14,7 @@ from pathlib import Path
 
 STAND_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,31}")
 URL = re.compile(r"https?://\S+")
+API_KEY = re.compile(r"[\x21-\x7e]*")  # visible ASCII: a header value h11 accepts (it would log the value it refuses)
 DEFAULT_MAX_CONCURRENT = 32
 
 
@@ -57,6 +58,8 @@ def parse_stands(raw: str, *, reserved_ids: frozenset[str] = frozenset()) -> lis
             raise ValueError(f"stand {sid!r}: url must start with http:// or https://")
         if not isinstance(api_key, str) or not isinstance(name, str):
             raise ValueError(f"stand {sid!r}: api_key and name must be strings")
+        if not API_KEY.fullmatch(api_key):  # the message never carries the key
+            raise ValueError(f"stand {sid!r}: api_key must be visible ASCII, without spaces or control characters")
         if not isinstance(arena, bool):
             raise ValueError(f"stand {sid!r}: arena must be true or false")
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:

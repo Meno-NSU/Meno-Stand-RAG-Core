@@ -6,12 +6,17 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from meno_contract.models import MAX_BLOCK_BYTES, MAX_LLMS
+from structlog.testing import capture_logs
 
 from meno_rag.api import metrics
+from meno_rag.api.stands import registry as registry_mod
 from meno_rag.api.stands.registry import StandRegistry
 from tests.stands._helpers import LAB, manifest, stand_client, stand_handler, write_stands
 from tests.v2.test_api_v2 import make_client  # noqa: F401  (fixture)
@@ -25,8 +30,9 @@ def _run(coro):
         loop.close()
 
 
-def _registry(served, *, path=None, arena=False, api_key="", name="", stands=None, handler=None):
-    """A registry over a fake stand serving `served` as its manifest (None: a plain endpoint)."""
+def _registry(served, *, path=None, arena=False, api_key="", name="", stands=None, handler=None, **kw):
+    """A registry over a fake stand serving `served` as its manifest (None: a plain endpoint); `kw` go to the
+    registry."""
     calls: list[httpx.Request] = []
     inner = handler or stand_handler([], manifest=served)
 
@@ -37,7 +43,13 @@ def _registry(served, *, path=None, arena=False, api_key="", name="", stands=Non
     entry = {"id": "lab", "url": "http://lab.example:9006", "arena": arena, "api_key": api_key, "name": name}
     path = write_stands(path or Path(tempfile.mkstemp(suffix=".json")[1]), [entry] if stands is None else stands)
     http = httpx.AsyncClient(transport=httpx.MockTransport(recording))
-    return StandRegistry(str(path), http_client=http), calls
+    return StandRegistry(str(path), http_client=http, **kw), calls
+
+
+async def _listed(reg):
+    """The entries after a refresh: a registry answers from what it knows and refreshes in the background."""
+    await reg.refresh()
+    return await reg.entries()
 
 
 _last_mtime_ns = 0
@@ -76,7 +88,7 @@ def test_a_manifest_gives_the_menu_entries():
         arena=True,
         api_key="k",
     )
-    entries = _run(reg.entries())
+    entries = _run(_listed(reg))
     assert [e["id"] for e in entries] == ["gemma@lab", "lite@lab"]  # default LLM first
     e = entries[0]
     assert (e["provider"], e["backend_id"], e["backend_name"]) == ("external", "lab", "RAGU")
@@ -87,7 +99,7 @@ def test_a_manifest_gives_the_menu_entries():
 
 def test_no_manifest_falls_back_to_the_model_list_and_stays_out_of_the_arena():
     reg, _ = _registry(None, arena=True, name="Лаба")
-    e = _run(reg.entries())[0]
+    e = _run(_listed(reg))[0]
     assert (e["id"], e["version"], e["arena"], e["backend_name"]) == ("gemma@lab", "plain", False, "Лаба")
     assert reg.resolve("gemma@lab").kb_id == "lab@plain"
 
@@ -102,14 +114,14 @@ def test_a_plain_endpoint_shows_the_display_name_of_its_model_list():
         return inner(request)
 
     reg, _ = _registry(None, handler=handler)
-    names = {e["llm_id"]: e["display_name"] for e in _run(reg.entries())}
+    names = {e["llm_id"]: e["display_name"] for e in _run(_listed(reg))}
     assert names == {"a": "Красивое A", "b": "B name", "c": "c"}
 
 
 def test_a_manifest_of_another_protocol_hides_the_stand_and_explains_why():
     before = _metric("meno_stand_contract_violations_total", stand="lab", kind="bad_manifest")
     reg, _ = _registry(manifest(protocol="meno-backend/2"))
-    assert _run(reg.entries()) == [] and "meno-backend/2" in reg.problems()["lab"]
+    assert _run(_listed(reg)) == [] and "meno-backend/2" in reg.problems()["lab"]
     assert _metric("meno_stand_contract_violations_total", stand="lab", kind="bad_manifest") == before + 1
 
 
@@ -126,7 +138,7 @@ def test_llm_status_and_auth_reach_the_entry():
             ]
         )
     )
-    e = _run(reg.entries())[0]
+    e = _run(_listed(reg))[0]
     assert e["status"]["state"] == "rate_limited" and e["auth_required"] is True
     assert reg.resolve("gemma@lab").requires_auth is True
 
@@ -141,11 +153,11 @@ def test_a_stand_that_stops_answering_keeps_its_last_manifest_marked_unreachable
         return ok(request)
 
     reg, _ = _registry(None, handler=handler)
-    assert _run(reg.entries())[0]["status"]["state"] == "available"
+    assert _run(_listed(reg))[0]["status"]["state"] == "available"
     assert _metric("meno_stand_up", stand="lab") == 1
     state["up"] = False
     _run(reg.refresh())
-    entries = _run(reg.entries())
+    entries = _run(_listed(reg))
     assert [(e["id"], e["status"]["state"]) for e in entries] == [("gemma@lab", "unreachable")]
     assert reg.resolve("gemma@lab") is not None
     assert _metric("meno_stand_up", stand="lab") == 0
@@ -153,50 +165,73 @@ def test_a_stand_that_stops_answering_keeps_its_last_manifest_marked_unreachable
 
 def test_a_stand_never_reached_has_no_entries():
     reg, _ = _registry(None, handler=stand_handler([], down=True))
-    assert _run(reg.entries()) == []
+    assert _run(_listed(reg)) == []
     assert reg.resolve("gemma@lab") is None
 
 
-def test_entries_do_not_wait_for_a_refresh_in_progress():
-    # two stands listing each other (or one listing itself) must not wait on each other's refresh
+def test_a_due_refresh_runs_in_the_background_one_at_a_time():
+    # a stand that is slow to answer must not stall the caller of /v1/models (stands listing each other, or one
+    # listing itself, would otherwise wait on each other)
     async def scenario():
-        gate = asyncio.Event()
+        gate, slow = asyncio.Event(), {"on": False}
         ok = stand_handler([], manifest=manifest())
 
-        async def slow(request):
-            await gate.wait()
+        async def handler(request):
+            if slow["on"]:
+                await gate.wait()
             return ok(request)
 
-        reg, _ = _registry(None, handler=slow)
-        first = asyncio.create_task(reg.entries())  # starts the refresh and waits for the stand
-        await asyncio.sleep(0)
-        second = await asyncio.wait_for(reg.entries(), 1)  # served at once from what is known
+        reg, calls = _registry(None, handler=handler, cache_ttl=0)
+        await reg.refresh()
+        slow["on"] = True
+        first = await asyncio.wait_for(reg.entries(), 1)  # the refresh is due: it starts, the answer does not wait
+        await asyncio.sleep(0.05)
+        second = await asyncio.wait_for(reg.entries(), 1)
+        asked_while_waiting = len(calls)
         gate.set()
-        return second, await first
+        await asyncio.sleep(0.05)
+        return first, second, asked_while_waiting, len(calls)
 
-    second, first = _run(scenario())
-    assert second == []
-    assert [(e["id"], e["status"]["state"]) for e in first] == [("gemma@lab", "available")]
+    first, second, asked_while_waiting, asked = _run(scenario())
+    assert [e["id"] for e in first] == [e["id"] for e in second] == ["gemma@lab"]
+    assert asked_while_waiting == 2 and asked == 2  # one manifest request at the start, one refresh in the background
+
+
+def test_a_failed_background_refresh_is_logged_and_waits_before_the_next():
+    async def scenario():
+        reg, _ = _registry(manifest(), cache_ttl=0)
+        await reg.refresh()
+        reg.refresh = AsyncMock(side_effect=RuntimeError("boom"))
+        with capture_logs() as logs:
+            listed = await reg.entries()
+            await asyncio.sleep(0.05)
+            await reg.entries()
+            await asyncio.sleep(0.05)
+        return listed, logs, reg.refresh.await_count
+
+    listed, logs, attempts = _run(scenario())
+    assert [e["id"] for e in listed] == ["gemma@lab"] and attempts == 1
+    assert any(e["event"] == "stand_refresh_failed" and e["log_level"] == "error" for e in logs)
 
 
 def test_a_new_stand_in_the_file_appears_after_refresh(tmp_path):
     path = tmp_path / "stands.json"
     reg, _ = _registry(manifest(), path=path)
-    assert [e["id"] for e in _run(reg.entries())] == ["gemma@lab"]
+    assert [e["id"] for e in _run(_listed(reg))] == ["gemma@lab"]
     write_stands(path, [json.loads(path.read_text())[0], {"id": "second", "url": "http://second.example"}])
     _bump_mtime(path)
     _run(reg.refresh())
-    assert [e["id"] for e in _run(reg.entries())] == ["gemma@lab", "gemma@second"]
+    assert [e["id"] for e in _run(_listed(reg))] == ["gemma@lab", "gemma@second"]
 
 
 def test_a_file_that_starts_empty_picks_up_its_first_stand(tmp_path):
     path = tmp_path / "stands.json"
     reg, _ = _registry(manifest(), path=path, stands=[])
-    assert _run(reg.entries()) == []
+    assert _run(_listed(reg)) == []
     write_stands(path, [LAB])
     _bump_mtime(path)
     _run(reg.refresh())
-    assert [e["id"] for e in _run(reg.entries())] == ["gemma@lab"]
+    assert [e["id"] for e in _run(_listed(reg))] == ["gemma@lab"]
 
 
 def test_a_broken_file_keeps_the_previous_list(tmp_path):
@@ -206,19 +241,57 @@ def test_a_broken_file_keeps_the_previous_list(tmp_path):
     (tmp_path / "stands.json").write_text("[{", encoding="utf-8")
     _bump_mtime(tmp_path / "stands.json")
     _run(reg.refresh())
-    assert [e["id"] for e in _run(reg.entries())] == ["gemma@lab"]
+    assert [e["id"] for e in _run(_listed(reg))] == ["gemma@lab"]
     assert _metric("meno_stand_config_errors_total") == before + 1
 
 
-def test_a_broken_file_at_the_start_is_an_error(tmp_path):
+def test_a_broken_file_at_the_start_leaves_no_stands_and_says_why(tmp_path):
     (tmp_path / "stands.json").write_text("[{", encoding="utf-8")
-    with pytest.raises(ValueError):
-        StandRegistry(str(tmp_path / "stands.json"), http_client=httpx.AsyncClient())
+    before = _metric("meno_stand_config_errors_total")
+    with capture_logs() as logs:
+        reg = StandRegistry(str(tmp_path / "stands.json"), http_client=httpx.AsyncClient())
+    assert _run(_listed(reg)) == [] and reg.live_kbs() == set()
+    assert _metric("meno_stand_config_errors_total") == before + 1
+    assert any(e["event"] == "stands_file_invalid" and e["log_level"] == "error" for e in logs)
+
+
+def test_a_missing_file_at_the_start_is_picked_up_once_it_appears(tmp_path):
+    path = tmp_path / "stands.json"
+    http = httpx.AsyncClient(transport=httpx.MockTransport(stand_handler([])))
+    before = _metric("meno_stand_config_errors_total")
+    reg = StandRegistry(str(path), http_client=http)
+    assert _run(_listed(reg)) == [] and _metric("meno_stand_config_errors_total") == before + 1
+    write_stands(path, [LAB])
+    assert [e["id"] for e in _run(_listed(reg))] == ["gemma@lab"]
+
+
+def test_an_unchanged_broken_file_is_read_and_logged_once(tmp_path, monkeypatch):
+    path = tmp_path / "stands.json"
+    path.write_text("[{", encoding="utf-8")
+    reads = []
+    real = registry_mod.read_stands_file
+
+    def counting(*args, **kwargs):
+        reads.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(registry_mod, "read_stands_file", counting)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(stand_handler([])))
+    before = _metric("meno_stand_config_errors_total")
+    with capture_logs() as logs:
+        reg = StandRegistry(str(path), http_client=http)
+        for _ in range(3):
+            _run(reg.refresh())
+    assert len(reads) == 1 and _metric("meno_stand_config_errors_total") == before + 1
+    assert [e["event"] for e in logs].count("stands_file_invalid") == 1
+    write_stands(path, [LAB])
+    _bump_mtime(path)
+    assert [e["id"] for e in _run(_listed(reg))] == ["gemma@lab"]
 
 
 def test_resolve_maps_an_id_to_its_target():
     reg, _ = _registry(manifest(build="a1b2"), arena=True)
-    _run(reg.entries())
+    _run(_listed(reg))
     t = reg.resolve("gemma@lab")
     assert (t.backend.id, t.model, t.kb_id, t.build, t.arena) == ("lab", "gemma", "lab@v1", "a1b2", True)
     assert reg.resolve("absent@lab") is None and reg.resolve("gemma@other") is None and reg.resolve("gemma") is None
@@ -227,7 +300,7 @@ def test_resolve_maps_an_id_to_its_target():
 
 def test_resolve_rejects_an_empty_llm_part():
     reg, _ = _registry(manifest())
-    _run(reg.entries())
+    _run(_listed(reg))
     assert reg.resolve("@lab") is None
 
 
@@ -246,7 +319,7 @@ def test_a_leftover_external_backends_variable_is_warned_about(monkeypatch):
 
 def test_resolve_splits_at_the_last_at_sign():
     reg, _ = _registry(manifest(llms=[{"id": "x@menon-1.1", "name": "X"}], default_llm="x@menon-1.1"))
-    _run(reg.entries())
+    _run(_listed(reg))
     t = reg.resolve("x@menon-1.1@lab")
     assert t.backend.id == "lab" and t.model == "x@menon-1.1" and t.public_id == "x@menon-1.1@lab"
 
@@ -254,7 +327,7 @@ def test_resolve_splits_at_the_last_at_sign():
 def test_limiter_survives_a_reload_when_the_limit_is_unchanged(tmp_path):
     path = tmp_path / "stands.json"
     reg, _ = _registry(manifest(), path=path)
-    _run(reg.entries())
+    _run(_listed(reg))
     first = reg.resolve("gemma@lab").limiter
     assert first.max_concurrent == 32
     write_stands(path, [{**LAB, "name": "renamed"}])
@@ -270,7 +343,7 @@ def test_limiter_survives_a_reload_when_the_limit_is_unchanged(tmp_path):
 
 def test_live_kbs_lists_the_current_versions():
     reg, _ = _registry(manifest())
-    _run(reg.entries())
+    _run(_listed(reg))
     assert reg.live_kbs() == {"lab@v1"}
 
 
@@ -299,18 +372,36 @@ def test_the_stands_file_comes_from_the_environment(make_client, tmp_path, monke
     assert not [m for m in c.get("/v1/models").json()["data"] if m.get("provider") == "external"]
 
 
-def test_a_broken_stands_file_stops_the_start(make_client, tmp_path, monkeypatch):  # noqa: F811
+def _ours_only(c):
+    data = c.get("/v1/models").json()["data"]
+    assert data and not [m for m in data if m.get("provider") == "external"]
+    ask = {"model": "menon-1", "messages": [{"role": "user", "content": "Когда сессия?"}]}
+    assert c.post("/v1/chat/completions", json=ask).status_code == 200
+
+
+def test_a_broken_stands_file_leaves_our_own_models_serving(make_client, tmp_path, monkeypatch):  # noqa: F811
     (tmp_path / "bad.json").write_text('[{"id": "Lab", "url": "http://a"}]', encoding="utf-8")
     monkeypatch.setenv("STANDS_FILE", str(tmp_path / "bad.json"))
-    with pytest.raises(ValueError, match="stand id"):
-        make_client()
+    before = _metric("meno_stand_config_errors_total")
+    c, _ = make_client()
+    _ours_only(c)
+    assert _metric("meno_stand_config_errors_total") == before + 1
+
+
+def test_a_missing_stands_file_leaves_our_own_models_serving(make_client, tmp_path, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("STANDS_FILE", str(tmp_path / "absent.json"))
+    c, _ = make_client()
+    _ours_only(c)
 
 
 def test_our_own_v2_id_is_reserved_when_v2_is_on(make_client, tmp_path, monkeypatch):  # noqa: F811
     path = write_stands(tmp_path / "s.json", [{"id": "menon-1.1", "url": "http://a"}])
     monkeypatch.setenv("STANDS_FILE", str(path))
-    with pytest.raises(ValueError, match=r"menon-1\.1"):
-        make_client()
+    before = _metric("meno_stand_config_errors_total")
+    c, _ = make_client()
+    _ours_only(c)
+    assert c.app.state.stand_registry.resolve("gemma@menon-1.1") is None
+    assert _metric("meno_stand_config_errors_total") == before + 1
 
 
 def test_models_refresh_picks_up_a_stand_added_after_the_start(make_client, tmp_path):  # noqa: F811
@@ -325,3 +416,131 @@ def test_models_refresh_picks_up_a_stand_added_after_the_start(make_client, tmp_
 def test_no_stands_file_adds_no_external_entries(make_client):  # noqa: F811
     c, _ = make_client()
     assert not [m for m in c.get("/v1/models").json()["data"] if m.get("provider") == "external"]
+
+
+# ---- discovery never hurts the rest of the service
+
+
+def _plain(rows):
+    """A plain endpoint whose /v1/models serves `rows`."""
+    inner = stand_handler([], manifest=None)
+
+    def handler(request):
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": rows})
+        return inner(request)
+
+    return handler
+
+
+def test_a_status_object_in_a_plain_model_list_is_ignored():
+    reg, _ = _registry(None, handler=_plain([{"id": "gemma", "status": {"state": "rate_limited", "until": None}}]))
+    (e,) = _run(_listed(reg))
+    assert e["id"] == "gemma@lab" and e["status"]["state"] == "available"
+
+
+def test_a_plain_model_list_keeps_only_checked_fields():
+    rows = [
+        {"id": "ok", "created": 5, "context_length": 8192, "display_name": "OK", "requires_auth": True, "x": [1]},
+        {"id": "typed", "created": "5", "context_length": True, "display_name": "d" * 129, "name": 7},
+        {"id": "named", "name": "N"},
+        {"id": "bad id"},
+        {"id": "x" * 129},
+        {"id": 5},
+        "string",
+        None,
+    ]
+    reg, _ = _registry(None, handler=_plain(rows))
+    entries = {e["llm_id"]: e for e in _run(_listed(reg))}
+    assert set(entries) == {"ok", "typed", "named"}
+    ok, typed, named = entries["ok"], entries["typed"], entries["named"]
+    assert (ok["created"], ok["context_length"], ok["display_name"], ok["auth_required"]) == (5, 8192, "OK", False)
+    assert typed["created"] != "5" and typed["context_length"] is None and typed["display_name"] == "typed"
+    assert named["display_name"] == "N"
+
+
+def test_a_plain_model_list_is_cut_at_the_llm_limit():
+    reg, _ = _registry(None, handler=_plain([{"id": f"m{i}"} for i in range(MAX_LLMS + 5)]))
+    assert len(_run(_listed(reg))) == MAX_LLMS
+
+
+def test_one_stand_that_cannot_be_listed_leaves_the_others(monkeypatch):
+    stands = [{"id": "lab", "url": "http://lab.example"}, {"id": "ok", "url": "http://ok.example"}]
+    reg, _ = _registry(manifest(), stands=stands)
+    _run(reg.refresh())
+    real = registry_mod._llms
+
+    def broken(state):
+        if state is reg._states["lab"]:
+            raise RuntimeError("boom")
+        return real(state)
+
+    monkeypatch.setattr(registry_mod, "_llms", broken)
+    before = _metric("meno_stand_contract_violations_total", stand="lab", kind="bad_model_list")
+    with capture_logs() as logs:
+        entries = _run(reg.entries())
+    assert [e["id"] for e in entries] == ["gemma@ok"]
+    assert any(e["event"] == "stand_entries_failed" and e["stand"] == "lab" and e["log_level"] == "error" for e in logs)
+    assert _metric("meno_stand_contract_violations_total", stand="lab", kind="bad_model_list") == before + 1
+
+
+async def _drip():
+    yield b"{"
+    while True:
+        await asyncio.sleep(0.05)
+        yield b" "
+
+
+def _serving(path, body):
+    """A plain endpoint (or, for the manifest path, a stand) whose answer at `path` is the stream `body()`."""
+    inner = stand_handler([], manifest=None)
+
+    def handler(request):
+        if request.url.path == path:
+            return httpx.Response(200, content=body())
+        return inner(request)
+
+    return handler
+
+
+@pytest.mark.parametrize("path", ["/meno/v1/manifest", "/v1/models"])
+def test_a_dripping_discovery_answer_hits_the_deadline(path):
+    reg, _ = _registry(None, handler=_serving(path, _drip), timeout=0.2)
+    started = time.monotonic()
+    _run(asyncio.wait_for(reg.refresh(), 5))
+    assert time.monotonic() - started < 2
+    assert reg.resolve("gemma@lab") is None and _metric("meno_stand_up", stand="lab") == 0
+
+
+@pytest.mark.parametrize("path", ["/meno/v1/manifest", "/v1/models"])
+def test_an_oversized_discovery_answer_is_not_read_past_the_block_limit(path):
+    sent = {"bytes": 0}
+
+    async def huge():  # 4 MiB; bounded so that a reader without a limit cannot run the machine out of memory
+        for _ in range(64):
+            sent["bytes"] += 65_536
+            yield b" " * 65_536
+            await asyncio.sleep(0)
+
+    reg, _ = _registry(None, handler=_serving(path, huge))
+    _run(asyncio.wait_for(reg.refresh(), 5))
+    assert reg.resolve("gemma@lab") is None
+    assert sent["bytes"] <= MAX_BLOCK_BYTES + 2 * 65_536
+
+
+def test_a_plain_endpoint_with_status_rows_does_not_break_the_model_list(make_client, tmp_path):  # noqa: F811
+    c, _, _ = stand_client(make_client, tmp_path, _plain([{"id": "gemma", "status": {"state": "rate_limited"}}]))
+    r = c.get("/v1/models")
+    assert r.status_code == 200
+    data = {m["id"]: m for m in r.json()["data"]}
+    assert data["gemma@lab"]["status"]["state"] == "available"
+    assert [m for m in data.values() if m.get("provider") != "external"]
+
+
+def test_our_own_models_are_listed_whatever_the_stands_do(make_client, tmp_path, monkeypatch):  # noqa: F811
+    c, _, reg = stand_client(make_client, tmp_path, stand_handler([]))
+    monkeypatch.setattr(reg, "entries", AsyncMock(side_effect=RuntimeError("boom")))
+    r = c.get("/v1/models")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data and not [m for m in data if m.get("provider") == "external"]

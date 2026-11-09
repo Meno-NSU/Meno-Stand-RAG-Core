@@ -242,7 +242,9 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("openrouter_startup_discovery_failed", error=str(exc))
 
-    # Raises on a bad STANDS_FILE, so a typo stops the start instead of hiding the stands.
+    # A missing or broken STANDS_FILE is logged and counted (meno_stand_config_errors), and the service starts with
+    # no stands, serving our own pipelines; the file is read again on refresh once it changes. The first discovery
+    # is awaited, bounded by the registry's deadline per stand.
     stand_registry = StandRegistry(
         settings.stands_file,
         http_client=http_client,
@@ -598,7 +600,10 @@ async def list_models(request: Request):
         merged.extend(virtual_model_entries(settings, merged))
     stands = _stand_registry(request.app)
     if stands is not None:
-        merged.extend(await stands.entries())
+        try:
+            merged.extend(await stands.entries())
+        except Exception as exc:  # our own models are listed whatever the stands do
+            logger.error("stand_entries_failed", error=str(exc) or type(exc).__name__)
 
     current_user = await auth.resolve_optional_user(request)
     if settings.auth_enabled and current_user is None:

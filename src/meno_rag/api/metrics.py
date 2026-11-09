@@ -140,7 +140,7 @@ _STAND_UP = Gauge(
 )
 _STAND_CONFIG_ERRORS = Counter(
     "meno_stand_config_errors",
-    "Times the stands file could not be re-read; the previous list stays in use.",
+    "Times the stands file could not be read; the previous list stays in use (at the start: no stands).",
     registry=REGISTRY,
 )
 _STAND_VIOLATIONS = Counter(

@@ -38,3 +38,17 @@ def test_no_path_means_no_stands_and_a_missing_file_is_an_error(tmp_path):
     assert read_stands_file("") == []
     with pytest.raises(ValueError):
         read_stands_file(str(tmp_path / "absent.json"))
+
+
+@pytest.mark.parametrize("key", ["my secret", "secret\n", "sec\tret", "secret\x00", "secret\x7f", "sécret", " secret"])
+def test_an_api_key_that_cannot_be_a_header_is_refused_without_echoing_it(key):
+    # h11 puts a bad header value into its exception text, and that text is logged
+    raw = json.dumps([{"id": "lab", "url": "http://a", "api_key": key}])
+    with pytest.raises(ValueError) as e:
+        parse_stands(raw)
+    assert "api_key" in str(e.value) and "secret" not in str(e.value) and "ret" not in str(e.value)
+
+
+def test_an_ordinary_api_key_is_kept():
+    key = "sk-AZaz09._~+/="
+    assert parse_stands(json.dumps([{"id": "lab", "url": "http://a", "api_key": key}]))[0].api_key == key

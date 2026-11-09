@@ -3,19 +3,23 @@
 A stand with a manifest (GET /meno/v1/manifest) is a full stand; one that answers 404 there is a plain
 OpenAI endpoint, listed through GET /v1/models, kept out of the arena. The lists are cached; a stand that
 stops answering keeps its last list, marked unreachable. The file is re-read on refresh when it changed;
-a broken file leaves the previous list in place."""
+a broken file leaves the previous list in place (at the start: no stands). Nothing a stand sends can stall
+or break the model list: discovery has a deadline and a size limit, and a request for the list never waits
+for a refresh."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 import structlog
-from meno_contract.models import PROTOCOL, Manifest
+from meno_contract.models import LLM_ID_PATTERN, MAX_BLOCK_BYTES, MAX_LLMS, PROTOCOL, Manifest
 from pydantic import ValidationError
 
 from meno_rag.api import metrics
@@ -27,6 +31,12 @@ logger = structlog.get_logger(__name__)
 PLAIN_VERSION = "plain"
 MANIFEST_PATH = "/meno/v1/manifest"
 FAILURE_RETRY_S = 10.0  # how soon a stand that did not answer is asked again
+MAX_PLAIN_NAME_CHARS = 128  # as a manifest's LLM name
+_LLM_ID = re.compile(LLM_ID_PATTERN)
+
+
+class _DiscoveryError(Exception):
+    """A discovery answer that cannot be used: an HTTP error or a body over the size limit."""
 
 
 @dataclass(frozen=True)
@@ -73,6 +83,7 @@ class StandRegistry:
         timeout: float = 5.0,
         cache_ttl: float = 300.0,
         reserved_ids: frozenset[str] = frozenset(),
+        deadline: float | None = None,
     ) -> None:
         if os.environ.get("EXTERNAL_BACKENDS"):
             logger.warning("external_backends_ignored", detail="EXTERNAL_BACKENDS is no longer read; use STANDS_FILE")
@@ -80,13 +91,24 @@ class StandRegistry:
         self._path = path
         self._reserved = reserved_ids
         self._timeout = timeout
+        # One stand's whole discovery (manifest, then perhaps /v1/models): a per-read timeout alone lets a stand that
+        # drips its answer hold the start of the service, or a refresh, for as long as it likes.
+        self._deadline = deadline if deadline is not None else 2 * timeout
         self._cache_ttl = cache_ttl
         self._mtime = self._stat()
         self._stands: dict[str, StandEntry] = {}
         self._states: dict[str, _State] = {}
-        self._apply(read_stands_file(path, reserved_ids=reserved_ids))  # a bad file stops the start
+        try:
+            entries = read_stands_file(path, reserved_ids=reserved_ids)
+        except ValueError as exc:
+            # A mistake in one entry must not take the service down at its next restart: it starts with no stands
+            # and serves our own pipelines. The file is read again once it changes (see _reload).
+            metrics.record_stand_config_error()
+            logger.error("stands_file_invalid", path=path, error=str(exc))
+            entries = []
+        self._apply(entries)
         self._valid_until = 0.0
-        self._lock = asyncio.Lock()
+        self._background: asyncio.Task[None] | None = None
 
     def _stat(self) -> int | None:
         try:
@@ -123,38 +145,57 @@ class StandRegistry:
         self._apply(entries)
         logger.info("stands_file_reloaded", stands=list(self._stands))
 
+    async def _get(self, stand: StandEntry, path: str) -> tuple[int, bytes]:
+        """The status and, for a 200, the body, read as a stream and never past MAX_BLOCK_BYTES."""
+        url = f"{stand.url}{path}"
+        async with self.http.stream("GET", url, headers=stand.headers(), timeout=self._timeout) as r:
+            if r.status_code != 200:
+                return r.status_code, b""
+            body = bytearray()
+            async for piece in r.aiter_bytes():
+                body.extend(piece)
+                if len(body) > MAX_BLOCK_BYTES:
+                    raise _DiscoveryError(f"{path} answered more than {MAX_BLOCK_BYTES} bytes")
+            return 200, bytes(body)
+
     async def _discover(self, stand: StandEntry) -> None:
         state = self._states[stand.id]
         try:
-            r = await self.http.get(f"{stand.url}{MANIFEST_PATH}", headers=stand.headers(), timeout=self._timeout)
-            if r.status_code == 404:
-                await self._discover_plain(stand, state)
-            elif r.status_code >= 500:
-                raise httpx.HTTPStatusError(f"HTTP {r.status_code}", request=r.request, response=r)
-            elif r.status_code != 200:
-                self._reject(stand, state, f"the manifest request answered HTTP {r.status_code}", violation=False)
-            else:
-                try:
-                    payload = r.json()
-                    if isinstance(payload, dict) and payload.get("protocol") != PROTOCOL:
-                        raise ValueError(f"protocol {payload.get('protocol')!r} is not {PROTOCOL}")
-                    manifest = Manifest.model_validate(payload)
-                except (ValueError, ValidationError) as exc:
-                    self._reject(stand, state, f"bad manifest: {_first_line(exc)}", violation=True)
+            async with asyncio.timeout(self._deadline):
+                status, body = await self._get(stand, MANIFEST_PATH)
+                if status == 404:
+                    await self._discover_plain(stand, state)
+                elif status >= 500:
+                    raise _DiscoveryError(f"the manifest request answered HTTP {status}")
+                elif status != 200:
+                    self._reject(stand, state, f"the manifest request answered HTTP {status}", violation=False)
                 else:
-                    state.manifest, state.plain_models = manifest, []
-                    state.known, state.up, state.problem = True, True, None
-                    logger.info("stand_manifest_loaded", stand=stand.id, version=manifest.version)
-        except Exception as exc:
+                    try:
+                        payload = json.loads(body)
+                        if isinstance(payload, dict) and payload.get("protocol") != PROTOCOL:
+                            raise ValueError(f"protocol {payload.get('protocol')!r} is not {PROTOCOL}")
+                        manifest = Manifest.model_validate(payload)
+                    except (ValueError, ValidationError) as exc:
+                        self._reject(stand, state, f"bad manifest: {_first_line(exc)}", violation=True)
+                    else:
+                        state.manifest, state.plain_models = manifest, []
+                        state.known, state.up, state.problem = True, True, None
+                        logger.info("stand_manifest_loaded", stand=stand.id, version=manifest.version)
+        except Exception as exc:  # a timeout of the deadline included
             state.up = False
-            logger.warning("stand_discovery_failed", stand=stand.id, error=str(exc))
+            logger.warning("stand_discovery_failed", stand=stand.id, error=str(exc) or type(exc).__name__)
         metrics.set_stand_up(stand.id, state.up)
 
     async def _discover_plain(self, stand: StandEntry, state: _State) -> None:
-        r = await self.http.get(f"{stand.url}/v1/models", headers=stand.headers(), timeout=self._timeout)
-        r.raise_for_status()
-        data = r.json().get("data") or []
-        state.plain_models = [m for m in data if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
+        status, body = await self._get(stand, "/v1/models")
+        if status != 200:
+            raise _DiscoveryError(f"/v1/models answered HTTP {status}")
+        payload = json.loads(body)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            raise _DiscoveryError("/v1/models has no data list")
+        rows = [row for row in map(_plain_row, data) if row is not None]
+        state.plain_models = rows[:MAX_LLMS]
         state.manifest = None
         state.known, state.up, state.problem = True, True, None
         logger.info("stand_models_discovered", stand=stand.id, count=len(state.plain_models))
@@ -172,24 +213,39 @@ class StandRegistry:
         ttl = self._cache_ttl if all(s.up for s in self._states.values()) else min(self._cache_ttl, FAILURE_RETRY_S)
         self._valid_until = time.monotonic() + ttl
 
+    async def _refresh_in_background(self) -> None:
+        try:
+            await self.refresh()
+        except Exception as exc:
+            logger.error("stand_refresh_failed", error=str(exc) or type(exc).__name__)
+            self._valid_until = time.monotonic() + FAILURE_RETRY_S
+        finally:
+            self._background = None
+
     async def entries(self) -> list[dict[str, Any]]:
-        # One discovery at a time, and no request waits for another's: while a refresh is running, the
-        # list known so far is served (stands listing each other would otherwise wait on each other).
-        if time.monotonic() > self._valid_until and not self._lock.locked():
-            async with self._lock:
-                if time.monotonic() > self._valid_until:
-                    await self.refresh()
+        # A due refresh runs in the background, one at a time, and this answers at once with what is known: a stand
+        # that is down must not stall the caller (the start of the service awaits the first refresh itself).
+        if time.monotonic() > self._valid_until and self._background is None:
+            self._background = asyncio.create_task(self._refresh_in_background())  # the attribute keeps it alive
         out: list[dict[str, Any]] = []
         for stand in self._stands.values():
-            state = self._states[stand.id]
-            if not state.known:
-                continue
+            try:
+                out.extend(self._entries_of(stand))
+            except Exception as exc:  # one stand never takes the others, or our own models, out of the list
+                logger.error("stand_entries_failed", stand=stand.id, error=str(exc) or type(exc).__name__)
+                metrics.record_stand_violation(stand.id, "bad_model_list")
+        return out
+
+    def _entries_of(self, stand: StandEntry) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        state = self._states[stand.id]
+        if state.known:
             m = state.manifest
             version = m.version if m else PLAIN_VERSION
             backend_name = (m.name if m else stand.name) or stand.id
             for llm in _llms(state):
                 status = {"state": "available", "until": None, "last_error": None}
-                if llm.get("status"):
+                if m is not None and llm.get("status"):  # a status is read only from a checked manifest
                     status["state"], status["until"] = llm["status"].state, llm["status"].until
                 if not state.up:
                     status["state"] = "unreachable"
@@ -256,6 +312,22 @@ def _llms(state: _State) -> list[dict[str, Any]]:
         return list(state.plain_models)
     rows = [llm.model_dump() | {"status": llm.status} for llm in m.llms]
     return sorted(rows, key=lambda x: x["id"] != m.default_llm)  # stable: the rest keep the manifest order
+
+
+def _plain_row(item: Any) -> dict[str, Any] | None:
+    """The fields of a plain endpoint's model row that pass the checks; None for a row without a valid id."""
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not _LLM_ID.fullmatch(item["id"]):
+        return None
+    row: dict[str, Any] = {"id": item["id"]}
+    for key in ("created", "context_length"):
+        value = item.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            row[key] = value
+    for key in ("display_name", "name"):
+        value = item.get(key)
+        if isinstance(value, str) and 0 < len(value) <= MAX_PLAIN_NAME_CHARS:
+            row[key] = value
+    return row
 
 
 def _first_line(exc: Exception) -> str:
