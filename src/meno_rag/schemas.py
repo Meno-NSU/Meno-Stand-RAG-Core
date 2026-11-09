@@ -121,6 +121,13 @@ class VoteRequest(BaseModel):
     history_len_a: int | None = Field(default=None, ge=0)
     history_len_b: int | None = Field(default=None, ge=0)
 
+    @field_validator("kb_a", "kb_b", mode="before")
+    @classmethod
+    def _null_kb_is_empty(cls, value: Any) -> Any:
+        # A restored round sends back the side's stored knowledge_base_id, which is null for a stand outside the
+        # arena; refusing it would answer 422 where the vote must get its 403 stand_not_in_arena.
+        return "" if value is None else value
+
 
 class ArenaSide(BaseModel):
     key: Literal["a", "b"]

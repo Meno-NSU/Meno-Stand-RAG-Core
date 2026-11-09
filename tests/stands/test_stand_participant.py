@@ -482,6 +482,34 @@ def test_a_round_posted_for_a_stand_outside_the_arena_does_not_open_the_vote(mak
     assert _ratings(db) == set() and _votes(db) == 0
 
 
+def test_a_restored_round_of_a_stand_outside_the_arena_gets_the_403(make_client, tmp_path):  # noqa: F811
+    # The frontend restores the stand side's stored knowledge_base_id None as kb: null and votes with it.
+    c, db, _ = _arena_client(make_client, tmp_path, arena=False)
+    guest = _consenting_guest(c, db)
+    sides = [
+        {"key": "a", "model": "gemma@lab", "knowledge_base_id": LEGACY_KB_ID, "content": "A", "sources": []},
+        {"key": "b", "model": "meno-lite", "knowledge_base_id": LEGACY_KB_ID, "content": "B", "sources": []},
+    ]
+    body = {"session_id": "c1", "question": "Q?", "turn_index": 0, "sides": sides}
+    assert c.post("/v1/arena/turn", json=body, headers=guest).status_code == 200
+    restored = c.get("/v1/conversations/c1", headers=guest).json()["turns"][-1]
+    a, b = restored["sides"]
+    assert a["knowledge_base_id"] is None
+    vote = {
+        "model_a": a["model"],
+        "kb_a": a["knowledge_base_id"],
+        "model_b": b["model"],
+        "kb_b": b["knowledge_base_id"],
+        "winner": "a",
+        "session_id": "c1",
+        "turn_index": restored["turn_index"],
+    }
+    r = c.post("/v1/arena/vote", json=vote, headers=guest)
+    assert r.status_code == 403 and r.json()["error"]["code"] == "stand_not_in_arena"
+    assert _ratings(db) == set() and _votes(db) == 0
+    assert c.get("/v1/conversations/c1", headers=guest).json()["turns"][-1]["winner"] is None
+
+
 def test_our_own_models_vote_without_a_round_as_before(make_client, tmp_path):  # noqa: F811
     c, db, _ = _arena_client(make_client, tmp_path, arena=False)
     r = _vote(c, model_a="meno-lite", kb_a=LEGACY_KB_ID, model_b="qwen/x:free", kb_b=V2_KB_ID, session=None)

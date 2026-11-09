@@ -50,10 +50,16 @@ def test_empty_kb_allowed_and_long_kb_rejected(field):
         VoteRequest(**_valid_payload(**{field: "x" * 129}))
 
 
-@pytest.mark.parametrize("field", ["model_a", "model_b", "kb_a", "kb_b"])
+@pytest.mark.parametrize("field", ["model_a", "model_b"])
 def test_null_rejected(field):
     with pytest.raises(ValidationError):
         VoteRequest(**_valid_payload(**{field: None}))
+
+
+@pytest.mark.parametrize("field", ["kb_a", "kb_b"])
+def test_null_kb_is_empty(field):
+    # A restored round of a stand outside the arena sends its stored knowledge_base_id: null.
+    assert getattr(VoteRequest(**_valid_payload(**{field: None})), field) == ""
 
 
 def test_invalid_winner_value_rejected():
