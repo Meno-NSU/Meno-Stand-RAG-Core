@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from meno_rag.api import auth, guest
 from meno_rag.api.stands.participant import (
@@ -20,6 +21,23 @@ router = APIRouter(prefix="/v1/arena", tags=["arena"])
 
 def _registry(request: Request):
     return getattr(request.app.state, "stand_registry", None)
+
+
+def _in_arena(request: Request, model: str) -> bool:
+    registry = _registry(request)
+    target = registry.resolve(model) if registry is not None else None
+    return target is not None and target.arena
+
+
+def _stand_not_in_arena() -> JSONResponse:
+    # The same answer as the chat gives to arena: true for such a stand (main._error_response).
+    error = {
+        "message": "This stand does not take part in the arena.",
+        "type": "invalid_request_error",
+        "code": "stand_not_in_arena",
+        "param": None,
+    }
+    return JSONResponse(status_code=403, content={"error": error})
 
 
 @router.post("/vote")
@@ -46,8 +64,9 @@ async def submit_vote(vote: VoteRequest, request: Request):
                 # turn (every later vote for the same pair is treated as a duplicate).
                 raise HTTPException(status_code=404, detail="Conversation not found.")
         # A stand's rating key is decided here, never taken from the client: the participant fixed when the round was
-        # stored (it answered, whatever the stand is now), else the one the registry resolves at this moment. Our own
-        # pipelines keep the rows they have always had: the id the client sent and the base it names.
+        # stored (it answered, whatever the stand is now), else the one the registry resolves at this moment, which
+        # must then take part in the arena. Our own pipelines keep the rows they have always had: the id the client
+        # sent and the base it names.
         stored = await repositories.arena_turn_sides(
             session, conversation_id=vote.session_id or "", turn_index=vote.turn_index
         )
@@ -67,6 +86,8 @@ async def submit_vote(vote: VoteRequest, request: Request):
                     settings=request.app.state.settings,
                     kb_hint=stored_kb or client_kb,
                 )
+                if participant.builtin_kb is None and not _in_arena(request, model):
+                    return _stand_not_in_arena()  # nothing is written
             if participant.builtin_kb is not None:
                 payload[f"kb_{side_key}"] = rating_kb(participant, client_kb)
             else:
@@ -139,7 +160,8 @@ async def record_turn(payload: ArenaTurnRequest, request: Request):
 
 async def _sides_with_participants(payload: ArenaTurnRequest, request: Request) -> list[dict]:
     """The stored sides: the participant is fixed now (the vote may come much later). A stand's label is the server's;
-    for our own pipelines the client names one of our bases, anything else is dropped."""
+    for our own pipelines the client names one of our bases, anything else is dropped. A side of a stand outside the
+    arena gets no label: the client posts the round, so a vote on it must check the stand as if there were none."""
     settings = request.app.state.settings
     sides = []
     for side in payload.sides:
@@ -152,7 +174,10 @@ async def _sides_with_participants(payload: ArenaTurnRequest, request: Request) 
                 settings=settings,
                 kb_hint=side.knowledge_base_id,
             )
-            stored["knowledge_base_id"] = rating_kb(participant, side.knowledge_base_id)
+            if participant.builtin_kb is None and not _in_arena(request, side.model):
+                stored["knowledge_base_id"] = None
+            else:
+                stored["knowledge_base_id"] = rating_kb(participant, side.knowledge_base_id)
         sides.append(stored)
     return sides
 

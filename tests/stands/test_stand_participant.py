@@ -69,8 +69,8 @@ def test_builtin_live_kbs():
 # ---- through the API
 
 
-def _arena_client(make_client, tmp_path, version="v1"):  # noqa: F811
-    path = write_stands(tmp_path / "stands.json", [LAB])
+def _arena_client(make_client, tmp_path, version="v1", arena=True):  # noqa: F811
+    path = write_stands(tmp_path / "stands.json", [{**LAB, "arena": arena}])
     c, db = make_client()
     http = httpx.AsyncClient(transport=httpx.MockTransport(stand_handler([], manifest=manifest(version))))
     registry = StandRegistry(str(path), http_client=http)
@@ -112,6 +112,13 @@ def _ratings(db):
     return with_db(db, _read)
 
 
+def _votes(db):
+    async def _read(session):
+        return (await session.execute(text("SELECT count(*) FROM arena_votes"))).scalar_one()
+
+    return with_db(db, _read)
+
+
 def _stored_sides(db):
     import json
 
@@ -144,20 +151,21 @@ def test_a_vote_without_a_stored_turn_uses_the_registry(make_client, tmp_path): 
     assert _ratings(db) == {("gemma", "lab@v1")}
 
 
-def test_a_vote_with_no_turn_and_no_stand_is_marked_unknown(make_client, tmp_path):  # noqa: F811
+def test_a_vote_with_no_turn_and_no_stand_is_refused(make_client, tmp_path):  # noqa: F811
     c, db, _ = _arena_client(make_client, tmp_path, version="v1")
     _swap_registry(c, tmp_path, [])
-    assert _vote(c).status_code == 200
-    assert _ratings(db) == {("gemma", "lab@unknown")}
+    assert _vote(c).status_code == 403
+    assert _ratings(db) == set() and _votes(db) == 0
 
 
 def test_a_stored_turn_for_another_model_is_not_trusted(make_client, tmp_path):  # noqa: F811
     c, db, _ = _arena_client(make_client, tmp_path, version="v1")
     _record_turn(c)
     _swap_registry(c, tmp_path, [LAB], version="v2")
-    # side b of the vote names a model other than the stored one: it is resolved now, not read from the turn
-    assert _vote(c, model_b="gemma@gone").status_code == 200
-    assert _ratings(db) == {("gemma", "lab@v1"), ("gemma", "gone@unknown")}
+    # side b of the vote names a model other than the stored one: it is resolved now, not read from the turn, and
+    # a stand nobody serves has no round to count
+    assert _vote(c, model_b="gemma@gone").status_code == 403
+    assert _ratings(db) == set() and _votes(db) == 0
 
 
 def test_the_client_kb_is_ignored_and_may_be_empty(make_client, tmp_path):  # noqa: F811
@@ -421,3 +429,61 @@ def test_a_stored_side_of_a_listed_id_keeps_its_kb(make_client, tmp_path):  # no
     body = {"session_id": "c1", "question": "Q?", "turn_index": 0, "sides": sides}
     assert c.post("/v1/arena/turn", json=body).status_code == 200
     assert _stored_sides(db)[0]["knowledge_base_id"] == V2_KB_ID
+
+
+# ---- a vote for a stand needs a round or a stand in the arena now
+
+
+def _chat_403(c):
+    body = {"model": "gemma@lab", "arena": True, "messages": [{"role": "user", "content": "Q?"}]}
+    r = c.post("/v1/chat/completions", json=body)
+    assert r.status_code == 403
+    return r.json()
+
+
+@pytest.mark.parametrize("session", ["c1", None])
+def test_a_vote_for_a_stand_outside_the_arena_is_refused_like_the_chat(make_client, tmp_path, session):  # noqa: F811
+    c, db, _ = _arena_client(make_client, tmp_path, arena=False)
+    r = _vote(c, model_a="gemma@lab", model_b="meno-lite", session=session)
+    assert r.status_code == 403 and r.json() == _chat_403(c)
+    assert _ratings(db) == set() and _votes(db) == 0
+
+
+def test_a_vote_for_a_plain_endpoint_is_refused(make_client, tmp_path):  # noqa: F811
+    path = write_stands(tmp_path / "plain.json", [{**LAB, "arena": True}])
+    c, db = make_client()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(stand_handler([], manifest=None)))
+    registry = StandRegistry(str(path), http_client=http)
+    c.app.state.stand_registry = registry
+    c.portal.call(registry.refresh)
+    assert _vote(c, model_b="meno-lite", session=None).status_code == 403
+    assert _ratings(db) == set() and _votes(db) == 0
+
+
+def test_a_vote_for_a_stand_in_the_arena_counts(make_client, tmp_path):  # noqa: F811
+    c, db, _ = _arena_client(make_client, tmp_path)
+    assert _vote(c, model_b="meno-lite", kb_b=LEGACY_KB_ID, session=None).status_code == 200
+    assert _ratings(db) == {("gemma", "lab@v1"), ("meno-lite", LEGACY_KB_ID)}
+
+
+def test_a_stored_round_stays_valid_when_the_stand_leaves_the_arena(make_client, tmp_path):  # noqa: F811
+    c, db, _ = _arena_client(make_client, tmp_path)
+    _record_turn(c)
+    _swap_registry(c, tmp_path, [{**LAB, "arena": False}], version="v1")
+    assert _vote(c).status_code == 200
+    assert _ratings(db) == {("gemma", "lab@v1")}
+
+
+def test_a_round_posted_for_a_stand_outside_the_arena_does_not_open_the_vote(make_client, tmp_path):  # noqa: F811
+    c, db, _ = _arena_client(make_client, tmp_path, arena=False)
+    _record_turn(c)  # the client may post any round; it is kept as history
+    assert _stored_sides(db)[0]["knowledge_base_id"] is None
+    assert _vote(c).status_code == 403
+    assert _ratings(db) == set() and _votes(db) == 0
+
+
+def test_our_own_models_vote_without_a_round_as_before(make_client, tmp_path):  # noqa: F811
+    c, db, _ = _arena_client(make_client, tmp_path, arena=False)
+    r = _vote(c, model_a="meno-lite", kb_a=LEGACY_KB_ID, model_b="qwen/x:free", kb_b=V2_KB_ID, session=None)
+    assert r.status_code == 200
+    assert _ratings(db) == {("meno-lite", LEGACY_KB_ID), ("qwen/x:free", V2_KB_ID)}
