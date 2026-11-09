@@ -92,6 +92,32 @@ def test_a_stream_cancelled_before_it_starts_frees_its_slots(make_client, tmp_pa
 
 
 @pytest.mark.parametrize("path", ["stand", "builtin"])
+def test_a_stream_whose_client_left_before_it_started_frees_its_slots(make_client, tmp_path, path):  # noqa: F811
+    # uvicorn sends spec_version 2.3: Starlette then listens for the disconnect next to the stream in a task group, and
+    # a disconnect cancels the group, so the response returns normally and no exception reaches the release.
+    c, model, slots = _setup(make_client, tmp_path, path)
+    scope = _scope(c, "2.3")
+
+    async def run():
+        response = await _response(c, model, scope)
+        taken = [s.active for s in slots]
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                await asyncio.Event().wait()  # the client is gone before the headers are out
+
+        await asyncio.wait_for(response(scope, receive, send), 5)  # returns without an exception
+        return taken, inspect.getasyncgenstate(response.body_iterator)
+
+    taken, generator_state = c.portal.call(run)
+    assert taken == [1] * len(slots) and generator_state == inspect.AGEN_CREATED  # it never ran a step
+    assert [s.active for s in slots] == [0] * len(slots)
+
+
+@pytest.mark.parametrize("path", ["stand", "builtin"])
 def test_a_full_stream_frees_its_slots_once(make_client, tmp_path, path):  # noqa: F811
     c, model, slots = _setup(make_client, tmp_path, path)
     scope = _scope(c)
