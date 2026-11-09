@@ -39,6 +39,7 @@ from meno_rag.api.runtime_resolver import (
     ModelUnreachableError,
     resolve_pipeline_runtime,
 )
+from meno_rag.api.stands.participant import Participant, participant_for
 from meno_rag.api.stands.registry import StandRegistry, StandTarget
 from meno_rag.api.stands.relay import Relay, StandStreamError, relay_stream, stand_request_body
 from meno_rag.api.validation import sanitize_validation_errors
@@ -892,6 +893,14 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             settings.capture_pipeline_trace and random.random() < settings.pipeline_trace_sample_rate
         )
 
+        # Who answers, for the history label: decided here, not by the client (stand answers store target.kb_id).
+        participant = participant_for(
+            _public_model(payload, runtime),
+            registry=_stand_registry(request.app),
+            settings=settings,
+            kb_hint=kb_id,
+        )
+
         if pipeline is None and external is None:
             return _error_response(
                 400,
@@ -944,6 +953,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
                     bench=bench,
                     pipeline=pipeline,
                     kb_id=kb_id,
+                    participant=participant,
                 ),
                 media_type="text/event-stream",
                 headers=stream_headers,
@@ -978,6 +988,7 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request, res
             bench=bench,
             pipeline=pipeline,
             kb_id=kb_id,
+            participant=participant,
         )
     finally:
         if not released:
@@ -1021,6 +1032,7 @@ async def _non_stream_response(
     bench: bool = False,
     pipeline: Any = None,
     kb_id: str = LEGACY_KB_ID,
+    participant: Participant | None = None,
 ):
     if pipeline is None:
         pipeline = request.app.state.pipeline
@@ -1061,7 +1073,7 @@ async def _non_stream_response(
                 user_id=user_id,
                 guest_session_id=guest_session_id,
                 arena=payload.arena,
-                kb_id=kb_id,
+                kb_id=participant.kb if participant else kb_id,
                 trace_writer=request.app.state.trace_writer,
             )
     except Exception as exc:
@@ -1096,7 +1108,7 @@ async def _non_stream_response(
                 stage=stage,
                 user_id=user_id,
                 guest_session_id=guest_session_id,
-                kb_id=kb_id,
+                kb_id=participant.kb if participant else kb_id,
             )
         return _classified_error_response(classified, retry_id=completion_id, stage=stage)
     finally:
@@ -1163,6 +1175,7 @@ async def _stream_response(
     bench: bool = False,
     pipeline: Any = None,
     kb_id: str = LEGACY_KB_ID,
+    participant: Participant | None = None,
 ):
     if pipeline is None:
         pipeline = request.app.state.pipeline
@@ -1300,7 +1313,7 @@ async def _stream_response(
                 user_id=user_id,
                 guest_session_id=guest_session_id,
                 arena=payload.arena,
-                kb_id=kb_id,
+                kb_id=participant.kb if participant else kb_id,
                 trace_writer=request.app.state.trace_writer,
             )
     except Exception as exc:
@@ -1344,7 +1357,7 @@ async def _stream_response(
                 stage=stage,
                 user_id=user_id,
                 guest_session_id=guest_session_id,
-                kb_id=kb_id,
+                kb_id=participant.kb if participant else kb_id,
             )
     finally:
         # If the client disconnected mid-prepare, the background prepare task is

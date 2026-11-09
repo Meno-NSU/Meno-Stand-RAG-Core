@@ -104,13 +104,13 @@ class ConversationResponse(BaseModel):
 
 
 class VoteRequest(BaseModel):
-    # Empty model/kb strings are nonsensical for arena (they make leaderboard
-    # rows that can never be matched again) — reject at the schema layer so
-    # a frontend bug can't silently poison the Elo store.
+    # An empty model string is nonsensical for arena (it makes leaderboard rows that can never be
+    # matched again) — reject it at the schema layer. kb_a/kb_b are only kept for older clients: the
+    # server decides the rating key (stand@version) itself and ignores them, so they may be empty.
     model_a: str = Field(..., min_length=1)
-    kb_a: str = Field(..., min_length=1)
+    kb_a: str = Field(default="", max_length=128)
     model_b: str = Field(..., min_length=1)
-    kb_b: str = Field(..., min_length=1)
+    kb_b: str = Field(default="", max_length=128)
     winner: Literal["a", "b", "tie", "both_bad"]
     response_a: str | None = None
     response_b: str | None = None

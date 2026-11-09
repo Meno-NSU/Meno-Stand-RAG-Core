@@ -216,7 +216,7 @@ def test_bench_returns_v2_trace(make_client, monkeypatch):
     assert ev[-2:] == ["pipeline_trace", "[DONE]"]
 
 
-def test_db_row_has_v2_kb_id(make_client):
+def test_db_row_has_v2_participant_label(make_client):
     c, db_path = make_client()
     assert _post(c, kb=V2_KB_ID).status_code == 200
 
@@ -224,4 +224,4 @@ def test_db_row_has_v2_kb_id(make_client):
         return (await session.execute(text("SELECT knowledge_base_id FROM messages"))).scalars().all()
 
     # History is stored unconditionally (no improvement consent needed): user + assistant rows.
-    assert with_db(db_path, _read) == [V2_KB_ID, V2_KB_ID]
+    assert with_db(db_path, _read) == ["menon-1.1@unversioned"] * 2

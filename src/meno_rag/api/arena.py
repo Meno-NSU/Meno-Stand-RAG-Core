@@ -3,11 +3,16 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from meno_rag.api import auth, guest
+from meno_rag.api.stands.participant import builtin_live_kbs, participant_for, stored_participant
 from meno_rag.db import repositories
 from meno_rag.db.orm import Conversation
 from meno_rag.schemas import ArenaTurnRequest, VoteRequest
 
 router = APIRouter(prefix="/v1/arena", tags=["arena"])
+
+
+def _registry(request: Request):
+    return getattr(request.app.state, "stand_registry", None)
 
 
 @router.post("/vote")
@@ -33,6 +38,18 @@ async def submit_vote(vote: VoteRequest, request: Request):
                 # permanently consume the one write the real owner's own vote gets for that
                 # turn (every later vote for the same pair is treated as a duplicate).
                 raise HTTPException(status_code=404, detail="Conversation not found.")
+        # The rating key is decided here, never taken from the client: the participant fixed when the round was
+        # stored (it answered, whatever the stand is now), else the one the registry resolves at this moment.
+        stored = await repositories.arena_turn_sides(
+            session, conversation_id=vote.session_id or "", turn_index=vote.turn_index
+        )
+        for key, model in (("a", vote.model_a), ("b", vote.model_b)):
+            side = next((s for s in stored or [] if s.get("key") == key and s.get("model") == model), None)
+            participant = stored_participant(model, side.get("knowledge_base_id")) if side else None
+            if participant is None:
+                participant = participant_for(model, registry=_registry(request), settings=request.app.state.settings)
+            payload[f"model_{key}"] = participant.llm
+            payload[f"kb_{key}"] = participant.kb
         recorded = await repositories.submit_arena_vote(session, payload)
         if recorded:
             # Best-effort: an arena turn is only stored when the subject consented to
@@ -88,7 +105,7 @@ async def record_turn(payload: ArenaTurnRequest, request: Request):
             session,
             conversation_id=payload.session_id,
             question=payload.question,
-            sides=[side.model_dump() for side in payload.sides],
+            sides=_sides_with_participants(payload, request),
             turn_index=payload.turn_index,
             user_id=user_id,
             guest_session_id=guest_id,
@@ -98,9 +115,27 @@ async def record_turn(payload: ArenaTurnRequest, request: Request):
     return {"status": "ok", "stored": True}
 
 
+def _sides_with_participants(payload: ArenaTurnRequest, request: Request) -> list[dict]:
+    """The stored sides: the participant is fixed now (the vote may come much later), the client's label is dropped."""
+    settings = request.app.state.settings
+    sides = []
+    for side in payload.sides:
+        stored = side.model_dump()
+        if side.model:
+            stored["knowledge_base_id"] = participant_for(
+                side.model, registry=_registry(request), settings=settings, kb_hint=side.knowledge_base_id
+            ).kb
+        sides.append(stored)
+    return sides
+
+
 @router.get("/leaderboard")
 async def get_leaderboard(request: Request):
     database = request.app.state.database
     async with database.sessionmaker() as session:
         data = await repositories.list_arena_leaderboard(session)
+    registry = _registry(request)
+    live = (registry.live_kbs() if registry is not None else set()) | builtin_live_kbs(request.app.state.settings)
+    for row in data:
+        row["live"] = row["knowledge_base"] in live
     return {"object": "list", "data": data}

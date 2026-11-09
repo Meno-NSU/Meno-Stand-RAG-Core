@@ -3,7 +3,7 @@
 A frontend bug shouldn't be able to poison the Elo leaderboard with empty
 or null model identifiers. Pydantic rejects missing fields with 422
 out of the box, but empty strings would slip through plain `str` typing —
-explicit `min_length=1` closes that hole."""
+explicit `min_length=1` closes that hole for the model ids (kb_a/kb_b may be empty: the server decides them)."""
 
 import pytest
 from pydantic import ValidationError
@@ -29,10 +29,18 @@ def test_valid_payload_parses():
     assert vote.model_a == "vllm/menon-1"
 
 
-@pytest.mark.parametrize("field", ["model_a", "model_b", "kb_a", "kb_b"])
+@pytest.mark.parametrize("field", ["model_a", "model_b"])
 def test_empty_string_rejected(field):
     with pytest.raises(ValidationError):
         VoteRequest(**_valid_payload(**{field: ""}))
+
+
+@pytest.mark.parametrize("field", ["kb_a", "kb_b"])
+def test_empty_kb_allowed_and_long_kb_rejected(field):
+    # The server decides the rating key; the client's kb is only kept for older clients.
+    assert getattr(VoteRequest(**_valid_payload(**{field: ""})), field) == ""
+    with pytest.raises(ValidationError):
+        VoteRequest(**_valid_payload(**{field: "x" * 129}))
 
 
 @pytest.mark.parametrize("field", ["model_a", "model_b", "kb_a", "kb_b"])
