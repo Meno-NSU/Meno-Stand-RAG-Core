@@ -158,6 +158,10 @@ def _bool_label(value: bool) -> str:
 MAX_VERSIONS_PER_STAND = 32
 MAX_LLMS_PER_STAND = 64
 MAX_LLM_LABEL_CHARS = 128
+MAX_LLMS_PER_BUILTIN_STAND = 512
+# Our own pipelines: participant.LEGACY_STAND_ID and V2_STAND_ID, repeated here because participant imports this
+# module through the registry.
+BUILTIN_STANDS = frozenset({"menon-1.0", "menon-1.1"})
 OTHER = "other"
 _versions_seen: dict[str, set[str]] = {}
 _llms_seen: dict[str, set[str]] = {}
@@ -184,19 +188,24 @@ def bounded_version(stand: str, version: str) -> str:
 def bounded_llm(stand: str, llm: str) -> str:
     """The LLM as a label value. It can be what a client sent (while the vLLM list is empty any id is accepted), so
     the first 64 distinct names of a stand keep their name, later new ones become 'other' (and count as a too_many_llms
-    violation), as does anything over 128 characters. An empty name (nobody is known) takes no place."""
+    violation), as does anything over 128 characters. An empty name (nobody is known) takes no place.
+
+    Our own pipelines keep 512 names: every vLLM and OpenRouter model answers under one of them, and the free OpenRouter
+    list alone can come close to 64. They record no violation, as the contract is not theirs."""
     if not llm:
         return llm
     if len(llm) > MAX_LLM_LABEL_CHARS:
         return OTHER
+    builtin = stand in BUILTIN_STANDS
     with _versions_lock:
         seen = _llms_seen.setdefault(stand, set())
         if llm in seen:
             return llm
-        if len(seen) < MAX_LLMS_PER_STAND:
+        if len(seen) < (MAX_LLMS_PER_BUILTIN_STAND if builtin else MAX_LLMS_PER_STAND):
             seen.add(llm)
             return llm
-    record_stand_violation(stand, "too_many_llms")
+    if not builtin:
+        record_stand_violation(stand, "too_many_llms")
     return OTHER
 
 

@@ -498,6 +498,35 @@ def test_a_long_llm_name_becomes_other_and_an_empty_one_stays_empty():
         assert metrics.bounded_llm("llmlen", f"m{i}") == f"m{i}"  # the empty and the long names took no place
 
 
+@pytest.mark.parametrize("stand", ["menon-1.0", "menon-1.1"])
+def test_our_own_pipelines_keep_512_llm_names_and_record_no_violation(monkeypatch, stand):
+    # Every built-in answer carries one of these two stands, and with OPENROUTER_DISCOVER_ALL_FREE the free OpenRouter
+    # list alone can come close to the 64 names a stand gets.
+    from meno_rag.api import metrics
+
+    monkeypatch.setattr(metrics, "_llms_seen", {})
+
+    def violations(stand):
+        return metrics.REGISTRY.get_sample_value(
+            "meno_stand_contract_violations_total", {"stand": stand, "kind": "too_many_llms"}
+        )
+
+    before = violations(stand)
+    names = [metrics.bounded_llm(stand, f"m{i}") for i in range(520)]
+    assert names[:512] == [f"m{i}" for i in range(512)] and set(names[512:]) == {"other"}
+    assert metrics.bounded_llm(stand, "x" * 129) == "other" and metrics.bounded_llm(stand, "") == ""
+    assert violations(stand) == before
+    names = [metrics.bounded_llm("lab", f"m{i}") for i in range(65)]  # a stand keeps 64
+    assert names[:64] == [f"m{i}" for i in range(64)] and names[64] == "other"
+
+
+def test_the_builtin_stands_of_the_metrics_are_those_of_the_participants():
+    from meno_rag.api import metrics
+    from meno_rag.api.stands.participant import LEGACY_STAND_ID, V2_STAND_ID
+
+    assert {LEGACY_STAND_ID, V2_STAND_ID} == metrics.BUILTIN_STANDS
+
+
 def test_the_first_token_series_is_capped_too():
     from meno_rag.api import metrics
 
