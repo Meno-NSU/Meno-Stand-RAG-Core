@@ -239,6 +239,10 @@ A stand is a separately run RAG backend that speaks the `meno-backend/1` contrac
 endpoint). The gateway lists its LLMs in `/v1/models` as `<llm>@<stand>`, relays the chat to it, checks the stream, and
 stores the answer in our history.
 
+The `meno_contract` package lives in `packages/meno-contract/src` and is not installed: `scripts/run_backend.sh` puts it on
+`PYTHONPATH`. Starting the API any other way needs `PYTHONPATH=<repo>/packages/meno-contract/src`, otherwise the import
+fails with `ModuleNotFoundError`. The old `EXTERNAL_BACKENDS` variable is no longer read (a warning is logged if it is set).
+
 To connect one:
 
 1. Check it: `check-backend http://host:port --key KEY`, or without installing anything:

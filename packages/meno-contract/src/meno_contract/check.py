@@ -20,7 +20,9 @@ from pydantic import ValidationError
 
 from meno_contract.models import (
     MAX_ANSWER_CHARS,
+    MAX_ANSWER_S,
     MAX_BLOCK_BYTES,
+    MAX_CHUNK_PAUSE_S,
     MAX_TRACE_BLOCK_BYTES,
     PROTOCOL,
     STANDARD_STAGES,
@@ -95,38 +97,64 @@ def _problem_text(exc: ValidationError) -> str:
 
 
 async def _read_stream(
-    client: httpx.AsyncClient, url: str, headers: dict[str, str], model: str, first_token_limit_s: float
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    model: str,
+    first_token_limit_s: float,
+    *,
+    pause_limit_s: float = MAX_CHUNK_PAUSE_S,
+    answer_limit_s: float = MAX_ANSWER_S,
 ) -> _Stream:
+    """Read one answer the way the gateway does: a pause between chunks up to `pause_limit_s`, the whole answer up
+    to `answer_limit_s`. The first token is timed here and judged against `first_token_limit_s` afterwards."""
     seen = _Stream()
     body = {"model": model, "messages": [{"role": "user", "content": QUESTION}], "stream": True}
-    timeout = httpx.Timeout(30.0, read=first_token_limit_s)
+    timeout = httpx.Timeout(30.0, read=pause_limit_s)
     started = time.monotonic()
     try:
-        async with client.stream("POST", url, json=body, headers=headers, timeout=timeout) as response:
-            seen.status = response.status_code
-            if response.status_code != 200:
-                await response.aread()
-                seen.failure = f"Стенд ответил HTTP {response.status_code}: {response.text[:200]!r}"
-                return seen
-            async for block in iter_blocks(response.aiter_text(), max_bytes=MAX_TRACE_BLOCK_BYTES):
-                if seen.done:
-                    seen.after_done += 1
-                    continue
-                if block.event not in ("contexts", "pipeline_trace") and block.raw_size > MAX_BLOCK_BYTES:
-                    seen.problems.append(
-                        f"Блок {block.event!r} занимает {block.raw_size} байт, шлюз принимает не больше "
-                        f"{MAX_BLOCK_BYTES} (для contexts и pipeline_trace до {MAX_TRACE_BLOCK_BYTES}). "
-                        "Шлите ответ частями."
-                    )
-                    continue
-                _take_block(seen, block.event, block.data, started)
+        await asyncio.wait_for(_consume(client, url, headers, body, timeout, seen, started), answer_limit_s)
+    except TimeoutError:
+        seen.failure = f"Ответ шёл дольше {answer_limit_s:g} с: шлюз оборвёт его. Отвечайте быстрее."
     except SseBlockTooLarge:
         seen.problems.append(f"Блок SSE больше {MAX_TRACE_BLOCK_BYTES} байт. Шлите ответ частями, а не одним блоком.")
     except httpx.TimeoutException:
-        seen.failure = f"Стенд молчал дольше {first_token_limit_s:g} с. Первый токен нужно выдать быстрее."
+        if seen.first_token_s is None:
+            seen.failure = f"Стенд не выдал первый токен: молчал дольше {pause_limit_s:g} с."
+        else:
+            seen.failure = f"Пауза между кусками потока дольше {pause_limit_s:g} с: шлюз оборвёт ответ."
     except httpx.HTTPError as exc:
         seen.failure = f"Нет связи со стендом или поток оборван: {type(exc).__name__}: {exc}"
     return seen
+
+
+async def _consume(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    timeout: httpx.Timeout,
+    seen: _Stream,
+    started: float,
+) -> None:
+    async with client.stream("POST", url, json=body, headers=headers, timeout=timeout) as response:
+        seen.status = response.status_code
+        if response.status_code != 200:
+            await response.aread()
+            seen.failure = f"Стенд ответил HTTP {response.status_code}: {response.text[:200]!r}"
+            return
+        async for block in iter_blocks(response.aiter_text(), max_bytes=MAX_TRACE_BLOCK_BYTES):
+            if seen.done:
+                seen.after_done += 1
+                continue
+            if block.event not in ("contexts", "pipeline_trace") and block.raw_size > MAX_BLOCK_BYTES:
+                seen.problems.append(
+                    f"Блок {block.event!r} занимает {block.raw_size} байт, шлюз принимает не больше "
+                    f"{MAX_BLOCK_BYTES} (для contexts и pipeline_trace до {MAX_TRACE_BLOCK_BYTES}). "
+                    "Шлите ответ частями."
+                )
+                continue
+            _take_block(seen, block.event, block.data, started)
 
 
 def _take_block(seen: _Stream, event: str, data: str, started: float) -> None:
@@ -136,6 +164,8 @@ def _take_block(seen: _Stream, event: str, data: str, started: float) -> None:
             return
         try:
             payload = json.loads(data)
+            if isinstance(payload, dict) and payload.get("choices") == []:
+                return  # the usage chunk many servers send last; the gateway accepts it
             delta = payload["choices"][0]["delta"]
         except (ValueError, KeyError, IndexError, TypeError):
             seen.problems.append(

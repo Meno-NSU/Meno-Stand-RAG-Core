@@ -1,8 +1,9 @@
+import asyncio
 import json
 
 import httpx
 import pytest
-from meno_contract.check import format_report, main, run_checks
+from meno_contract.check import _read_stream, format_report, main, run_checks
 from meno_contract.example_stand import create_app
 
 MANIFEST = {
@@ -36,6 +37,8 @@ def _stream(fault, trace):
         text = "<think>hm</think>Ответ" if fault == "think_in_content" else "Ответ"
         chunk = {"choices": [{"index": 0, "delta": {"content": text}}]}
         blocks.append(_sse(chunk))
+        if fault == "usage_chunk":
+            blocks.append(_sse({"choices": [], "usage": {"total_tokens": 3}}))
     if fault != "no_sources":
         blocks.append(_sse({"sources": [{"document_title": "Doc", "source_url": "https://example.org"}]}, "sources"))
     if (trace and fault != "no_contexts_with_trace") or fault == "contexts_without_trace":
@@ -132,3 +135,56 @@ async def test_a_block_over_the_gateway_limit_fails_unless_it_is_contexts():
     assert not report.ok and "шлюз принимает не больше" in format_report(report)
     report = await run_checks(_oversize_client("pipeline_trace"), "http://stand")
     assert report.ok, format_report(report)
+
+
+async def test_a_usage_chunk_without_choices_is_accepted_like_the_gateway_does():
+    report = await run_checks(_client("usage_chunk"), "http://stand")
+    assert report.ok, format_report(report)
+
+
+class _Paced(httpx.AsyncByteStream):
+    """A stream whose pieces arrive after the given pauses (seconds)."""
+
+    def __init__(self, pieces):
+        self._pieces = pieces
+
+    async def __aiter__(self):
+        for pause, piece in self._pieces:
+            await asyncio.sleep(pause)
+            yield piece.encode()
+
+
+def _paced_client(pieces):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/meno/v1/manifest":
+            return httpx.Response(200, json=MANIFEST)
+        if json.loads(request.content)["model"] != "m1":
+            return httpx.Response(400, json={"error": {"message": "unknown model"}})
+        pieces_now = pieces(request.headers.get("X-Meno-Trace") == "1") if callable(pieces) else pieces
+        return httpx.Response(200, stream=_Paced(pieces_now), headers={"content-type": "text/event-stream"})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _chunk_block(text):
+    return _sse({"choices": [{"index": 0, "delta": {"content": text}}]})
+
+
+async def test_a_late_first_token_is_reported_against_the_first_token_limit():
+    rest = _stream(None, False).split("\n\n", 1)[1]
+    client = _paced_client([(0.3, _chunk_block("Ответ")), (0, rest)])
+    report = await run_checks(client, "http://stand", first_token_limit_s=0.1)
+    text = format_report(report)
+    assert not report.ok and "первый токен" in text.lower() and "лимите 0.1" in text
+
+
+async def test_a_pause_in_mid_answer_is_judged_by_the_pause_limit_not_the_first_token_limit():
+    client = _paced_client(lambda trace: [(0, _chunk_block("Ответ")), (0.3, _stream(None, trace))])
+    report = await run_checks(client, "http://stand", first_token_limit_s=0.1)
+    assert report.ok, format_report(report)
+
+
+async def test_an_answer_over_the_total_limit_is_a_failed_item():
+    async with _paced_client([(0, _chunk_block("а")), (5, _chunk_block("б"))]) as client:
+        seen = await _read_stream(client, "http://stand/v1/chat/completions", {}, "m1", 120.0, answer_limit_s=0.2)
+    assert "дольше 0.2 с" in seen.failure

@@ -27,10 +27,16 @@ MAX_SOURCES = 20
 MAX_BLOCK_BYTES = 1_000_000  # one SSE block; contexts and pipeline_trace may be larger
 MAX_TRACE_BLOCK_BYTES = 16_000_000
 MAX_ANSWER_CHARS = 40_000
+MAX_CHUNK_PAUSE_S = 300  # the longest silence between two chunks of a stream
+MAX_ANSWER_S = 900  # the longest whole answer
+MAX_LLMS = 32
+MAX_TITLE_CHARS = 500
+MAX_URL_CHARS = 2000
 
 VERSION_PATTERN = r"^[A-Za-z0-9._+-]{1,64}$"
 STAGE_NAME_PATTERN = r"^[a-z0-9_]{1,64}$"
 _STAGE_NAME_RE = re.compile(STAGE_NAME_PATTERN)
+LLM_ID_PATTERN = r"^[A-Za-z0-9._:/+@-]{1,128}$"
 
 
 def _to_str(value: Any) -> Any:
@@ -42,8 +48,8 @@ class _Model(BaseModel):
 
 
 class StageLabel(_Model):
-    ru: str
-    en: str
+    ru: str = Field(min_length=1, max_length=128)
+    en: str = Field(min_length=1, max_length=128)
 
 
 class LlmStatus(_Model):
@@ -52,8 +58,8 @@ class LlmStatus(_Model):
 
 
 class Llm(_Model):
-    id: str
-    name: str
+    id: str = Field(pattern=LLM_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=128)
     context_length: int | None = None
     requires_auth: bool = False
     status: LlmStatus | None = None
@@ -61,12 +67,12 @@ class Llm(_Model):
 
 class Manifest(_Model):
     protocol: str
-    name: str
-    description: str | None = None
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=256)
     version: str = Field(pattern=VERSION_PATTERN)
-    build: str | None = None
-    kb: str | None = None
-    llms: list[Llm]
+    build: str | None = Field(default=None, max_length=128)
+    kb: str | None = Field(default=None, max_length=256)
+    llms: list[Llm] = Field(max_length=MAX_LLMS)
     default_llm: str
     stages: dict[str, StageLabel] = Field(default_factory=dict)
 
@@ -82,7 +88,7 @@ class Manifest(_Model):
         if self.default_llm not in ids:
             raise ValueError("default_llm must be one of llms")
         for stage in self.stages:
-            if not _STAGE_NAME_RE.match(stage):
+            if not _STAGE_NAME_RE.fullmatch(stage):
                 raise ValueError(f"bad stage name: {stage!r}")
         return self
 
@@ -99,7 +105,7 @@ class StageDetail(_Model):
 class StageEvent(_Model):
     stage: str = Field(pattern=STAGE_NAME_PATTERN)
     status: Literal["started", "completed", "failed", "skipped"]
-    duration_ms: float | None = Field(default=None, ge=0)
+    duration_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     detail: StageDetail | None = None
 
 
@@ -134,10 +140,10 @@ def clean_sources(raw: Any) -> tuple[list[dict[str, str]], int]:
         title = item.get("document_title")
         url = item.get("source_url")
         url = "" if url is None else str(url)
-        if url and not url.lower().startswith(("http://", "https://")):
+        if (url and not url.lower().startswith(("http://", "https://"))) or len(url) > MAX_URL_CHARS:
             dropped += 1
             continue
-        row = {"document_title": "" if title is None else str(title), "source_url": url}
+        row = {"document_title": ("" if title is None else str(title))[:MAX_TITLE_CHARS], "source_url": url}
         date = item.get("date")
         if date not in (None, ""):
             row["date"] = str(date)

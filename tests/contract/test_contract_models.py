@@ -34,6 +34,57 @@ def test_manifest_rejects(patch):
         Manifest.model_validate({**GOOD, **patch})
 
 
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"name": ""},
+        {"name": "x" * 129},
+        {"description": "x" * 257},
+        {"kb": "x" * 257},
+        {"build": "x" * 129},
+        {"llms": [{"id": "", "name": "A"}], "default_llm": ""},
+        {"llms": [{"id": "a b", "name": "A"}], "default_llm": "a b"},
+        {"llms": [{"id": "a\n", "name": "A"}], "default_llm": "a\n"},
+        {"llms": [{"id": "x" * 129, "name": "A"}], "default_llm": "x" * 129},
+        {"llms": [{"id": "a", "name": ""}]},
+        {"llms": [{"id": "a", "name": "x" * 129}]},
+        {"llms": [{"id": f"m{i}", "name": "M"} for i in range(33)], "default_llm": "m0"},
+        {"stages": {"retrieval\n": {"ru": "x", "en": "x"}}},
+        {"stages": {"": {"ru": "x", "en": "x"}}},
+        {"stages": {"graph": {"ru": "", "en": "x"}}},
+        {"stages": {"graph": {"ru": "x", "en": "y" * 129}}},
+    ],
+)
+def test_manifest_values_are_bounded(patch):
+    with pytest.raises(ValidationError):
+        Manifest.model_validate({**GOOD, **patch})
+
+
+def test_manifest_accepts_the_limits_and_usual_ids():
+    odd = {"id": "org/model:v1.5+x@y-z", "name": "N" * 128}
+    llms = [{"id": f"m{i}", "name": "M"} for i in range(31)] + [odd]
+    m = Manifest.model_validate({**GOOD, "llms": llms, "default_llm": "m0", "name": "n" * 128, "kb": "k" * 256})
+    assert len(m.llms) == 32
+
+
+@pytest.mark.parametrize("bad", ["1e999", "-1e999", "NaN"])
+def test_stage_event_rejects_a_non_finite_duration(bad):
+    raw = f'{{"stage": "rerank", "status": "completed", "duration_ms": {bad}}}'
+    with pytest.raises(ValidationError):
+        StageEvent.model_validate_json(raw)
+
+
+def test_clean_sources_clips_titles_and_drops_huge_urls():
+    rows, dropped = clean_sources(
+        [
+            {"document_title": "я" * 900, "source_url": "https://nsu.ru/a"},
+            {"document_title": "long", "source_url": "https://nsu.ru/" + "a" * 2000},
+            {"document_title": "edge", "source_url": "https://nsu.ru/" + "a" * (2000 - len("https://nsu.ru/"))},
+        ]
+    )
+    assert [len(r["document_title"]) for r in rows] == [500, 4] and dropped == 1
+
+
 def test_stage_detail_is_trimmed_to_the_limits():
     e = StageEvent.model_validate({"stage": "retrieval", "status": "completed", "detail": {"lines": ["я" * 600] * 60}})
     assert len(e.detail.lines) == 50 and len(e.detail.lines[0]) == 500
