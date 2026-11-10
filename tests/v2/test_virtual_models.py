@@ -114,3 +114,41 @@ def test_arena_accepts_virtual_ids(make_client):  # noqa: F811  (fixture)
     }
     r = c.post("/v1/arena/vote", json=vote)
     assert r.status_code in (200, 201), r.text
+
+
+def test_every_entry_names_its_version_and_model(make_client):  # noqa: F811  (fixture)
+    c, _ = _client(make_client)
+    data = {m["id"]: m for m in c.get("/v1/models").json()["data"]}
+    f = lambda i: tuple(data[i][k] for k in ("stand_id", "stand_name", "llm_id", "llm_name"))  # noqa: E731
+    assert f("meno-lite") == ("menon-1.0", "Менон 1.0", "meno-lite", "meno-lite")
+    assert f("gemma-4-12B-it") == ("menon-1.0", "Менон 1.0", "gemma-4-12B-it", "Gemma 4 12B")
+    assert f("gemma-4-12B-it@menon-1.1") == ("menon-1.1", "Менон 1.1", "gemma-4-12B-it", "Gemma 4 12B")
+    assert f("other") == ("menon-1.0", "Менон 1.0", "other", "other")
+    assert data["gemma-4-12B-it@menon-1.1"]["display_name"] == GEMMA  # old fields unchanged
+    assert data["gemma-4-12B-it"]["display_name"] == "gemma-4-12B-it"
+
+
+def test_a_malformed_llm_display_names_setting_keeps_its_good_parts(make_client, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_DISPLAY_NAMES", "broken;=x;meno-lite=Лайт")
+    c, _ = _client(make_client)
+    data = {m["id"]: m for m in c.get("/v1/models").json()["data"]}
+    assert data["meno-lite"]["llm_name"] == "Лайт" and data["meno-lite@menon-1.1"]["llm_name"] == "Лайт"
+    assert data["gemma-4-12B-it"]["llm_name"] == "gemma-4-12B-it"  # the setting replaces the default map
+
+
+def test_the_default_entry_belongs_to_menon_10(make_client):  # noqa: F811  (fixture)
+    c, _ = _client(make_client, ids=())
+    first = c.get("/v1/models").json()["data"][0]
+    assert first["stand_id"] == "menon-1.0" and first["llm_id"] == first["id"]
+    assert first["stand_name"] == "Менон 1.0" and first["llm_name"] == first["id"]
+
+
+def test_a_menon_11_copy_takes_the_llm_name_of_its_base():
+    from types import SimpleNamespace
+
+    from meno_rag.api.knowledge_bases import virtual_model_entries
+
+    s = SimpleNamespace(v2_enabled=True, v2_expose_as="models", v2_model_aliases="x=Менон 1.1 (X)")
+    base = {"id": "x", "llm_id": "x", "llm_name": "Икс"}
+    (copy,) = virtual_model_entries(s, [base])  # type: ignore[arg-type]
+    assert copy["llm_id"] == "x" and copy["llm_name"] == "Икс"

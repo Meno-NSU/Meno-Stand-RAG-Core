@@ -283,7 +283,9 @@ class StandRegistry:
             m = state.manifest
             version = m.version if m else PLAIN_VERSION
             backend_name = (m.name if m else stand.name) or stand.id
+            stand_name = stand.name or (m.name if m else "") or stand.id
             for llm in _llms(state):
+                llm_name = llm.get("display_name") or llm.get("name") or llm["id"]
                 status = {"state": "available", "until": None, "last_error": None}
                 if m is not None and llm.get("status"):  # a status is read only from a checked manifest
                     status["state"], status["until"] = llm["status"].state, llm["status"].until
@@ -299,11 +301,14 @@ class StandRegistry:
                         "featured": False,
                         "stages": ["generation"],
                         "status": status,
-                        "display_name": llm.get("display_name") or llm.get("name") or llm["id"],
+                        "display_name": llm_name,
                         "context_length": llm.get("context_length"),
                         "backend_id": stand.id,
                         "backend_name": backend_name,
+                        "stand_id": stand.id,
+                        "stand_name": stand_name,
                         "llm_id": llm["id"],
+                        "llm_name": llm_name,
                         "version": version,
                         "arena": stand.arena and m is not None,
                         "auth_required": bool(llm.get("requires_auth")),

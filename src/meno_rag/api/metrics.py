@@ -161,7 +161,10 @@ MAX_LLM_LABEL_CHARS = 128
 MAX_LLMS_PER_BUILTIN_STAND = 512
 # Our own pipelines: participant.LEGACY_STAND_ID and V2_STAND_ID, repeated here because participant imports this
 # module through the registry.
-BUILTIN_STANDS = frozenset({"menon-1.0", "menon-1.1"})
+MENON_10 = "menon-1.0"
+MENON_11 = "menon-1.1"
+BUILTIN_STANDS = frozenset({MENON_10, MENON_11})
+BUILTIN_STAND_NAMES = {MENON_10: "Менон 1.0", MENON_11: "Менон 1.1"}
 OTHER = "other"
 _versions_seen: dict[str, set[str]] = {}
 _llms_seen: dict[str, set[str]] = {}

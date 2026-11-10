@@ -224,6 +224,8 @@ class Settings(BaseSettings):
         default="meno-lite=Менон 1.1 (meno-lite);gemma-4-12B-it=Менон 1.1 (Gemma 4)",
         validation_alias="V2_MODEL_ALIASES",
     )
+    # Display names of models in the version picker: "llm_id=display name;..." (replaces the default map).
+    llm_display_names: str = Field(default="gemma-4-12B-it=Gemma 4 12B", validation_alias="LLM_DISPLAY_NAMES")
     # JSON file listing the stands (separately run answer backends) offered as model entries "<llm>@<id>";
     # empty: no stands. See meno_rag/api/stands/config.py.
     stands_file: str = Field(default="", validation_alias="STANDS_FILE")
