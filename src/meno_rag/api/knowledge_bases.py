@@ -109,8 +109,13 @@ def label_rating_row(row: dict, registry: Any, llm_display_names: str) -> None:
     """Adds ``stand_id``, ``stand_name``, ``stand_version`` and ``llm_name`` to a leaderboard row, by its knowledge
     base and model. A stand that is no longer configured is named by its id."""
     kb = row["knowledge_base"]
+    llm, virtual = split_virtual_model(row["model"])
+    llm = llm or row["model"]
     version = None
-    if kb in (LEGACY_KB_ID, V2_KB_ID):
+    if virtual:
+        stand_id = metrics.MENON_11
+        name = metrics.BUILTIN_STAND_NAMES[stand_id]
+    elif kb in (LEGACY_KB_ID, V2_KB_ID):
         stand_id = metrics.MENON_10 if kb == LEGACY_KB_ID else metrics.MENON_11
         name = metrics.BUILTIN_STAND_NAMES[stand_id]
     else:
@@ -118,7 +123,4 @@ def label_rating_row(row: dict, registry: Any, llm_display_names: str) -> None:
         version = version or None
         name = (registry.display_name(stand_id) if registry is not None else None) or stand_id
     row["stand_id"], row["stand_name"], row["stand_version"] = stand_id, name, version
-    row["llm_id"] = row["model"]
-    row["llm_name"] = row["model"]
-    apply_llm_display_names([row], llm_display_names)
-    del row["llm_id"]
+    row["llm_name"] = dict(parse_model_aliases(llm_display_names)).get(llm, llm)

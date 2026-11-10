@@ -22,6 +22,8 @@ RAGU = {"id": "ragu", "url": "http://ragu.example:9007/", "api_key": "k-1"}  # n
 ROWS = [
     ("gemma-4-12B-it", LEGACY_KB_ID),
     ("gemma-4-12B-it", V2_KB_ID),
+    ("gemma-4-12B-it@menon-1.1", V2_KB_ID),
+    ("gemma-4-12B-it@menon-1.1", LEGACY_KB_ID),
     ("gemma", "ragu@nsu-ragu-2026-11"),
     ("gemma", "old@v1"),
     ("some-model", "ragu@nsu-ragu-2026-11"),
@@ -64,6 +66,12 @@ def test_rows_name_their_version_and_model(tmp_path):
     assert _labels(rows[("gemma-4-12B-it", V2_KB_ID)]) == ("menon-1.1", "Менон 1.1", None, "Gemma 4 12B")
     assert _labels(rows[("gemma", "ragu@nsu-ragu-2026-11")]) == ("ragu", "RAGU", "nsu-ragu-2026-11", "gemma")
     assert rows[("some-model", "ragu@nsu-ragu-2026-11")]["llm_name"] == "some-model"
+
+
+def test_menon_11_virtual_model_rows_are_labelled_menon_11_whatever_the_kb(tmp_path):
+    rows = _rows(tmp_path)
+    for kb in (V2_KB_ID, LEGACY_KB_ID):
+        assert _labels(rows[("gemma-4-12B-it@menon-1.1", kb)]) == ("menon-1.1", "Менон 1.1", None, "Gemma 4 12B")
 
 
 def test_a_stand_no_longer_configured_still_gets_a_label(tmp_path):
