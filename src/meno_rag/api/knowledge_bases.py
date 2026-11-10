@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from meno_rag.api import metrics
 from meno_rag.config import Settings
 
 LEGACY_KB_ID = "nsu-stand-faiss-bm25"
@@ -87,6 +88,17 @@ def virtual_model_entries(settings: Settings, models: list[dict]) -> list[dict]:
                 "display_name": display,
                 "pipeline": "v2",
                 "knowledge_base_id": V2_KB_ID,
+                "stand_id": metrics.MENON_11,
+                "stand_name": metrics.BUILTIN_STAND_NAMES[metrics.MENON_11],
+                "llm_id": base_id,
+                "llm_name": base_id,
             }
         )
     return entries
+
+
+def apply_llm_display_names(entries: list[dict], raw: str) -> None:
+    """Sets each entry's ``llm_name`` from the ``LLM_DISPLAY_NAMES`` map, by its ``llm_id``."""
+    names = dict(parse_model_aliases(raw))
+    for entry in entries:
+        entry["llm_name"] = names.get(entry["llm_id"], entry["llm_name"])

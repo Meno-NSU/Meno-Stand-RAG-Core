@@ -36,6 +36,7 @@ from meno_rag.api.events import (
 from meno_rag.api.knowledge_bases import (
     LEGACY_KB_ID,
     V2_KB_ID,
+    apply_llm_display_names,
     default_kb_id,
     knowledge_bases,
     split_virtual_model,
@@ -542,6 +543,16 @@ async def service_status(request: Request):
     return {"active_requests": admission.active, "limit": admission.max_concurrent}
 
 
+def _menon_10_fields(llm_id: str, llm_name: str) -> dict[str, str]:
+    """The version-picker fields of an entry served by our own legacy pipeline."""
+    return {
+        "stand_id": metrics_mod.MENON_10,
+        "stand_name": metrics_mod.BUILTIN_STAND_NAMES[metrics_mod.MENON_10],
+        "llm_id": llm_id,
+        "llm_name": llm_name,
+    }
+
+
 @app.get("/v1/models")
 async def list_models(request: Request):
     from meno_rag.api.runtime_resolver import resolve_core_model_id_sync
@@ -569,6 +580,7 @@ async def list_models(request: Request):
                 "display_name": m["id"],
                 "context_length": m.get("context_length"),
                 "endpoint": m.get("endpoint"),
+                **_menon_10_fields(m["id"], m["id"]),
             }
         )
     statuses = await status_store.list_all()
@@ -596,6 +608,7 @@ async def list_models(request: Request):
                 ),
                 "display_name": m.get("display_name") or m["id"],
                 "context_length": m.get("context_length"),
+                **_menon_10_fields(m["id"], m.get("display_name") or m["id"]),
             }
         )
 
@@ -612,6 +625,7 @@ async def list_models(request: Request):
                 "status": {"state": "available", "until": None, "last_error": None},
                 "display_name": settings.default_model or "menon-1",
                 "context_length": None,
+                **_menon_10_fields(settings.default_model or "menon-1", settings.default_model or "menon-1"),
             }
         ]
 
@@ -623,6 +637,7 @@ async def list_models(request: Request):
             merged.extend(await stands.entries())
         except Exception as exc:  # our own models are listed whatever the stands do
             logger.error("stand_entries_failed", error=str(exc) or type(exc).__name__)
+    apply_llm_display_names(merged, settings.llm_display_names)
 
     current_user = await auth.resolve_optional_user(request)
     if settings.auth_enabled and current_user is None:

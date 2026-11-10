@@ -483,3 +483,18 @@ def test_a_bad_stand_does_not_touch_the_others(make_client, tmp_path, fault):  #
     assert r.status_code == 200 and "event: error" not in r.text
     assert [r[1:4] for r in _answers(db)] == [("Сессия в январе", "gemma@ok", "ok@v1")]
     _slots_free(c, reg.resolve("gemma@bad"), reg.resolve("gemma@ok"))
+
+
+def test_the_model_list_runs_menon_10_then_11_then_the_stands(make_client, tmp_path, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_DISPLAY_NAMES", "gemma=Гемма")
+    c, _, _ = stand_client(make_client, tmp_path, stand_handler([]))
+    c.app.state.vllm_registry = SimpleNamespace(
+        list_models=AsyncMock(return_value=[{"id": "meno-lite", "endpoint": "http://fake/v1"}])
+    )
+    data = c.get("/v1/models").json()["data"]
+    order: list[str] = []
+    for m in data:
+        if not order or order[-1] != m["stand_id"]:
+            order.append(m["stand_id"])
+    assert order == ["menon-1.0", "menon-1.1", "lab"]
+    assert next(m for m in data if m["stand_id"] == "lab")["llm_name"] == "Гемма"

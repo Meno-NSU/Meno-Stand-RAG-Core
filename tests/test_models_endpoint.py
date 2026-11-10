@@ -55,3 +55,10 @@ def test_models_endpoint_returns_core_model_id(client_with_or):
     r = client_with_or.get("/v1/models")
     body = r.json()
     assert body["core_model_id"] == "menon-1"
+
+
+def test_an_openrouter_entry_is_a_menon_10_model_named_by_its_display_name(client_with_or):
+    entry = {m["id"]: m for m in client_with_or.get("/v1/models").json()["data"]}["d/c:free"]
+    assert entry["stand_id"] == "menon-1.0"
+    assert entry["llm_id"] == entry["id"]
+    assert entry["llm_name"] == entry["display_name"]
