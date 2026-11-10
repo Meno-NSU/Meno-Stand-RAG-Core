@@ -216,6 +216,9 @@ class Settings(BaseSettings):
     legacy_enabled: bool = Field(default=True, validation_alias="LEGACY_ENABLED")
     # Serve the v2 pipeline (nsu-kb-2026-11).
     v2_enabled: bool = Field(default=False, validation_alias="V2_ENABLED")
+    # Менон 1.0 reuses Менон 1.1's loaded FRIDA (V2_ENABLED, V2_EMBEDDER=frida) instead of loading its own; enable in
+    # production only after the measured gate. Otherwise it loads its own and logs legacy_frida_not_shared.
+    legacy_frida_from_v2: bool = Field(default=False, validation_alias="LEGACY_FRIDA_FROM_V2")
     # Versions of our own pipelines in metric labels (stands "menon-1.0" and "menon-1.1"); not stored or rated.
     legacy_version: str = Field(default="2026-07", validation_alias="LEGACY_VERSION")
     v2_version: str = Field(default="unversioned", validation_alias="V2_VERSION")

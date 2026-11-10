@@ -75,7 +75,7 @@ from meno_rag.llm.status import InMemoryModelStatusStore, ModelStatusStore, Redi
 from meno_rag.logging_config import configure_logging
 from meno_rag.schemas import ChatCompletionRequest
 from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime, StandRagPipeline
-from meno_rag.stand.resources import load_stand_resources
+from meno_rag.stand.resources import load_stand_resources, resolve_shared_frida
 from meno_rag.stand.search import vectorize_search_query
 
 logger = structlog.get_logger(__name__)
@@ -286,9 +286,13 @@ async def lifespan(app: FastAPI):
     v2_pipeline = None
     if not settings.legacy_enabled and not settings.v2_enabled:
         logger.error("no_knowledge_base_enabled", detail="LEGACY_ENABLED and V2_ENABLED are both off")
-    if settings.legacy_enabled:
+    search = None
+
+    async def load_legacy() -> None:
+        nonlocal resources, pipeline
         try:
-            resources = await asyncio.to_thread(load_stand_resources, settings)
+            frida = resolve_shared_frida(settings, search) if settings.legacy_frida_from_v2 else None
+            resources = await asyncio.to_thread(load_stand_resources, settings, frida)
             try:
                 await asyncio.to_thread(
                     vectorize_search_query,
@@ -311,7 +315,9 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:
             logger.exception("stand_resources_load_failed", error=str(exc))
-    if settings.v2_enabled:
+
+    async def load_v2() -> None:
+        nonlocal search, v2_pipeline
         try:
             from meno_rag.v2.memory import SummaryStore
             from meno_rag.v2.pipeline import V2Pipeline
@@ -331,6 +337,18 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.exception("v2_resources_load_failed", error=str(exc))
             v2_pipeline = None
+
+    # With LEGACY_FRIDA_FROM_V2 Менон 1.1 is built first so Менон 1.0 can take its FRIDA; otherwise the order is
+    # unchanged (1.0 then 1.1).
+    if settings.legacy_frida_from_v2 and settings.v2_enabled:
+        await load_v2()
+        if settings.legacy_enabled:
+            await load_legacy()
+    else:
+        if settings.legacy_enabled:
+            await load_legacy()
+        if settings.v2_enabled:
+            await load_v2()
 
     app.state.settings = settings
     app.state.database = database

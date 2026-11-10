@@ -15,6 +15,7 @@ from transformers import AutoTokenizer, T5EncoderModel
 from meno_rag.config import Settings
 from meno_rag.stand.fewshots import FewshotRetriever, load_fewshots
 from meno_rag.stand.rewriting import load_abbreviations
+from meno_rag.v2.embed import FridaEmbedder
 
 logger = structlog.get_logger(__name__)
 
@@ -39,7 +40,29 @@ def _resolve_device(requested: str) -> str:
     return requested
 
 
-def load_stand_resources(settings: Settings) -> StandResources:
+def resolve_shared_frida(settings: Settings, search: Any) -> tuple[Any, Any, str] | None:
+    """Менон 1.1's FRIDA (tokenizer, model, device) for Менон 1.0 to reuse, or None.
+
+    None when LEGACY_FRIDA_FROM_V2 is off (silent) or Менон 1.1 is not loaded / has another embedder (logged with
+    the reason); Менон 1.0 then loads its own FRIDA as before.
+    """
+    if not settings.legacy_frida_from_v2:
+        return None
+    reason = ""
+    embedder = getattr(getattr(search, "dense", None), "embedder", None) if search is not None else None
+    if search is None:
+        reason = "v2_not_loaded"
+    elif not isinstance(embedder, FridaEmbedder):
+        reason = "v2_embedder_not_frida"
+    if reason or embedder is None:
+        logger.warning("legacy_frida_not_shared", reason=reason)
+        return None
+    device = str(embedder.device)
+    logger.info("legacy_frida_shared", device=device)
+    return embedder.tokenizer, embedder.model, device
+
+
+def load_stand_resources(settings: Settings, frida: tuple[Any, Any, str] | None = None) -> StandResources:
     documents, missing_quality_count = _load_documents(settings.corpus_path)
     chunk_mapping = _load_chunk_mapping(settings.chunk_mapping_path)
     _validate_mapping(chunk_mapping)
@@ -50,10 +73,13 @@ def load_stand_resources(settings: Settings) -> StandResources:
 
     bm25_retriever = bm25s.BM25.load(str(settings.bm25_index_dir), load_corpus=False)
     stemmer = SnowballStemmer("russian")
-    device = _resolve_device(settings.frida_device)
-    tokenizer = AutoTokenizer.from_pretrained(settings.frida_embedder_name)
-    # transformers' incomplete stubs mistype `.to(str)`; the call is correct at runtime.
-    model = T5EncoderModel.from_pretrained(settings.frida_embedder_name).to(device).eval()  # type: ignore[arg-type]
+    if frida is not None:
+        tokenizer, model, device = frida
+    else:
+        device = _resolve_device(settings.frida_device)
+        tokenizer = AutoTokenizer.from_pretrained(settings.frida_embedder_name)
+        # transformers' incomplete stubs mistype `.to(str)`; the call is correct at runtime.
+        model = T5EncoderModel.from_pretrained(settings.frida_embedder_name).to(device).eval()  # type: ignore[arg-type]
     abbreviations = load_abbreviations(settings.abbreviations_path)
 
     fewshots_enabled = settings.qa_fewshots_enabled
