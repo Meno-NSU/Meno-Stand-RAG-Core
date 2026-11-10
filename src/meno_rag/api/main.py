@@ -8,7 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing, asynccontextmanager, suppress
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import structlog
@@ -1572,7 +1572,7 @@ async def _stand_stream_response(
 ):
     """Read the stand's stream, check it, send our client what passed and store the answer as for our own
     pipelines. Whatever the stand does wrong ends in the usual error path, never in a broken history."""
-    registry = _stand_registry(request.app)
+    registry = cast(StandRegistry, _stand_registry(request.app))  # a stand target exists, so there is a registry
     database: Database = request.app.state.database
     started = time.perf_counter()
     first_token_at: float | None = None
@@ -1721,7 +1721,7 @@ async def _stand_non_stream_response(
 ):
     """A client without streaming gets the answer collected from the stand's stream, checked like a streamed
     one. A failure is the usual error without the stand's own text (that stays in the log and the history)."""
-    registry = _stand_registry(request.app)
+    registry = cast(StandRegistry, _stand_registry(request.app))  # a stand target exists, so there is a registry
     database: Database = request.app.state.database
     started = time.perf_counter()
     who = Participant(target.backend.id, target.version, target.model)

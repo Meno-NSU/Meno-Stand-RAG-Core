@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 
 import httpx
 import numpy as np
@@ -83,7 +84,9 @@ class QdrantStore:
         return total
 
     def count(self, name: str) -> int:
-        body = self._req("POST", f"/collections/{name}/points/count", json={"exact": True})
+        body = cast(
+            "dict", self._req("POST", f"/collections/{name}/points/count", json={"exact": True})
+        )  # ok_404 is False: never None
         return int(body["result"]["count"])
 
     def set_alias(self, alias: str, collection: str) -> None:
@@ -94,7 +97,7 @@ class QdrantStore:
         self._req("POST", "/collections/aliases", json={"actions": actions})
 
     def get_alias_target(self, alias: str) -> str | None:
-        body = self._req("GET", "/aliases")
+        body = cast("dict", self._req("GET", "/aliases"))  # ok_404 is False: never None
         for a in body["result"]["aliases"]:
             if a["alias_name"] == alias:
                 return a["collection_name"]
@@ -117,7 +120,9 @@ class QdrantStore:
             "with_vector": False,
             "params": {"hnsw_ef": ef, "exact": exact, "quantization": {"rescore": rescore}},
         }
-        res = self._req("POST", f"/collections/{name_or_alias}/points/query", json=body)
+        res = cast(
+            "dict", self._req("POST", f"/collections/{name_or_alias}/points/query", json=body)
+        )  # ok_404 is False: never None
         pts = res["result"]["points"]
         out = [(int(p["id"]), float(p["score"])) for p in pts]
         out.sort(key=lambda t: -t[1])
@@ -135,7 +140,9 @@ class QdrantStore:
             "with_payload": False,
             "with_vector": False,
         }
-        res = self._req("POST", f"/collections/{name_or_alias}/points/query", json=body)
+        res = cast(
+            "dict", self._req("POST", f"/collections/{name_or_alias}/points/query", json=body)
+        )  # ok_404 is False: never None
         out = [(int(p["id"]), float(p["score"])) for p in res["result"]["points"] if p["score"] > 0]
         out.sort(key=lambda t: -t[1])
         return out

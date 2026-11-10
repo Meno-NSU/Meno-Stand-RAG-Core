@@ -9,11 +9,12 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 
 from meno_rag.v2.dense import DenseRetriever, load_matrix
-from meno_rag.v2.embed import load_embedder
+from meno_rag.v2.embed import Embedder, load_embedder
 from meno_rag.v2.fusion import rrf
 from meno_rag.v2.kb import load_release
 from meno_rag.v2.lexical import Bm25Retriever
@@ -147,9 +148,9 @@ def main(argv: list[str] | None = None) -> None:
         embedder = load_embedder(cfg.emb, model_paths[cfg.emb], args.device)
         if qdrant:
             store = QdrantStore(args.qdrant_url)
-            n = store.count(args.qdrant_collection)
-            if n != len(release.chunks):
-                ap.error(f"qdrant collection has {n} points, release has {len(release.chunks)} chunks")
+            n_points = store.count(args.qdrant_collection)
+            if n_points != len(release.chunks):
+                ap.error(f"qdrant collection has {n_points} points, release has {len(release.chunks)} chunks")
         else:
             dense_matrix = load_matrix(matrix_dirs[cfg.emb], args.device, expected_n=len(release.chunks))
     if cfg.rerank:
@@ -173,13 +174,15 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"skip {iid}: empty question", file=sys.stderr, flush=True)
                 continue
             t_total = time.perf_counter()
-            dense_hits = bm25_hits = None
+            dense_hits: Any = None
+            bm25_hits: Any = None
             if embedder is not None:
                 vec = timer.run("embed", lambda query=query: embedder.encode_queries([query]), gpu=True)
+                retr: QdrantRetriever | DenseRetriever
                 if qdrant:
                     retr = QdrantRetriever(store, args.qdrant_collection, _Cached(vec))
                 else:
-                    retr = DenseRetriever(dense_matrix, _Cached(vec))
+                    retr = DenseRetriever(dense_matrix, cast("Embedder", _Cached(vec)))
                 dense_hits = timer.run("dense", lambda retr=retr, query=query: retr.search(query, CAND_K), gpu=True)
             if bm25 is not None:
                 bm25_hits = timer.run("bm25", lambda query=query: bm25.search(query, CAND_K))

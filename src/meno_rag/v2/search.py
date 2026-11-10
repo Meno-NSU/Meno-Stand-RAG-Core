@@ -187,7 +187,9 @@ def load_search_service(settings) -> SearchService:
             torch.cuda.set_per_process_memory_fraction(settings.v2_gpu_mem_fraction)
     kb = Path(settings.v2_kb_dir)
     release = load_release(kb)
-    bm25 = Bm25Retriever(release, kb / "ragcore" / "knowledge" / "bm25") if lexical == "bm25s" else None
+    bm25: Bm25Retriever | QdrantBm25Retriever | None = (
+        Bm25Retriever(release, kb / "ragcore" / "knowledge" / "bm25") if lexical == "bm25s" else None
+    )
     embed_device = settings.v2_embed_device or device
     if embed_device != device and backend != "qdrant":
         raise ValueError("V2_EMBED_DEVICE differs from V2_DEVICE: only supported with V2_VECTOR_BACKEND=qdrant")
@@ -202,7 +204,7 @@ def load_search_service(settings) -> SearchService:
                 f"Qdrant collection {settings.v2_qdrant_collection!r} has {n} points, "
                 f"release has {len(release.chunks)} chunks"
             )
-        dense = QdrantRetriever(store, settings.v2_qdrant_collection, embedder)
+        dense: QdrantRetriever | DenseRetriever = QdrantRetriever(store, settings.v2_qdrant_collection, embedder)
         if lexical == "qdrant":
             info = store.get_collection(settings.v2_qdrant_collection) or {}
             if SPARSE_NAME not in ((info.get("config") or {}).get("params") or {}).get("sparse_vectors", {}):

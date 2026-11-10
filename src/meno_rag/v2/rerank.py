@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import torch
 
@@ -73,7 +73,7 @@ class BgeReranker(_BaseReranker):
 
             tokenizer = AutoTokenizer.from_pretrained(path)
             model = _to_device(
-                AutoModelForSequenceClassification.from_pretrained(path, dtype=_dtype(device)),
+                AutoModelForSequenceClassification.from_pretrained(cast("str", path), dtype=_dtype(device)),
                 device,
             )
         super().__init__(tokenizer, model)
@@ -98,7 +98,7 @@ class Qwen3Reranker(_BaseReranker):
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(path, padding_side="left")
-            model = _to_device(AutoModelForCausalLM.from_pretrained(path, dtype=_dtype(device)), device)
+            model = _to_device(AutoModelForCausalLM.from_pretrained(cast("str", path), dtype=_dtype(device)), device)
         super().__init__(tokenizer, model)
         self.prefix_ids = tokenizer(QWEN3_PREFIX, add_special_tokens=False)["input_ids"]
         self.suffix_ids = tokenizer(QWEN3_SUFFIX, add_special_tokens=False)["input_ids"]
@@ -137,8 +137,8 @@ class MxbaiReranker(_BaseReranker):
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(path, padding_side="left")
-            model = _to_device(AutoModelForCausalLM.from_pretrained(path, dtype=_dtype(device)), device)
-            cfg = Path(path) / "1_LogitScore" / "config.json"
+            model = _to_device(AutoModelForCausalLM.from_pretrained(cast("str", path), dtype=_dtype(device)), device)
+            cfg = Path(cast("str", path)) / "1_LogitScore" / "config.json"
             if cfg.exists():
                 ids = json.loads(cfg.read_text(encoding="utf-8"))
                 true_id, false_id = int(ids["true_token_id"]), int(ids["false_token_id"])

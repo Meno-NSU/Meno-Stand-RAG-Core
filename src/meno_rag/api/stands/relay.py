@@ -12,7 +12,7 @@ import codecs
 import contextlib
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -414,7 +414,7 @@ async def relay_stream(
     request_id: str,
     trace: bool = False,
     total_timeout_s: float = 900.0,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     """Send the request to the stand and yield the SSE text for our client as the stand's blocks arrive.
 
     Raises StandStreamError for an HTTP error before the stream, a stand's error, a limit; httpx errors

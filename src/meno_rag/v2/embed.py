@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from collections.abc import Callable, Sequence
+from typing import Any, Protocol, cast
 
 import torch
 import torch.nn.functional as F
@@ -69,7 +70,7 @@ class _BaseEmbedder:
         texts = [self.doc_prefix + t for t in texts]
         if not texts:
             return torch.empty((0, self.dim), dtype=torch.float16, device=self.device)
-        parts = run_batched(texts, self._embed, batch_size)
+        parts = run_batched(texts, cast("Callable[[Sequence[Any]], Any]", self._embed), batch_size)
         return torch.cat(parts, dim=0)
 
 
@@ -116,7 +117,9 @@ class Qwen3Embedder(_BaseEmbedder):
             from transformers import AutoModel, AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(path, padding_side="left")
-            model = _to_device(AutoModel.from_pretrained(path, dtype=_resolve_dtype(device, dtype)), device)
+            model = _to_device(
+                AutoModel.from_pretrained(cast("str", path), dtype=_resolve_dtype(device, dtype)), device
+            )
         super().__init__(tokenizer, model)
 
     def _pool(self, hidden, mask):

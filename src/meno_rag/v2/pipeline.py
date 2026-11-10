@@ -225,7 +225,8 @@ class V2Pipeline:
         if searched:
             ranked, queries, coverage, rounds, forced, forms = await self._search_rounds(an, today, runtime, emit)
 
-        context, kept = "", []
+        kept: list[Candidate] = []
+        context = ""
         if searched:
             await emit(StageName.CONTEXT_ASSEMBLY, StageStatus.STARTED)
             t2 = time.perf_counter()
@@ -392,10 +393,11 @@ class V2Pipeline:
     def _rarest_term(self, text: str) -> tuple[str, list[str]]:
         """The question stem whose index forms (itself + shorter inflection variants) occur in the fewest
         chunks, 0 < df <= V2_RARE_TERM_MAX_DF, with those forms; ('', []) if none or no document frequencies."""
-        bm25 = getattr(self.search, "bm25", None)
+        bm25: Any = getattr(self.search, "bm25", None)  # None (no bm25) fails the hasattr guard below
         limit = self.settings.v2_rare_term_max_df
         if limit <= 0 or not all(hasattr(bm25, a) for a in ("doc_freq", "tokens", "variants")):
             return "", []
+        best_forms: list[str]
         best, best_forms, best_df = "", [], limit + 1
         for t in dict.fromkeys(bm25.tokens(text)):
             forms = bm25.variants(t) if len(t) >= 5 else ([t] if bm25.doc_freq(t) else [])
