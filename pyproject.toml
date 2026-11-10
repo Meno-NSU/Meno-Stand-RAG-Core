@@ -32,6 +32,7 @@ dependencies = [
     "pyjwt>=2.13.0",
     "email-validator>=2.3.0",
     "psycopg2-binary>=2.9",
+    "meno-contract",
 ]
 
 [project.scripts]
@@ -39,6 +40,7 @@ meno-rag-api = "meno_rag.api.main:run"
 meno-rag-migrate = "meno_rag.db.migrate:main"
 meno-rag-reset = "meno_rag.db.reset:main"
 meno-rag-export = "meno_rag.db.export:main"
+meno-rag-v2-retrieve = "meno_rag.v2.experiments.retrieve:main"
 meno-rag-retention = "meno_rag.db.retention:main"
 
 [dependency-groups]
@@ -57,11 +59,19 @@ build-backend = "uv_build"
 [tool.uv]
 package = true
 
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+meno-contract = { workspace = true }
+
 [tool.uv.build-backend]
 module-name = "meno_rag"
 
 [tool.ruff]
 line-length = 120
+# KB release tools vendored from the dataset, kept close to upstream (see kb_tools/README.md).
+extend-exclude = ["kb_tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "ASYNC", "UP", "SIM", "C4", "PIE", "RUF"]
@@ -82,7 +92,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/meno_rag"]
+files = ["src/meno_rag", "packages/meno-contract/src"]
 # The ML/runtime libs (torch, transformers, faiss, bm25s, razdel, nltk) ship
 # without complete type stubs; we type-check our own code, not theirs.
 ignore_missing_imports = true
@@ -90,4 +100,4 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", "packages/meno-contract/src"]

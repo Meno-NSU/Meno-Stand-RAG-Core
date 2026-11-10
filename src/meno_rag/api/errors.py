@@ -240,3 +240,43 @@ def classify_error(exc: BaseException) -> ClassifiedError:
         retryable=False,
         http_status=500,
     )
+
+
+_USER_MSG_STAND = "Не удалось получить ответ. Повторите запрос или выберите другую модель."
+
+# Codes the gateway itself gives to a stand's failure: the existing texts and statuses.
+_STAND_KNOWN: dict[str, tuple[str, int]] = {
+    "model_rate_limited": (_USER_MSG_RATE_LIMITED, 429),
+    "model_unreachable": (_USER_MSG_MODEL_UNREACHABLE, 503),
+    "transient_timeout": (_USER_MSG_TIMEOUT, 504),
+    "transient_upstream_5xx": (_USER_MSG_UPSTREAM_5XX, 502),
+    "transient_network": (_USER_MSG_NETWORK, 502),
+    "invalid_upstream_request": (_USER_MSG_BAD_REQUEST, 400),
+    "context_length_exceeded": (_USER_MSG_CONTEXT_TOO_LARGE, 400),
+}
+
+# Codes the gateway gives for its own limits; the user text is the generic one.
+_STAND_OWN = frozenset(
+    {"too_long", "stand_empty_answer", "stand_block_too_large", "stand_stream_too_large", "stand_error"}
+)
+
+
+def classify_stand_error(
+    code: str, message: str, retryable: bool = False, retry_after_sec: int | None = None
+) -> ClassifiedError:
+    """A failure reported by or about a stand. The stand's own text goes only to `message` (log and detail),
+    never to `user_message`: it is not ours to show."""
+    user_message, http_status = _STAND_KNOWN.get(code, (_USER_MSG_STAND, 502))
+    if code not in _STAND_KNOWN and code not in _STAND_OWN:
+        # The code is the stand's own: it must not become a metric label or reach the client. It stays in the
+        # message, which goes to the log.
+        message = f"{code}: {message}"
+        code = "stand_error"
+    return ClassifiedError(
+        code=code,
+        message=message,
+        user_message=user_message,
+        retryable=retryable,
+        http_status=http_status,
+        retry_after_sec=retry_after_sec,
+    )

@@ -78,6 +78,7 @@ class PipelineRun(Base):
     core_model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     endpoint: Mapped[str | None] = mapped_column(String(512), nullable=True)
     knowledge_base_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    stand_build: Mapped[str | None] = mapped_column(String(128), nullable=True)
     user_question: Mapped[str] = mapped_column(Text, nullable=False)
     search_queries: Mapped[dict | list | None] = mapped_column(JsonCompat, nullable=True)
     total_ms: Mapped[float | None] = mapped_column(Float, nullable=True)

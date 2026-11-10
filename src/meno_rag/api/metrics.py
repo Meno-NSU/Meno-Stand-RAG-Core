@@ -8,6 +8,7 @@ callers never touch label ordering or prometheus_client internals."""
 from __future__ import annotations
 
 import contextlib
+import threading
 from collections.abc import Iterator
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
@@ -31,14 +32,14 @@ REGISTRY = CollectorRegistry()
 
 _CHAT_REQUESTS = Counter(
     "meno_chat_requests",
-    "Chat completion requests by provider, stream mode, and outcome.",
-    labelnames=("provider", "stream", "status"),
+    "Chat completion requests by provider, stream mode, outcome, stand, version and LLM.",
+    labelnames=("provider", "stream", "status", "stand", "version", "llm"),
     registry=REGISTRY,
 )
 _CHAT_REQUEST_SECONDS = Histogram(
     "meno_chat_request_seconds",
     "End-to-end chat completion latency in seconds.",
-    labelnames=("provider", "stream"),
+    labelnames=("provider", "stream", "stand", "version", "llm"),
     buckets=_LATENCY_BUCKETS,
     registry=REGISTRY,
 )
@@ -53,7 +54,14 @@ _TIME_TO_FIRST_TOKEN = Histogram(
     "actually feels. Distinct from meno_chat_request_seconds, which for a stream runs "
     "through to the LAST token and so grows with answer length, not with responsiveness. "
     "Streaming only: a non-streaming response has no first token.",
-    labelnames=("provider",),
+    labelnames=("provider", "stand", "version", "llm"),
+    buckets=_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
+_STAND_STAGE_SECONDS = Histogram(
+    "meno_stand_stage_seconds",
+    "Seconds a pipeline stage took, by stand and version. The stage is a declared name or 'other'.",
+    labelnames=("stand", "version", "stage"),
     buckets=_LATENCY_BUCKETS,
     registry=REGISTRY,
 )
@@ -124,24 +132,112 @@ _BENCH_REQUESTS = Counter(
     labelnames=("status",),
     registry=REGISTRY,
 )
+_STAND_UP = Gauge(
+    "meno_stand_up",
+    "1 when the stand answered its last discovery request, else 0.",
+    labelnames=("stand",),
+    registry=REGISTRY,
+)
+_STAND_CONFIG_ERRORS = Counter(
+    "meno_stand_config_errors",
+    "Times the stands file could not be read; the previous list stays in use (at the start: no stands).",
+    registry=REGISTRY,
+)
+_STAND_VIOLATIONS = Counter(
+    "meno_stand_contract_violations",
+    "Departures of a stand from the meno-backend/1 contract, by kind.",
+    labelnames=("stand", "kind"),
+    registry=REGISTRY,
+)
 
 
 def _bool_label(value: bool) -> str:
     return "true" if value else "false"
 
 
-def record_chat_request(*, provider: str, stream: bool, status: str, seconds: float) -> None:
+MAX_VERSIONS_PER_STAND = 32
+MAX_LLMS_PER_STAND = 64
+MAX_LLM_LABEL_CHARS = 128
+MAX_LLMS_PER_BUILTIN_STAND = 512
+# Our own pipelines: participant.LEGACY_STAND_ID and V2_STAND_ID, repeated here because participant imports this
+# module through the registry.
+BUILTIN_STANDS = frozenset({"menon-1.0", "menon-1.1"})
+OTHER = "other"
+_versions_seen: dict[str, set[str]] = {}
+_llms_seen: dict[str, set[str]] = {}
+_versions_lock = threading.Lock()
+
+
+def bounded_version(stand: str, version: str) -> str:
+    """The version as a label value: the first 32 distinct versions of a stand keep their name, later new ones
+    become 'other' (and count as a too_many_versions violation), so a stand cannot grow the series without bound.
+    An empty version (a pipeline without one) takes no place."""
+    if not version:
+        return version
+    with _versions_lock:
+        seen = _versions_seen.setdefault(stand, set())
+        if version in seen:
+            return version
+        if len(seen) < MAX_VERSIONS_PER_STAND:
+            seen.add(version)
+            return version
+    record_stand_violation(stand, "too_many_versions")
+    return OTHER
+
+
+def bounded_llm(stand: str, llm: str) -> str:
+    """The LLM as a label value. It can be what a client sent (while the vLLM list is empty any id is accepted), so
+    the first 64 distinct names of a stand keep their name, later new ones become 'other' (and count as a too_many_llms
+    violation), as does anything over 128 characters. An empty name (nobody is known) takes no place.
+
+    Our own pipelines keep 512 names: every vLLM and OpenRouter model answers under one of them, and the free OpenRouter
+    list alone can come close to 64. They record no violation, as the contract is not theirs."""
+    if not llm:
+        return llm
+    if len(llm) > MAX_LLM_LABEL_CHARS:
+        return OTHER
+    builtin = stand in BUILTIN_STANDS
+    with _versions_lock:
+        seen = _llms_seen.setdefault(stand, set())
+        if llm in seen:
+            return llm
+        if len(seen) < (MAX_LLMS_PER_BUILTIN_STAND if builtin else MAX_LLMS_PER_STAND):
+            seen.add(llm)
+            return llm
+    if not builtin:
+        record_stand_violation(stand, "too_many_llms")
+    return OTHER
+
+
+def record_chat_request(
+    *, provider: str, stream: bool, status: str, seconds: float, stand: str = "", version: str = "", llm: str = ""
+) -> None:
     stream_label = _bool_label(stream)
-    _CHAT_REQUESTS.labels(provider=provider, stream=stream_label, status=status).inc()
-    _CHAT_REQUEST_SECONDS.labels(provider=provider, stream=stream_label).observe(seconds)
+    version = bounded_version(stand, version)
+    llm = bounded_llm(stand, llm)
+    _CHAT_REQUESTS.labels(
+        provider=provider, stream=stream_label, status=status, stand=stand, version=version, llm=llm
+    ).inc()
+    _CHAT_REQUEST_SECONDS.labels(provider=provider, stream=stream_label, stand=stand, version=version, llm=llm).observe(
+        seconds
+    )
+
+
+def record_stand_stage(*, stand: str, version: str, stage: str, seconds: float) -> None:
+    """The caller passes a stage name it has checked against what the stand declares (else 'other')."""
+    _STAND_STAGE_SECONDS.labels(stand=stand, version=bounded_version(stand, version), stage=stage).observe(seconds)
 
 
 def record_bench_request(*, status: str) -> None:
     _BENCH_REQUESTS.labels(status=status).inc()
 
 
-def record_time_to_first_token(*, provider: str, seconds: float) -> None:
-    _TIME_TO_FIRST_TOKEN.labels(provider=provider).observe(seconds)
+def record_time_to_first_token(
+    *, provider: str, seconds: float, stand: str = "", version: str = "", llm: str = ""
+) -> None:
+    _TIME_TO_FIRST_TOKEN.labels(
+        provider=provider, stand=stand, version=bounded_version(stand, version), llm=bounded_llm(stand, llm)
+    ).observe(seconds)
 
 
 def record_llm_call(*, provider: str, endpoint: str, stage: str, outcome: str, seconds: float) -> None:
@@ -195,6 +291,18 @@ def http_in_flight() -> Iterator[None]:
 def set_admission(*, active: int, limit: int) -> None:
     _ADMISSION_ACTIVE.set(active)
     _ADMISSION_LIMIT.set(limit)
+
+
+def set_stand_up(stand: str, up: bool) -> None:
+    _STAND_UP.labels(stand=stand).set(1 if up else 0)
+
+
+def record_stand_config_error() -> None:
+    _STAND_CONFIG_ERRORS.inc()
+
+
+def record_stand_violation(stand: str, kind: str) -> None:
+    _STAND_VIOLATIONS.labels(stand=stand, kind=kind).inc()
 
 
 def render() -> tuple[bytes, str]:

@@ -65,3 +65,20 @@ def test_message_feedback_unique_run_session(tmp_path: Path):
             )
     finally:
         engine.dispose()
+
+
+def test_feedback_comment_limit_is_20000():
+    from pydantic import ValidationError
+
+    from meno_rag.schemas import FeedbackRequest
+
+    fields = FeedbackRequest.model_fields
+    assert "comment" in fields
+    base = {"completion_id": "c", "session_id": "s", "value": "up"}
+    try:
+        ok = FeedbackRequest(**base, comment="я" * 15_000)
+    except ValidationError as e:  # field names differ: surface them
+        raise AssertionError(str(e)) from e
+    assert len(ok.comment) == 15_000
+    with pytest.raises(ValidationError):
+        FeedbackRequest(**base, comment="я" * 20_001)

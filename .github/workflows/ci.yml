@@ -45,25 +45,51 @@ jobs:
         run: uv lock --check
 
       - name: Install dependencies
+        id: install
         run: uv sync --all-groups --frozen
 
+      # Each check below runs and reports on its own: a lint or format failure must not hide the test results.
       - name: Lint
         run: uv run --frozen ruff check --output-format=github .
 
       - name: Format check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen ruff format --check .
 
       - name: Type check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen mypy
 
       - name: Compile Python sources
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen python -m compileall -q src tests
 
       - name: Build package
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv build --sdist --wheel
 
       - name: Test
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen pytest -q
+
+  contract:
+    name: The contract package installs and imports without torch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.9.10"
+
+      - name: The contract package installs and imports without torch
+        run: |
+          uv sync --package meno-contract --frozen --no-default-groups
+          .venv/bin/python -c "import sys, meno_contract.check, meno_contract.sse; assert 'torch' not in sys.modules"
 
   security:
     name: Security (secret scan + dependency audit)

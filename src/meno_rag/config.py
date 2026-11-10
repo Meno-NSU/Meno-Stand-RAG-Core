@@ -181,6 +181,9 @@ class Settings(BaseSettings):
 
     httpx_max_connections: int = Field(default=200, validation_alias="HTTPX_MAX_CONNECTIONS")
     httpx_max_keepalive: int = Field(default=100, validation_alias="HTTPX_MAX_KEEPALIVE")
+    # The stands' own pool (discovery and chat), apart from the one above that vLLM and OpenRouter use.
+    stand_httpx_max_connections: int = Field(default=100, validation_alias="STAND_HTTPX_MAX_CONNECTIONS")
+    stand_httpx_max_keepalive: int = Field(default=20, validation_alias="STAND_HTTPX_MAX_KEEPALIVE")
 
     redis_url: str | None = Field(default=None, validation_alias="REDIS_URL")
 
@@ -207,6 +210,95 @@ class Settings(BaseSettings):
         default=3600, validation_alias="OPENROUTER_UNREACHABLE_BACKOFF_MAX_SECONDS"
     )
     rag_rewrite_rerank_model: str | None = Field(default=None, validation_alias="RAG_REWRITE_RERANK_MODEL")
+
+    # --- RAG v2 pipeline ---
+    # Serve the legacy pipeline (nsu-stand-faiss-bm25); loads the stand resources.
+    legacy_enabled: bool = Field(default=True, validation_alias="LEGACY_ENABLED")
+    # Serve the v2 pipeline (nsu-kb-2026-11).
+    v2_enabled: bool = Field(default=False, validation_alias="V2_ENABLED")
+    # Versions of our own pipelines in metric labels (stands "menon-1.0" and "menon-1.1"); not stored or rated.
+    legacy_version: str = Field(default="2026-07", validation_alias="LEGACY_VERSION")
+    v2_version: str = Field(default="unversioned", validation_alias="V2_VERSION")
+    # Model entries offering the v2 pipeline: "base_id=display name;...".
+    v2_model_aliases: str = Field(
+        default="meno-lite=Менон 1.1 (meno-lite);gemma-4-12B-it=Менон 1.1 (Gemma 4)",
+        validation_alias="V2_MODEL_ALIASES",
+    )
+    # JSON file listing the stands (separately run answer backends) offered as model entries "<llm>@<id>";
+    # empty: no stands. See meno_rag/api/stands/config.py.
+    stands_file: str = Field(default="", validation_alias="STANDS_FILE")
+    # The longest a whole stand answer may take, seconds.
+    stand_total_timeout_seconds: float = Field(default=900.0, validation_alias="STAND_TOTAL_TIMEOUT_SECONDS")
+    # Where v2 is offered in the UI: models | kb | both.
+    v2_expose_as: str = Field(default="models", validation_alias="V2_EXPOSE_AS")
+    # Directory of the v2 chunk release.
+    v2_kb_dir: str = Field(default="kb/chunks/v1", validation_alias="V2_KB_DIR")
+    # Dense embedder: frida or qwen3.
+    v2_embedder: str = Field(default="frida", validation_alias="V2_EMBEDDER")
+    # Local path of the embedder weights.
+    v2_embedder_path: str = Field(default="", validation_alias="V2_EMBEDDER_PATH")
+    # Directory with the precomputed dense matrices.
+    v2_matrix_dir: str = Field(default="", validation_alias="V2_MATRIX_DIR")
+    # Dense backend: "matrix" (exact, in GPU memory) or "qdrant".
+    v2_vector_backend: str = Field(default="matrix", validation_alias="V2_VECTOR_BACKEND")
+    v2_qdrant_url: str = Field(default="http://127.0.0.1:6433", validation_alias="V2_QDRANT_URL")
+    # Collection or alias (normally an alias such as nsu_kb_current).
+    v2_qdrant_collection: str = Field(default="nsu_kb_current", validation_alias="V2_QDRANT_COLLECTION")
+    # BM25 backend: "bm25s" (the release's prebuilt index, in process memory) or "qdrant" (the collection's
+    # "bm25" sparse vector; needs V2_VECTOR_BACKEND=qdrant and a collection loaded with --kb).
+    v2_lexical_backend: str = Field(default="bm25s", validation_alias="V2_LEXICAL_BACKEND")
+    # Cross-encoder reranker name.
+    v2_reranker: str = Field(default="bge", validation_alias="V2_RERANKER")
+    # Local path of the reranker weights.
+    v2_reranker_path: str = Field(default="", validation_alias="V2_RERANKER_PATH")
+    # Torch device for v2 models.
+    v2_device: str = Field(default="cuda", validation_alias="V2_DEVICE")
+    # Device of the query embedder when it should differ from V2_DEVICE (e.g. "cpu" to leave the GPU to a bigger
+    # reranker); empty = V2_DEVICE. Only with V2_VECTOR_BACKEND=qdrant (the matrix backend keeps vectors on V2_DEVICE).
+    v2_embed_device: str = Field(default="", validation_alias="V2_EMBED_DEVICE")
+    # Fraction of GPU memory v2 may use.
+    v2_gpu_mem_fraction: float = Field(default=0.3, validation_alias="V2_GPU_MEM_FRACTION")
+    # Embedder weights dtype on CUDA: bf16 or fp16.
+    v2_embed_dtype: str = Field(default="bf16", validation_alias="V2_EMBED_DTYPE")
+    # Extra LLM check of the answer's sources.
+    v2_sources_llm_check: bool = Field(default=False, validation_alias="V2_SOURCES_LLM_CHECK")
+    # Cross-encoder score above which a chunk counts as relevant.
+    v2_rerank_threshold: float = Field(default=0.3, validation_alias="V2_RERANK_THRESHOLD")
+    # Best BM25 hits of the standalone question added to the first round's candidates even when the fusion ranked
+    # them low (names in lists, abbreviations); 0 = off (the original v2 candidate set).
+    v2_lexical_slots: int = Field(default=0, validation_alias="V2_LEXICAL_SLOTS")
+    # A lexical-slot candidate is evidence below V2_RERANK_THRESHOLD when it contains the rarest question stem
+    # (or its indexed inflection forms) occurring in at most this many chunks; 0 = off. Needs the bm25s backend.
+    v2_rare_term_max_df: int = Field(default=1000, validation_alias="V2_RARE_TERM_MAX_DF")
+    # Weight of the source prior (the release's quality_score: tier P0 1.0 .. P3 0.6) in the order of relevant chunks
+    # and shown sources: logit(score) + weight * ln(prior); 0 = off (cross-encoder order). The threshold stays on the score.
+    v2_source_prior_weight: float = Field(default=0.0, validation_alias="V2_SOURCE_PRIOR_WEIGHT")
+    # Tell the model that official NSU documents outrank social posts (posts: when nothing official, or as a supplement).
+    v2_source_authority: bool = Field(default=False, validation_alias="V2_SOURCE_AUTHORITY")
+    # Score above which a chunk is attributed as a source of the answer.
+    v2_attribution_threshold: float = Field(default=0.5, validation_alias="V2_ATTRIBUTION_THRESHOLD")
+    # Token budget for dialog history in the prompt.
+    v2_history_budget_tokens: int = Field(default=5000, validation_alias="V2_HISTORY_BUDGET_TOKENS")
+    # Token budget for the dialog summary.
+    v2_summary_budget_tokens: int = Field(default=800, validation_alias="V2_SUMMARY_BUDGET_TOKENS")
+    # Token budget for retrieved context.
+    v2_context_budget_tokens: int = Field(default=6000, validation_alias="V2_CONTEXT_BUDGET_TOKENS")
+    # Model context window; prompt + answer are kept inside it.
+    v2_model_context_tokens: int = Field(default=16384, validation_alias="V2_MODEL_CONTEXT_TOKENS")
+    # Cap on generated answer tokens.
+    v2_max_answer_tokens: int = Field(default=1500, validation_alias="V2_MAX_ANSWER_TOKENS")
+    # Max chunks in the answer context.
+    v2_max_context_chunks: int = Field(default=8, validation_alias="V2_MAX_CONTEXT_CHUNKS")
+    # Max sources shown with an answer.
+    v2_max_sources: int = Field(default=5, validation_alias="V2_MAX_SOURCES")
+    # Max search rounds per question.
+    v2_max_rounds: int = Field(default=3, validation_alias="V2_MAX_ROUNDS")
+    # Candidates per query from each of dense and BM25.
+    v2_candidates_per_query: int = Field(default=50, validation_alias="V2_CANDIDATES_PER_QUERY")
+    # Fused candidates per query sent to the cross-encoder.
+    v2_rerank_top: int = Field(default=40, validation_alias="V2_RERANK_TOP")
+    # JSONL timetable export from table.nsu.ru; empty disables group/teacher lookup.
+    v2_schedule_path: str = Field(default="", validation_alias="V2_SCHEDULE_PATH")
 
     model_config = SettingsConfigDict(
         env_file=".env",

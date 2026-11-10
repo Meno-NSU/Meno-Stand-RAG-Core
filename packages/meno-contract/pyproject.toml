@@ -1,0 +1,25 @@
+[project]
+name = "meno-contract"
+version = "0.1.0"
+description = "The meno-backend/1 wire contract: models, SSE parsing and a conformance checker."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.10.0",
+    "httpx>=0.28.0",
+]
+
+[project.optional-dependencies]
+example = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.scripts]
+check-backend = "meno_contract.check:main"
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "meno_contract"

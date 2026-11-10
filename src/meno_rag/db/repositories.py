@@ -324,6 +324,7 @@ async def create_pipeline_run(
     error_stage: str | None = None,
     user_id: str | None = None,
     guest_session_id: str | None = None,
+    stand_build: str | None = None,
 ) -> None:
     """``user_id``/``guest_session_id`` tag the row with its subject so it can be found and
     erased even when ``session_id`` never gets a matching ``conversations`` row — the arena
@@ -352,6 +353,7 @@ async def create_pipeline_run(
             error_stage=error_stage,
             user_id=user_id,
             guest_session_id=guest_session_id,
+            stand_build=stand_build,
         )
     )
 
@@ -639,6 +641,28 @@ async def set_arena_turn_winner(
             row.arena = {**stored, "winner": winner}
             return True
     return False
+
+
+async def arena_turn_sides(session: AsyncSession, *, conversation_id: str, turn_index: int | None) -> list[dict] | None:
+    """The sides of a stored comparison (who answered), or None if there is no such turn.
+
+    Matched in Python for the same reason as set_arena_turn_winner."""
+    if turn_index is None or not conversation_id:
+        return None
+    rows = (
+        (
+            await session.execute(
+                select(Message).where(Message.conversation_id == conversation_id, Message.turn_kind == "arena")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in rows:
+        stored = row.arena or {}
+        if stored.get("turn_index") == turn_index:
+            return list(stored.get("sides") or [])
+    return None
 
 
 async def upsert_session_survey(

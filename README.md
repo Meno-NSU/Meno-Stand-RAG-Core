@@ -233,6 +233,31 @@ or `unreachable` status (with auto-expiry from `X-RateLimit-Reset` or
 exponential backoff). The model is greyed-out in the UI dropdown and excluded
 from random arena rounds until it recovers.
 
+## Stands
+
+A stand is a separately run RAG backend that speaks the `meno-backend/1` contract (or a plain OpenAI-compatible
+endpoint). The gateway lists its LLMs in `/v1/models` as `<llm>@<stand>`, relays the chat to it, checks the stream, and
+stores the answer in our history.
+
+The `meno_contract` package lives in `packages/meno-contract/src` and is not installed: `scripts/run_backend.sh` puts it on
+`PYTHONPATH`. Starting the API any other way needs `PYTHONPATH=<repo>/packages/meno-contract/src`, otherwise the import
+fails with `ModuleNotFoundError`. The old `EXTERNAL_BACKENDS` variable is no longer read (a warning is logged if it is set).
+
+To connect one:
+
+1. Check it: `check-backend http://host:port --key KEY`, or without installing anything:
+   `PYTHONPATH=packages/meno-contract/src python -m meno_contract.check http://host:port --key KEY`.
+2. Copy `stands.example.json` to a file outside git, add an entry (`id`, `url`, optional `api_key`, `arena`,
+   `max_concurrent`, `name`), and point `STANDS_FILE` at it. Set `"arena": true` only after `check-backend` passes.
+   The ids `menon-1.0` and `menon-1.1` belong to our own pipelines: a file that uses one counts as broken.
+3. Apply it without a restart: `curl -X POST http://127.0.0.1:9006/v1/models/refresh`. A broken file keeps the
+   previous list; at the start a missing or broken file means no stands, and our own models are served as usual.
+   Either case is logged as an error and counted in `meno_stand_config_errors`; the file is read again once it
+   changes. An entry makes the stand visible to all users.
+
+`STAND_TOTAL_TIMEOUT_SECONDS`, `LEGACY_VERSION` and `V2_VERSION` are described in `example.env`. The contract itself is in
+`docs/contract/meno-backend-v1.md`.
+
 ## API
 
 - `GET /healthz`
