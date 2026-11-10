@@ -253,6 +253,13 @@ class Settings(BaseSettings):
     v2_reranker: str = Field(default="bge", validation_alias="V2_RERANKER")
     # Local path of the reranker weights.
     v2_reranker_path: str = Field(default="", validation_alias="V2_RERANKER_PATH")
+    # V2_RERANKER=http: base URL of a shared vLLM rerank service (POST /v1/rerank) and its model name; the weights
+    # are then not loaded in this process (V2_RERANKER_PATH is unused).
+    v2_reranker_url: str = Field(default="", validation_alias="V2_RERANKER_URL")
+    v2_reranker_model: str = Field(default="", validation_alias="V2_RERANKER_MODEL")
+    v2_reranker_timeout_s: float = Field(default=30.0, validation_alias="V2_RERANKER_TIMEOUT_S")
+    # truncate_prompt_tokens sent to the service; 0 = do not send.
+    v2_reranker_truncate_tokens: int = Field(default=0, validation_alias="V2_RERANKER_TRUNCATE_TOKENS")
     # Torch device for v2 models.
     v2_device: str = Field(default="cuda", validation_alias="V2_DEVICE")
     # Device of the query embedder when it should differ from V2_DEVICE (e.g. "cpu" to leave the GPU to a bigger
