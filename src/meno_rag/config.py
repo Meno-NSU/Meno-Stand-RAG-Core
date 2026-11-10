@@ -216,6 +216,9 @@ class Settings(BaseSettings):
     legacy_enabled: bool = Field(default=True, validation_alias="LEGACY_ENABLED")
     # Serve the v2 pipeline (nsu-kb-2026-11).
     v2_enabled: bool = Field(default=False, validation_alias="V2_ENABLED")
+    # Менон 1.0 reuses Менон 1.1's loaded FRIDA (V2_ENABLED, V2_EMBEDDER=frida) instead of loading its own; enable in
+    # production only after the measured gate. Otherwise it loads its own and logs legacy_frida_not_shared.
+    legacy_frida_from_v2: bool = Field(default=False, validation_alias="LEGACY_FRIDA_FROM_V2")
     # Versions of our own pipelines in metric labels (stands "menon-1.0" and "menon-1.1"); not stored or rated.
     legacy_version: str = Field(default="2026-07", validation_alias="LEGACY_VERSION")
     v2_version: str = Field(default="unversioned", validation_alias="V2_VERSION")
@@ -253,6 +256,13 @@ class Settings(BaseSettings):
     v2_reranker: str = Field(default="bge", validation_alias="V2_RERANKER")
     # Local path of the reranker weights.
     v2_reranker_path: str = Field(default="", validation_alias="V2_RERANKER_PATH")
+    # V2_RERANKER=http: base URL of a shared vLLM rerank service (POST /v1/rerank) and its model name; the weights
+    # are then not loaded in this process (V2_RERANKER_PATH is unused).
+    v2_reranker_url: str = Field(default="", validation_alias="V2_RERANKER_URL")
+    v2_reranker_model: str = Field(default="", validation_alias="V2_RERANKER_MODEL")
+    v2_reranker_timeout_s: float = Field(default=30.0, validation_alias="V2_RERANKER_TIMEOUT_S")
+    # truncate_prompt_tokens sent to the service; 0 = do not send.
+    v2_reranker_truncate_tokens: int = Field(default=0, validation_alias="V2_RERANKER_TRUNCATE_TOKENS")
     # Torch device for v2 models.
     v2_device: str = Field(default="cuda", validation_alias="V2_DEVICE")
     # Device of the query embedder when it should differ from V2_DEVICE (e.g. "cpu" to leave the GPU to a bigger

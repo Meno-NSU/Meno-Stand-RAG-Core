@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+import httpx
 import torch
 
 from meno_rag.v2._batching import run_batched
@@ -161,11 +164,74 @@ class MxbaiReranker(_BaseReranker):
         return torch.sigmoid((raw - MXBAI_CENTER) / MXBAI_SCALE).tolist()
 
 
-def load_reranker(name: str, path: str, device: str) -> Reranker:
+class HttpReranker:
+    """Scores through a shared vLLM rerank service (POST {url}/v1/rerank) instead of an in-process model.
+
+    Errors (HTTP status, timeout, connection, malformed answer) raise RuntimeError, so the rerank stage fails the
+    usual way. ``max_length`` is ignored: truncation is the service's job (``truncate_tokens``).
+    """
+
+    def __init__(self, url: str, model: str, timeout_s: float = 30.0, truncate_tokens: int | None = None) -> None:
+        self.url = url.rstrip("/")
+        self.model = model
+        self.truncate_tokens = truncate_tokens
+        self.timeout_s = timeout_s
+        self._clock: Callable[[], float] = time.monotonic
+        self._client = httpx.Client(timeout=timeout_s)
+
+    def _score_batch(self, query: str, texts: list[str], deadline: float) -> list[float]:
+        endpoint = f"{self.url}/v1/rerank"
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            raise RuntimeError(f"rerank service {endpoint}: deadline of {self.timeout_s}s exceeded")
+        body: dict[str, Any] = {"model": self.model, "query": query, "documents": texts}
+        if self.truncate_tokens:
+            body["truncate_prompt_tokens"] = self.truncate_tokens
+        try:
+            resp = self._client.post(endpoint, json=body, timeout=remaining)
+            resp.raise_for_status()
+            results = resp.json()["results"]
+            scores: list[float | None] = [None] * len(texts)
+            for r in results:
+                i = int(r["index"])
+                if not 0 <= i < len(texts) or scores[i] is not None:
+                    raise ValueError(f"index {i} is out of range or repeated for {len(texts)} documents")
+                scores[i] = float(r["relevance_score"])
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"rerank service {endpoint} failed: {e!r}") from e
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            raise RuntimeError(f"rerank service {endpoint} returned a malformed answer: {e!r}") from e
+        if any(s is None for s in scores):
+            raise RuntimeError(f"rerank service {endpoint} returned {len(results)} results for {len(texts)} documents")
+        return cast("list[float]", scores)
+
+    def score(self, query: str, texts: list[str], batch_size: int = 32, max_length: int = MAX_LENGTH) -> list[float]:
+        """One overall deadline of ``timeout_s`` covers all batches; each request's timeout is the time left."""
+        if not texts:
+            return []
+        deadline = self._clock() + self.timeout_s
+        parts = run_batched(texts, lambda batch: self._score_batch(query, list(batch), deadline), batch_size)
+        return [s for part in parts for s in part]
+
+
+def load_reranker(
+    name: str,
+    path: str,
+    device: str,
+    *,
+    url: str = "",
+    model: str = "",
+    timeout_s: float = 30.0,
+    truncate_tokens: int | None = None,
+) -> Reranker:
+    if name == "http":
+        if not url or not model:
+            raise ValueError("V2_RERANKER=http needs V2_RERANKER_URL and V2_RERANKER_MODEL")
+        return HttpReranker(url, model, timeout_s, truncate_tokens)
     if name == "bge":
         return BgeReranker(path=path, device=device)
     if name == "qwen3":
         return Qwen3Reranker(path=path, device=device)
     if name == "mxbai":
         return MxbaiReranker(path=path, device=device)
-    raise ValueError(f"unknown reranker {name!r}; expected 'bge', 'qwen3' or 'mxbai'")
+    raise ValueError(f"unknown reranker {name!r}; expected 'bge', 'qwen3', 'mxbai' or 'http'")

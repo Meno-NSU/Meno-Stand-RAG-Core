@@ -9,8 +9,11 @@ from nltk.stem.snowball import SnowballStemmer
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, T5EncoderModel
 
 from meno_rag.stand.tokenization import tokenize_and_normalize_text
+from meno_rag.v2.embed import MAX_LENGTH
 
-MAX_EMBEDDER_TOKENS: int = 512
+# Менон 1.0 can share Менон 1.1's FRIDA (LEGACY_FRIDA_FROM_V2): both must truncate queries identically, so this is
+# v2's constant, not a copy.
+MAX_EMBEDDER_TOKENS: int = MAX_LENGTH
 
 
 def frida_pool(hidden_state, mask, pooling_method: str = "cls"):

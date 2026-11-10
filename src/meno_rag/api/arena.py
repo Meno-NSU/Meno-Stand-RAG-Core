@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from meno_rag.api import auth, guest
+from meno_rag.api.knowledge_bases import label_rating_row
 from meno_rag.api.stands.participant import (
     BUILTIN_KBS,
     builtin_live_kbs,
@@ -191,4 +192,5 @@ async def get_leaderboard(request: Request):
     live = (registry.live_kbs() if registry is not None else set()) | builtin_live_kbs(request.app.state.settings)
     for row in data:
         row["live"] = row["knowledge_base"] in live
+        label_rating_row(row, registry, request.app.state.settings.llm_display_names)
     return {"object": "list", "data": data}

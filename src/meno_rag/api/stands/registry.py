@@ -283,7 +283,7 @@ class StandRegistry:
             m = state.manifest
             version = m.version if m else PLAIN_VERSION
             backend_name = (m.name if m else stand.name) or stand.id
-            stand_name = stand.name or (m.name if m else "") or stand.id
+            stand_name = self.display_name(stand.id) or stand.id
             for llm in _llms(state):
                 llm_name = llm.get("display_name") or llm.get("name") or llm["id"]
                 status = {"state": "available", "until": None, "last_error": None}
@@ -315,6 +315,15 @@ class StandRegistry:
                     }
                 )
         return out
+
+    def display_name(self, stand_id: str) -> str | None:
+        """The name of a configured stand: the stands file's, else its manifest's, else its id; None when the stand
+        is not in the file."""
+        stand, state = self._stands.get(stand_id), self._states.get(stand_id)
+        if stand is None or state is None:
+            return None
+        m = state.manifest
+        return stand.name or (m.name if m else "") or stand.id
 
     def resolve(self, public_id: str | None) -> StandTarget | None:
         if not public_id or "@" not in public_id:

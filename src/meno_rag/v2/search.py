@@ -166,10 +166,12 @@ def load_search_service(settings) -> SearchService:
         raise ValueError(f"V2_LEXICAL_BACKEND must be bm25s|qdrant, got {lexical!r}")
     if lexical == "qdrant" and backend != "qdrant":
         raise ValueError("V2_LEXICAL_BACKEND=qdrant needs V2_VECTOR_BACKEND=qdrant")
-    required = [
-        ("V2_EMBEDDER_PATH", settings.v2_embedder_path),
-        ("V2_RERANKER_PATH", settings.v2_reranker_path),
-    ]
+    required = [("V2_EMBEDDER_PATH", settings.v2_embedder_path)]
+    if settings.v2_reranker == "http":
+        required.append(("V2_RERANKER_URL", settings.v2_reranker_url))
+        required.append(("V2_RERANKER_MODEL", settings.v2_reranker_model))
+    else:
+        required.append(("V2_RERANKER_PATH", settings.v2_reranker_path))
     required.insert(
         1,
         ("V2_MATRIX_DIR", settings.v2_matrix_dir)
@@ -216,5 +218,16 @@ def load_search_service(settings) -> SearchService:
     else:
         matrix = load_matrix(settings.v2_matrix_dir, device, expected_n=len(release.chunks))
         dense = DenseRetriever(matrix, embedder)
-    reranker = load_reranker(settings.v2_reranker, settings.v2_reranker_path, device)
+    if settings.v2_reranker == "http":
+        reranker = load_reranker(
+            "http",
+            "",
+            device,
+            url=settings.v2_reranker_url,
+            model=settings.v2_reranker_model,
+            timeout_s=settings.v2_reranker_timeout_s,
+            truncate_tokens=settings.v2_reranker_truncate_tokens or None,
+        )
+    else:
+        reranker = load_reranker(settings.v2_reranker, settings.v2_reranker_path, device)
     return SearchService(release, bm25, dense, reranker, settings)
