@@ -11,7 +11,8 @@ unless marked as the owner's.
 
 **Facts.**
 - RAGU runs in a Docker container on the production server and answers on 127.0.0.1:9007. It is the author's
-  deployment; we have no Docker access and do not need it.
+  deployment. The owner has now granted Docker access on the server, so RAGU is rebuilt from its own branch and
+  redeployed (see below).
 - RAGU is a fork of our core. Its stream already follows the meno-backend/1 shape:
   - `event: stage` with standard stage names only (abbreviation_expansion, query_rewrite, retrieval, fusion, rerank,
     context_assembly, generation);
@@ -135,7 +136,7 @@ RAGU's container, which needs Docker access on the server; the owner grants it.
 ## Order and rollout
 
 The work ships in this order:
-1. **Part 1** (backend): ships first.
+1. **Part 1** (RAGU: its branch and container, not this backend): ships first.
 2. **Part 2** (backend labels, then frontend).
 3. **Part 3** (backend, after its gate).
 
@@ -146,7 +147,7 @@ CI, and then a deploy:
 
 ## Non-goals
 
-- Changing RAGU's code or container.
+- Changing RAGU beyond the contract: its code and container change only to follow the meno-backend/1 contract (§1).
 - Re-indexing anything.
 - New stages or detail rendering.
 - Changes to arena voting or Elo math.

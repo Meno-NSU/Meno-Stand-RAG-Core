@@ -283,7 +283,7 @@ class StandRegistry:
             m = state.manifest
             version = m.version if m else PLAIN_VERSION
             backend_name = (m.name if m else stand.name) or stand.id
-            stand_name = stand.name or (m.name if m else "") or stand.id
+            stand_name = self.display_name(stand.id) or stand.id
             for llm in _llms(state):
                 llm_name = llm.get("display_name") or llm.get("name") or llm["id"]
                 status = {"state": "available", "until": None, "last_error": None}

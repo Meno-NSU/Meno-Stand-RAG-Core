@@ -56,9 +56,7 @@ def test_not_shared_logs_reason(search, reason):
 def test_v2_disabled_logs_its_own_reason():
     embedder = FridaEmbedder(object(), _FakeModel())
     with capture_logs() as logs:
-        frida = res.resolve_shared_frida(
-            _settings(LEGACY_FRIDA_FROM_V2="true", V2_ENABLED="false"), _search(embedder)
-        )
+        frida = res.resolve_shared_frida(_settings(LEGACY_FRIDA_FROM_V2="true", V2_ENABLED="false"), _search(embedder))
     assert frida is None
     ev = [x for x in logs if x["event"] == "legacy_frida_not_shared"]
     assert ev and ev[0]["reason"] == "v2_disabled"

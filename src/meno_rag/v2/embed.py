@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from meno_rag.v2._batching import run_batched
 
+# Also the legacy stand/search.py MAX_EMBEDDER_TOKENS (shared FRIDA, LEGACY_FRIDA_FROM_V2): keep them identical.
 MAX_LENGTH = 512
 QWEN3_INSTRUCT = (
     "Instruct: Given a question about Novosibirsk State University, retrieve passages that answer it\nQuery: "
