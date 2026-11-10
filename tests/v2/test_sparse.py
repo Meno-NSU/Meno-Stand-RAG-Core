@@ -16,7 +16,7 @@ def test_term_id_is_crc32_of_the_stem():
 def test_document_weights_follow_lucene_bm25():
     enc = Bm25Encoder(k1=1.5, b=0.75)
     ids, vals = enc.document(["a", "b", "a"], avgdl=3.0)
-    w = dict(zip(ids, vals))
+    w = dict(zip(ids, vals, strict=False))
     norm = 1.5 * (1 - 0.75 + 0.75 * 3 / 3.0)
     assert w[term_id("a")] == pytest.approx(2 / (2 + norm))
     assert w[term_id("b")] == pytest.approx(1 / (1 + norm))
@@ -25,8 +25,8 @@ def test_document_weights_follow_lucene_bm25():
 
 def test_longer_chunks_weigh_a_term_less():
     enc = Bm25Encoder()
-    short = dict(zip(*enc.document(["a", "b"], avgdl=4.0)))[term_id("a")]
-    long_ = dict(zip(*enc.document(["a"] + ["x"] * 9, avgdl=4.0)))[term_id("a")]
+    short = dict(zip(*enc.document(["a", "b"], avgdl=4.0), strict=False))[term_id("a")]
+    long_ = dict(zip(*enc.document(["a"] + ["x"] * 9, avgdl=4.0), strict=False))[term_id("a")]
     assert long_ < short
 
 
@@ -38,7 +38,7 @@ def test_colliding_ids_merge_counts(monkeypatch):
 
 def test_query_counts_stems_and_empty_input():
     enc = Bm25Encoder()
-    ids, vals = enc.query("Солихов Солихова")
+    _ids, vals = enc.query("Солихов Солихова")
     assert sum(vals) == len(enc.tokens("Солихов Солихова"))
     assert enc.query("") == ([], [])
     assert enc.document([], avgdl=1.0) == ([], [])

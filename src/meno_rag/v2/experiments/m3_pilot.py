@@ -48,9 +48,9 @@ class M3:
             ids = enc["input_ids"].cpu().tolist()
             ws = w.cpu().tolist()
             mask = enc["attention_mask"].cpu().tolist()
-            for row_ids, row_w, row_m in zip(ids, ws, mask):
+            for row_ids, row_w, row_m in zip(ids, ws, mask, strict=False):
                 vec: dict[int, float] = {}
-                for t, x, m in zip(row_ids, row_w, row_m):
+                for t, x, m in zip(row_ids, row_w, row_m, strict=False):
                     if m and t not in self.special and x > 0:
                         vec[t] = max(vec.get(t, 0.0), x)
                 sparse.append(vec)
@@ -61,11 +61,14 @@ def score(args) -> None:
     from meno_rag.v2.kb import load_release
 
     release = load_release(Path(args.kb))
-    rows = [json.loads(line) for line in open(args.cache)]
+    with open(args.cache) as f:
+        rows = [json.loads(line) for line in f]
     qmap = {}
     if args.queries:
-        qmap = {r["item_key"]: (r.get("queries") or []) for r in map(json.loads, open(args.queries))}
-    questions = {i["id"]: i["question"] for i in map(json.loads, open(args.items))}
+        with open(args.queries) as f:
+            qmap = {r["item_key"]: (r.get("queries") or []) for r in map(json.loads, f)}
+    with open(args.items) as f:
+        questions = {i["id"]: i["question"] for i in map(json.loads, f)}
     m3 = M3(args.model, args.device)
     with open(args.out, "w", encoding="utf-8") as out:
         for n, r in enumerate(rows, 1):
@@ -77,9 +80,10 @@ def score(args) -> None:
                 json.dumps(
                     {
                         "id": r["id"],
-                        "m3d": {str(p): round(float(qd @ d), 5) for p, d in zip(pos, dd)},
+                        "m3d": {str(p): round(float(qd @ d), 5) for p, d in zip(pos, dd, strict=False)},
                         "m3s": {
-                            str(p): round(sum(w * v.get(t, 0.0) for t, w in qs.items()), 5) for p, v in zip(pos, ds)
+                            str(p): round(sum(w * v.get(t, 0.0) for t, w in qs.items()), 5)
+                            for p, v in zip(pos, ds, strict=False)
                         },
                     }
                 )
@@ -90,8 +94,10 @@ def score(args) -> None:
 
 
 def evaluate(args) -> None:
-    rows = {json.loads(line)["id"]: json.loads(line) for line in open(args.cache)}
-    m3 = {json.loads(line)["id"]: json.loads(line) for line in open(args.out)}
+    with open(args.cache) as f:
+        rows = {json.loads(line)["id"]: json.loads(line) for line in f}
+    with open(args.out) as f:
+        m3 = {json.loads(line)["id"]: json.loads(line) for line in f}
     ids = [i for i in rows if i in m3]
     n = len(ids)
 

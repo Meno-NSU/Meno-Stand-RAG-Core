@@ -232,7 +232,7 @@ def evaluate(args) -> None:
             gold = set(r["gold"])
             hits.append(next((rank for rank, i in enumerate(order, 1) if r["docs"][i] in gold), None))
         n = len(hits)
-        at = lambda k: sum(1 for h in hits if h and h <= k) / n  # noqa: E731
+        at = lambda k, hits=hits, n=n: sum(1 for h in hits if h and h <= k) / n  # noqa: E731
         mrr = sum(1 / h for h in hits if h) / n
         top_a = [max(sc[k]) for k in ans if sc[k]]
         top_u = sorted(max(sc[k]) for k in sc if k[0] == "unanswerable" and sc[k])

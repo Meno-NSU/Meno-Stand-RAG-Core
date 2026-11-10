@@ -79,4 +79,4 @@ class DenseRetriever:
         q = self.embedder.encode_queries([query]).to(self.matrix.device, self.matrix.dtype)
         scores = (self.matrix @ q[0]).float()
         top = torch.topk(scores, k)
-        return list(zip(top.indices.tolist(), top.values.tolist()))
+        return list(zip(top.indices.tolist(), top.values.tolist(), strict=False))

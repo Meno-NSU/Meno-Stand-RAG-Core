@@ -556,7 +556,7 @@ async def test_rare_term_match_is_evidence_below_the_threshold():
     first = pipe.search.kwargs[0]
     assert first["lexical_top"] == 4 and first["lexical_tokens"] == ("солихов",)  # the indexed form alone
     assert [c.chunk.chunk_id for c in out.context_chunks] == ["staff"] and not out.refusal
-    ctx = [e.detail for e in events if e.stage == StageName.CONTEXT_ASSEMBLY and e.detail][0]
+    ctx = next(e.detail for e in events if e.stage == StageName.CONTEXT_ASSEMBLY and e.detail)
     assert ctx["rare_term_chunks"] == 1
 
 
@@ -590,7 +590,7 @@ async def test_general_question_about_a_kb_named_entity_is_answered_from_documen
 
 
 async def test_general_question_without_a_rare_term_keeps_the_general_rules():
-    out, nsu_block, general_block = await _general_person({})
+    _out, nsu_block, general_block = await _general_person({})
     assert general_block and not nsu_block
 
 

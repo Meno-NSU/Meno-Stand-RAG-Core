@@ -56,7 +56,7 @@ async def attribute(
     for scores in all_scores:
         for i, sc in enumerate(scores):
             best[i] = max(best[i], float(sc))
-    used = [(c, b) for c, b in zip(context_chunks, best) if b >= threshold]
+    used = [(c, b) for c, b in zip(context_chunks, best, strict=False) if b >= threshold]
     used.sort(key=lambda p: -p[1])
     return used
 

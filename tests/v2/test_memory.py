@@ -246,7 +246,7 @@ async def test_concurrent_builds_coalesce():
 
     h = dialogue(40)
     r, store = Slow(), SummaryStore()
-    a, b = await asyncio.gather(
+    _a, _b = await asyncio.gather(
         precompute_next(h, r, object(), store, S()),
         build_memory(h, "q", r, object(), store, S()),
     )

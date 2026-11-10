@@ -123,7 +123,7 @@ def test_dense_no_bm25_built(env):
 def test_hybrid_rrf(env):
     rows, tim = env("hybrid:frida")
     # c1 is in both lists -> first
-    assert [x["chunk_id"] for x in rows[0]["ranked"]][0] == "c1"
+    assert next(x["chunk_id"] for x in rows[0]["ranked"]) == "c1"
     assert {"embed", "dense", "bm25", "rrf"} <= set(tim) and "rerank" not in tim
     scores = [x["score"] for x in rows[0]["ranked"]]
     assert scores == sorted(scores, reverse=True)

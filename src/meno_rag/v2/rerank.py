@@ -79,7 +79,7 @@ class BgeReranker(_BaseReranker):
         super().__init__(tokenizer, model)
 
     def _score_batch(self, query, texts, max_length):
-        kw = dict(max_length=max_length, padding=True, return_tensors="pt")
+        kw = {"max_length": max_length, "padding": True, "return_tensors": "pt"}
         try:
             enc = self.tokenizer([query] * len(texts), texts, truncation="only_second", **kw)
         except Exception:  # bare Exception from tokenizers: query alone > max_length

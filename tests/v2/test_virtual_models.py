@@ -40,7 +40,7 @@ def test_split_helpers():
     assert split_virtual_model(None) == (None, False)
 
 
-def test_list_has_virtual_entries(make_client):
+def test_list_has_virtual_entries(make_client):  # noqa: F811  (fixture)
     c, _ = _client(make_client)
     data = {m["id"]: m for m in c.get("/v1/models").json()["data"]}
     assert data["meno-lite@menon-1.1"]["display_name"] == LITE
@@ -52,18 +52,18 @@ def test_list_has_virtual_entries(make_client):
     assert "other@menon-1.1" not in data
 
 
-def test_absent_base_no_entry(make_client):
+def test_absent_base_no_entry(make_client):  # noqa: F811  (fixture)
     c, _ = _client(make_client, ids=("meno-lite",))
     ids = [m["id"] for m in c.get("/v1/models").json()["data"]]
     assert "meno-lite@menon-1.1" in ids and "gemma-4-12B-it@menon-1.1" not in ids
 
 
-def test_v2_unavailable_no_entries(make_client):
+def test_v2_unavailable_no_entries(make_client):  # noqa: F811  (fixture)
     c, _ = _client(make_client, v2_up=False)
     assert not [m for m in c.get("/v1/models").json()["data"] if m["id"].endswith("@menon-1.1")]
 
 
-def test_chat_virtual_uses_v2(make_client, monkeypatch):
+def test_chat_virtual_uses_v2(make_client, monkeypatch):  # noqa: F811  (fixture)
     c, db = _client(make_client)
     from meno_rag.api import main as main_mod
 
@@ -81,12 +81,12 @@ def test_chat_virtual_uses_v2(make_client, monkeypatch):
     assert rows and all(tuple(r) == ("meno-lite@menon-1.1", V2_KB_ID) for r in rows if r[0])
 
 
-def test_chat_virtual_503_when_v2_down(make_client):
+def test_chat_virtual_503_when_v2_down(make_client):  # noqa: F811  (fixture)
     c, _ = _client(make_client, v2_up=False)
     assert _chat(c, "meno-lite@menon-1.1").status_code == 503
 
 
-def test_plain_model_unchanged(make_client):
+def test_plain_model_unchanged(make_client):  # noqa: F811  (fixture)
     c, _ = _client(make_client)
     r = _chat(c, "meno-lite")
     assert r.json()["choices"][0]["message"]["content"] == "Старый"
@@ -94,14 +94,14 @@ def test_plain_model_unchanged(make_client):
     assert _chat(c, "meno-lite", kb=V2_KB_ID).json()["choices"][0]["message"]["content"] == "Новый"
 
 
-def test_kb_list_hides_v2_by_default(make_client, monkeypatch):
+def test_kb_list_hides_v2_by_default(make_client, monkeypatch):  # noqa: F811  (fixture)
     c, _ = _client(make_client)
     assert [k["id"] for k in c.get("/v1/knowledge-bases").json()["data"]] == [LEGACY_KB_ID]
     monkeypatch.setattr(c.app.state.settings, "v2_expose_as", "both")
     assert len(c.get("/v1/knowledge-bases").json()["data"]) == 2
 
 
-def test_arena_accepts_virtual_ids(make_client):
+def test_arena_accepts_virtual_ids(make_client):  # noqa: F811  (fixture)
     c, _ = _client(make_client)
     vote = {
         "model_a": "meno-lite",

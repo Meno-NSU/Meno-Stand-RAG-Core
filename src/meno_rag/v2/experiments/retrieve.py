@@ -175,24 +175,29 @@ def main(argv: list[str] | None = None) -> None:
             t_total = time.perf_counter()
             dense_hits = bm25_hits = None
             if embedder is not None:
-                vec = timer.run("embed", lambda: embedder.encode_queries([query]), gpu=True)
+                vec = timer.run("embed", lambda query=query: embedder.encode_queries([query]), gpu=True)
                 if qdrant:
                     retr = QdrantRetriever(store, args.qdrant_collection, _Cached(vec))
                 else:
                     retr = DenseRetriever(dense_matrix, _Cached(vec))
-                dense_hits = timer.run("dense", lambda: retr.search(query, CAND_K), gpu=True)
+                dense_hits = timer.run("dense", lambda retr=retr, query=query: retr.search(query, CAND_K), gpu=True)
             if bm25 is not None:
-                bm25_hits = timer.run("bm25", lambda: bm25.search(query, CAND_K))
+                bm25_hits = timer.run("bm25", lambda query=query: bm25.search(query, CAND_K))
             if cfg.kind == "bm25":
                 ranked = bm25_hits
             elif cfg.kind == "dense":
                 ranked = dense_hits
             else:
                 limit = RERANK_K if reranker else OUT_K
-                ranked = timer.run("rrf", lambda: rrf([dense_hits, bm25_hits], limit=limit))
+                ranked = timer.run(
+                    "rrf",
+                    lambda dense_hits=dense_hits, bm25_hits=bm25_hits, limit=limit: rrf(
+                        [dense_hits, bm25_hits], limit=limit
+                    ),
+                )
             if reranker is not None:
                 texts = [release.chunks[p].index_text for p, _ in ranked]
-                scores = timer.run("rerank", lambda: reranker.score(query, texts), gpu=True)
+                scores = timer.run("rerank", lambda query=query, texts=texts: reranker.score(query, texts), gpu=True)
                 order = sorted(range(len(ranked)), key=lambda i: -scores[i])
                 ranked = [(ranked[i][0], float(scores[i])) for i in order]
             ranked = ranked[:OUT_K]

@@ -56,7 +56,7 @@ def test_load_release(tmp_path):
 
 def test_num_docs_mismatch(tmp_path):
     _make(tmp_path, 3)
-    with pytest.raises(ValueError, match="2.*3|3.*2"):
+    with pytest.raises(ValueError, match=r"2.*3|3.*2"):
         load_release(tmp_path)
 
 

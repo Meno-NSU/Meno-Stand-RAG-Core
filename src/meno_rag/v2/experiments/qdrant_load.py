@@ -49,7 +49,7 @@ def upsert_hybrid(store: QdrantStore, name: str, arr, chunks, batch: int, worker
             rows = np.asarray(arr[i : i + batch], dtype=np.float32)
             sparse = pool.map(_sparse, [(t, avgdl) for t in texts[i : i + batch]], chunksize=32)
             points = []
-            for j, (row, (ids, vals)) in enumerate(zip(rows, sparse)):
+            for j, (row, (ids, vals)) in enumerate(zip(rows, sparse, strict=False)):
                 c = chunks[i + j]
                 points.append(
                     {

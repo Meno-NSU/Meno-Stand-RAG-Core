@@ -34,7 +34,7 @@ class Bm25Retriever:
         if not tokens or n == 0 or k <= 0:
             return []
         docs, scores = self._index.retrieve([tokens], k=min(k, n))
-        out = [(int(d), float(s)) for d, s in zip(docs[0], scores[0]) if s > 0]
+        out = [(int(d), float(s)) for d, s in zip(docs[0], scores[0], strict=False) if s > 0]
         out.sort(key=lambda x: -x[1])
         return out
 

@@ -78,7 +78,7 @@ def test_feedback_comment_limit_is_20000():
     try:
         ok = FeedbackRequest(**base, comment="я" * 15_000)
     except ValidationError as e:  # field names differ: surface them
-        raise AssertionError(str(e))
+        raise AssertionError(str(e)) from e
     assert len(ok.comment) == 15_000
     with pytest.raises(ValidationError):
         FeedbackRequest(**base, comment="я" * 20_001)

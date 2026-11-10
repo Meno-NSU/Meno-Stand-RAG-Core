@@ -37,13 +37,16 @@ def collect(args) -> None:
     reranker = load_reranker("bge", args.bge, args.device)
     qmap = {}
     if args.queries:
-        qmap = {r["item_key"]: (r.get("queries") or []) for r in map(json.loads, open(args.queries))}
-    items = [json.loads(line) for line in open(args.items) if line.strip()]
+        with open(args.queries) as f:
+            qmap = {r["item_key"]: (r.get("queries") or []) for r in map(json.loads, f)}
+    with open(args.items) as f:
+        items = [json.loads(line) for line in f if line.strip()]
     items = [i for i in items if i.get("answerable") and _gold(i)]
     done = set()
     out_p = Path(args.cache)
     if out_p.exists():
-        done = {json.loads(line)["id"] for line in open(out_p)}
+        with open(out_p) as f:
+            done = {json.loads(line)["id"] for line in f}
     with out_p.open("a", encoding="utf-8") as out:
         for n, it in enumerate(items, 1):
             if it["id"] in done:
@@ -61,7 +64,7 @@ def collect(args) -> None:
                         "gold": _gold(it),
                         "dense": d,
                         "bm25": b,
-                        "bge": {str(p): round(float(s), 5) for p, s in zip(union, scores)},
+                        "bge": {str(p): round(float(s), 5) for p, s in zip(union, scores, strict=False)},
                         "doc": {str(p): release.chunks[p].doc_id for p in union},
                     },
                     ensure_ascii=False,
@@ -87,8 +90,10 @@ def parity(args) -> None:
     b = QdrantBm25Retriever(QdrantStore(args.qdrant_url), args.qdrant_collection)
     qmap = {}
     if args.queries:
-        qmap = {r["item_key"]: (r.get("queries") or []) for r in map(json.loads, open(args.queries))}
-    items = [i for i in map(json.loads, open(args.items)) if i.get("answerable") and _gold(i)]
+        with open(args.queries) as f:
+            qmap = {r["item_key"]: (r.get("queries") or []) for r in map(json.loads, f)}
+    with open(args.items) as f:
+        items = [i for i in map(json.loads, f) if i.get("answerable") and _gold(i)]
     ov10 = ov50 = hit_a = hit_b = 0.0
     ta = tb = 0.0
     for it in items:
@@ -114,7 +119,7 @@ def parity(args) -> None:
 
 def wrrf(lists: list[list[int]], weights: list[float], k: int = 60) -> list[int]:
     total: dict[int, float] = {}
-    for lst, w in zip(lists, weights):
+    for lst, w in zip(lists, weights, strict=False):
         for rank, p in enumerate(lst, 1):
             total[p] = total.get(p, 0.0) + w / (k + rank)
     return sorted(total, key=lambda p: (-total[p], p))
@@ -128,7 +133,8 @@ def _first_hit(order: list[int], doc: dict, gold: set) -> int | None:
 
 
 def evaluate(args) -> None:
-    rows = [json.loads(line) for line in open(args.cache)]
+    with open(args.cache) as f:
+        rows = [json.loads(line) for line in f]
     n = len(rows)
 
     def ranked(r, wb, kc, depth):
@@ -137,7 +143,10 @@ def evaluate(args) -> None:
 
     def metrics(order_fn):
         hits = [_first_hit(order_fn(r), r["doc"], set(r["gold"])) for r in rows]
-        at = lambda k: sum(1 for h in hits if h and h <= k) / n
+
+        def at(k):
+            return sum(1 for h in hits if h and h <= k) / n
+
         mrr = sum(1 / h for h in hits if h) / n
         return f"R@1 {at(1):.3f} R@3 {at(3):.3f} R@5 {at(5):.3f} R@10 {at(10):.3f} MRR {mrr:.3f}"
 
@@ -147,7 +156,7 @@ def evaluate(args) -> None:
             for wb in (0.5, 0.75, 1.0, 1.5, 2.0):
                 print(
                     f"cand/list {kc:3d} depth {depth:2d} w_bm25 {wb:4.2f} | "
-                    + metrics(lambda r: ranked(r, wb, kc, depth))
+                    + metrics(lambda r, wb=wb, kc=kc, depth=depth: ranked(r, wb, kc, depth))
                 )
     print(
         "bge over the whole union (ceiling)   | "

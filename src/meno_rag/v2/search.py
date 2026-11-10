@@ -102,10 +102,15 @@ class SearchService:
                 continue
             rq = rerank_queries[i] if i < len(rerank_queries) and rerank_queries[i].strip() else q
             k = s.v2_candidates_per_query
-            dense_hits = timed("embed_dense", lambda: self.dense.search(q, k))
+            dense_hits = timed("embed_dense", lambda q=q, k=k: self.dense.search(q, k))
             extra = lexical_extra if not per_query and lexical_extra else ()
-            bm25_hits = timed("bm25", lambda: self.bm25.search(q, k, extra) if extra else self.bm25.search(q, k))
-            fused = timed("rrf", lambda: rrf([dense_hits, bm25_hits], limit=s.v2_rerank_top))
+            bm25_hits = timed(
+                "bm25", lambda q=q, k=k, extra=extra: self.bm25.search(q, k, extra) if extra else self.bm25.search(q, k)
+            )
+            fused = timed(
+                "rrf",
+                lambda dense_hits=dense_hits, bm25_hits=bm25_hits: rrf([dense_hits, bm25_hits], limit=s.v2_rerank_top),
+            )
             kept = [p for p, _ in fused[: s.v2_rerank_top]]
             if lexical_top > 0 and len(per_query) < lexical_for:
                 if lexical_tokens:
@@ -127,8 +132,8 @@ class SearchService:
         scores: dict[tuple[str, int], float] = {}
         for rq, poss in by_rq.items():
             texts = [self.release.chunks[p].index_text for p in poss]
-            vals = timed("rerank", lambda: self.reranker.score(rq, texts))
-            for p, v in zip(poss, vals):
+            vals = timed("rerank", lambda rq=rq, texts=texts: self.reranker.score(rq, texts))
+            for p, v in zip(poss, vals, strict=False):
                 scores[(rq, p)] = float(v)
 
         best: dict[int, float] = {}
