@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
-import pytest
 from sqlalchemy import text
 
 from meno_rag.api.knowledge_bases import LEGACY_KB_ID, V2_KB_ID, split_virtual_model, virtual_model_id

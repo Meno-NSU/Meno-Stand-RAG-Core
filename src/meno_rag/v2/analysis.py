@@ -201,6 +201,6 @@ async def analyze(
             timeout_s,
         )
         return _postprocess(_extract_json(text), question)
-    except Exception as exc:  # noqa: BLE001 - any failure degrades to the nsu path
+    except Exception as exc:
         logger.warning("turn analysis failed, falling back to nsu: %r", exc)
         return _fallback(question)

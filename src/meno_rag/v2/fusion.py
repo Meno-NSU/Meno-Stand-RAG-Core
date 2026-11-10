@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 
 def rrf(lists: Sequence[Sequence[tuple[int, float]]], k: int = 60, limit: int | None = None) -> list[tuple[int, float]]:

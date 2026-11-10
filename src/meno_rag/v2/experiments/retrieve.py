@@ -13,11 +13,11 @@ from pathlib import Path
 import torch
 
 from meno_rag.v2.dense import DenseRetriever, load_matrix
-from meno_rag.v2.qdrant_store import QdrantRetriever, QdrantStore
 from meno_rag.v2.embed import load_embedder
 from meno_rag.v2.fusion import rrf
 from meno_rag.v2.kb import load_release
 from meno_rag.v2.lexical import Bm25Retriever
+from meno_rag.v2.qdrant_store import QdrantRetriever, QdrantStore
 from meno_rag.v2.rerank import load_reranker
 
 EMBEDDERS = ("frida", "qwen3")

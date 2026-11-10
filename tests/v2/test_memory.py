@@ -1,8 +1,6 @@
 import asyncio
 import json
 
-import pytest
-
 from meno_rag.v2.memory import (
     DialogueMemory,
     SummaryStore,

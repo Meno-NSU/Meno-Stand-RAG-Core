@@ -16,8 +16,8 @@ from meno_rag.v2.fusion import rrf
 from meno_rag.v2.kb import Chunk, KbRelease, load_release
 from meno_rag.v2.lexical import Bm25Retriever
 from meno_rag.v2.qdrant_store import QdrantBm25Retriever, QdrantRetriever, QdrantStore
-from meno_rag.v2.sparse import SPARSE_NAME
 from meno_rag.v2.rerank import load_reranker
+from meno_rag.v2.sparse import SPARSE_NAME
 
 logger = structlog.get_logger(__name__)
 

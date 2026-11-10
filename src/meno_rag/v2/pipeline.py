@@ -20,6 +20,7 @@ from meno_rag.stand.pipeline import PipelineRuntime, StageSink, extract_question
 from meno_rag.stand.sampling import QaSampling
 from meno_rag.v2.analysis import TurnAnalysis, _dedup, _extract_json, analyze
 from meno_rag.v2.kb import Chunk
+from meno_rag.v2.lexical import stems_match
 from meno_rag.v2.memory import (
     CHARS_PER_TOKEN,
     TRUNC_MARK,
@@ -29,7 +30,6 @@ from meno_rag.v2.memory import (
     estimate_tokens,
     precompute_next,
 )
-from meno_rag.v2.lexical import stems_match
 from meno_rag.v2.prompting import (
     PROMPT_GUARD_TEXT,
     SEARCH_ROUTES,

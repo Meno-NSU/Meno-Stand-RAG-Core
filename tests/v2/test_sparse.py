@@ -10,7 +10,7 @@ from meno_rag.v2.sparse import Bm25Encoder, term_id
 
 
 def test_term_id_is_crc32_of_the_stem():
-    assert term_id("солих") == zlib.crc32("солих".encode("utf-8"))
+    assert term_id("солих") == zlib.crc32("солих".encode())
 
 
 def test_document_weights_follow_lucene_bm25():

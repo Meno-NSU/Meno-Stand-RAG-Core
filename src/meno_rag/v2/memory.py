@@ -25,7 +25,7 @@ FALLBACK_USER_CHARS = 200
 SUMMARY_CACHE_SIZE = 2048
 MIN_STEM_LEN = 5
 CHUNK_FACTOR = 4
-_STOP_WORDS = ("говор напомн начал раньш ранее вчер спрашива сказа расскаж упомина").split()
+_STOP_WORDS = ["говор", "напомн", "начал", "раньш", "ранее", "вчер", "спрашива", "сказа", "расскаж", "упомина"]
 _stemmer = SnowballStemmer("russian")
 _STOP_STEMS = frozenset(_STOP_WORDS) | {_stemmer.stem(w) for w in _STOP_WORDS}
 

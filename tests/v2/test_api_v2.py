@@ -10,9 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from meno_rag.api.events import StageEvent, StageName, StageStatus
 from meno_rag.api.knowledge_bases import LEGACY_KB_ID, V2_KB_ID
 from meno_rag.stand.pipeline import ModelRuntime, PipelineRuntime
-from meno_rag.api.events import StageEvent, StageName, StageStatus
 from tests._dbhelpers import with_db
 
 BENCH_TOKEN = "test-bench-token-0123456789"
