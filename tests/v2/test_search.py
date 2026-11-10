@@ -9,10 +9,7 @@ from meno_rag.v2.search import SearchService, load_search_service
 
 
 def _release(n=10):
-    chunks = [
-        Chunk(f"c{i}", f"d{i}", f"u{i}", f"t{i}", None, None, None, f"text{i}", f"idx{i}")
-        for i in range(n)
-    ]
+    chunks = [Chunk(f"c{i}", f"d{i}", f"u{i}", f"t{i}", None, None, None, f"text{i}", f"idx{i}") for i in range(n)]
     return KbRelease(chunks=chunks, by_id={c.chunk_id: i for i, c in enumerate(chunks)})
 
 
@@ -44,6 +41,7 @@ class FakeReranker:
         try:
             if self.delay:
                 import time
+
                 time.sleep(self.delay)
             if self.fail_on == query:
                 raise RuntimeError("boom")
@@ -60,10 +58,11 @@ def _service(dense, bm25, reranker, **kw):
 
 
 async def test_merge_no_duplicates_ordered_and_coverage():
-    dense = {"qa": [(1, .9), (2, .8)], "qb": [(2, .9), (3, .8)]}
+    dense = {"qa": [(1, 0.9), (2, 0.8)], "qb": [(2, 0.9), (3, 0.8)]}
     bm25 = {"qa": [(2, 5.0)], "qb": [(4, 5.0)]}
-    rr = FakeReranker({("ra", "idx1"): 0.2, ("ra", "idx2"): 0.5, ("rb", "idx2"): 0.9,
-                       ("rb", "idx3"): 0.1, ("rb", "idx4"): 0.6})
+    rr = FakeReranker(
+        {("ra", "idx1"): 0.2, ("ra", "idx2"): 0.5, ("rb", "idx2"): 0.9, ("rb", "idx3"): 0.1, ("rb", "idx4"): 0.6}
+    )
     svc = _service(dense, bm25, rr)
     res = await svc.search(["qa", "qb"], ["ra", "rb"])
     assert [c.pos for c in res.candidates] == [2, 4, 1, 3]
@@ -76,7 +75,7 @@ async def test_merge_no_duplicates_ordered_and_coverage():
 
 async def test_empty_query_skipped():
     rr = FakeReranker({("ra", "idx1"): 0.4})
-    svc = _service({"qa": [(1, .9)]}, {}, rr)
+    svc = _service({"qa": [(1, 0.9)]}, {}, rr)
     res = await svc.search(["qa", "   ", ""], ["ra", "rx", "ry"])
     assert res.coverage == {"qa": 0.4}
     assert [q for q, _ in rr.calls] == ["ra"]
@@ -94,16 +93,15 @@ async def test_rerank_top_limits_candidates():
 
 async def test_16_concurrent_searches_serialized():
     rr = FakeReranker({("q", "idx1"): 0.7}, delay=0.01)
-    svc = _service({"q": [(1, .9)]}, {}, rr)
-    results = await asyncio.wait_for(
-        asyncio.gather(*[svc.search(["q"], ["q"]) for _ in range(16)]), timeout=30)
+    svc = _service({"q": [(1, 0.9)]}, {}, rr)
+    results = await asyncio.wait_for(asyncio.gather(*[svc.search(["q"], ["q"]) for _ in range(16)]), timeout=30)
     assert len(results) == 16 and all(r.coverage == {"q": 0.7} for r in results)
     assert rr.max_active == 1
 
 
 async def test_exception_does_not_break_next():
     rr = FakeReranker({("ok", "idx1"): 0.7}, fail_on="bad")
-    svc = _service({"bad": [(1, .9)], "ok": [(1, .9)]}, {}, rr)
+    svc = _service({"bad": [(1, 0.9)], "ok": [(1, 0.9)]}, {}, rr)
     with pytest.raises(RuntimeError):
         await svc.search(["bad"], ["bad"])
     res = await svc.search(["ok"], ["ok"])
@@ -139,15 +137,22 @@ def test_gpu_fraction_only_without_legacy(monkeypatch, legacy, expected):
         raise Stop
 
     monkeypatch.setattr(search_mod, "load_release", stop)
-    s = Settings(_env_file=None, V2_EMBEDDER_PATH="/x", V2_MATRIX_DIR="/y", V2_RERANKER_PATH="/z",
-                 V2_DEVICE="cuda:0", V2_GPU_MEM_FRACTION=0.5, LEGACY_ENABLED=legacy)
+    s = Settings(
+        _env_file=None,
+        V2_EMBEDDER_PATH="/x",
+        V2_MATRIX_DIR="/y",
+        V2_RERANKER_PATH="/z",
+        V2_DEVICE="cuda:0",
+        V2_GPU_MEM_FRACTION=0.5,
+        LEGACY_ENABLED=legacy,
+    )
     with pytest.raises(Stop):
         load_search_service(s)
     assert calls == expected
 
 
 async def test_lexical_top_scores_bm25_hits_that_fusion_dropped():
-    dense = {"q": [(1, .9), (2, .8)], "q2": [(3, .9)]}
+    dense = {"q": [(1, 0.9), (2, 0.8)], "q2": [(3, 0.9)]}
     bm25 = {"q": [(7, 9.0), (2, 5.0), (8, 1.0)], "q2": [(9, 5.0)]}
     rr = FakeReranker({("q", "idx7"): 0.05, ("q", "idx1"): 0.8, ("q", "idx2"): 0.6, ("q", "idx8"): 0.01})
     svc = _service(dense, bm25, rr, V2_RERANK_TOP=2)  # fusion keeps two positions per query
@@ -160,7 +165,7 @@ async def test_lexical_top_scores_bm25_hits_that_fusion_dropped():
 
 
 async def test_lexical_top_for_several_queries_round_robin():
-    dense = {"q": [(1, .9)], "q2": [(3, .9)]}
+    dense = {"q": [(1, 0.9)], "q2": [(3, 0.9)]}
     bm25 = {"q": [(7, 9.0), (2, 5.0)], "q2": [(9, 5.0), (7, 4.0), (4, 1.0)]}
     svc = _service(dense, bm25, FakeReranker({}), V2_RERANK_TOP=1)
     res = await svc.search(["q", "q2"], ["q", "q"], lexical_top=3, lexical_for=2)
@@ -168,7 +173,7 @@ async def test_lexical_top_for_several_queries_round_robin():
 
 
 async def test_lexical_tokens_take_the_slots_from_a_search_of_those_tokens_alone():
-    dense = {"q": [(1, .9)]}
+    dense = {"q": [(1, 0.9)]}
     bm25 = {"q": [(2, 5.0)], "солихов солих": [(7, 3.0), (8, 1.0)]}
     rr = FakeReranker({("q", "idx7"): 0.02, ("q", "idx8"): 0.01, ("q", "idx1"): 0.8, ("q", "idx2"): 0.6})
     svc = _service(dense, bm25, rr)

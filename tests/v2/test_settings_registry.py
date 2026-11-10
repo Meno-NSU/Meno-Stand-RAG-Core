@@ -36,8 +36,14 @@ def test_defaults(monkeypatch):
 
 
 def test_env_parsing(monkeypatch):
-    s = make(monkeypatch, V2_RERANK_THRESHOLD="0.42", V2_ENABLED="true",
-             LEGACY_ENABLED="false", V2_MAX_ROUNDS="2", V2_EMBEDDER_PATH="/m/frida")
+    s = make(
+        monkeypatch,
+        V2_RERANK_THRESHOLD="0.42",
+        V2_ENABLED="true",
+        LEGACY_ENABLED="false",
+        V2_MAX_ROUNDS="2",
+        V2_EMBEDDER_PATH="/m/frida",
+    )
     assert s.v2_rerank_threshold == 0.42 and s.v2_enabled is True
     assert s.legacy_enabled is False and s.v2_max_rounds == 2
     assert s.v2_embedder_path == "/m/frida"
@@ -52,12 +58,15 @@ def test_get_settings_reads_env(monkeypatch):
         get_settings.cache_clear()
 
 
-@pytest.mark.parametrize("legacy,v2,ids,default", [
-    (True, False, [LEGACY_KB_ID], LEGACY_KB_ID),
-    (False, True, [V2_KB_ID], V2_KB_ID),
-    (True, True, [LEGACY_KB_ID, V2_KB_ID], LEGACY_KB_ID),
-    (False, False, [], None),
-])
+@pytest.mark.parametrize(
+    "legacy,v2,ids,default",
+    [
+        (True, False, [LEGACY_KB_ID], LEGACY_KB_ID),
+        (False, True, [V2_KB_ID], V2_KB_ID),
+        (True, True, [LEGACY_KB_ID, V2_KB_ID], LEGACY_KB_ID),
+        (False, False, [], None),
+    ],
+)
 def test_registry(legacy, v2, ids, default):
     s = Settings(_env_file=None, legacy_enabled=legacy, v2_enabled=v2)
     kbs = knowledge_bases(s)
@@ -82,6 +91,7 @@ def test_load_embedder_dtype(monkeypatch):
     def fake_init(self, tokenizer=None, model=None, *, path=None, device="cpu", dtype=None):
         seen["dtype"] = dtype
         seen["device"] = device
+
     monkeypatch.setattr(embed_mod.FridaEmbedder, "__init__", fake_init)
     load_embedder("frida", "p", "cuda", dtype="bf16")
     assert seen["dtype"] == "bf16"
@@ -105,6 +115,7 @@ def test_load_embedder_unknown_dtype():
 
 def test_load_embedder_passes_bf16_to_from_pretrained(monkeypatch):
     import transformers
+
     captured = {}
     base = frida()
 

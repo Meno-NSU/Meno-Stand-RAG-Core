@@ -74,10 +74,7 @@ class QdrantStore:
         next_report = step
         for i in range(0, total, batch):
             rows = np.asarray(matrix[i : i + batch], dtype=np.float32)
-            points = [
-                {"id": start_id + i + j, "vector": row.tolist(), "payload": {}}
-                for j, row in enumerate(rows)
-            ]
+            points = [{"id": start_id + i + j, "vector": row.tolist(), "payload": {}} for j, row in enumerate(rows)]
             self._req("PUT", f"/collections/{name}/points", params={"wait": "true"}, json={"points": points})
             done = min(i + batch, total)
             if progress is not None and (done >= next_report or done == total):
@@ -126,13 +123,18 @@ class QdrantStore:
         out.sort(key=lambda t: -t[1])
         return out
 
-
-    def search_sparse(self, name_or_alias: str, indices: list[int], values: list[float], k: int,
-                      using: str = SPARSE_NAME) -> list[tuple[int, float]]:
+    def search_sparse(
+        self, name_or_alias: str, indices: list[int], values: list[float], k: int, using: str = SPARSE_NAME
+    ) -> list[tuple[int, float]]:
         if not indices or k <= 0:
             return []
-        body = {"query": {"indices": indices, "values": values}, "using": using, "limit": k,
-                "with_payload": False, "with_vector": False}
+        body = {
+            "query": {"indices": indices, "values": values},
+            "using": using,
+            "limit": k,
+            "with_payload": False,
+            "with_vector": False,
+        }
         res = self._req("POST", f"/collections/{name_or_alias}/points/query", json=body)
         out = [(int(p["id"]), float(p["score"])) for p in res["result"]["points"] if p["score"] > 0]
         out.sort(key=lambda t: -t[1])

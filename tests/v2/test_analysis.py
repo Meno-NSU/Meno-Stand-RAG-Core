@@ -23,22 +23,34 @@ class FakeRouter:
 
 def reply(route="nsu", standalone="Q?", subqueries=(), chain=False, focus=""):
     return json.dumps(
-        {"route": route, "standalone_question": standalone,
-         "subqueries": list(subqueries), "chain": chain, "focus": focus},
+        {
+            "route": route,
+            "standalone_question": standalone,
+            "subqueries": list(subqueries),
+            "chain": chain,
+            "focus": focus,
+        },
         ensure_ascii=False,
     )
 
 
 async def run(router, question="Как поступить на ФИТ?", recent=(), summary="", timeout_s=5.0):
-    return await analyze(router, object(), question=question, recent=list(recent),
-                         summary=summary, today=TODAY, timeout_s=timeout_s)
+    return await analyze(
+        router, object(), question=question, recent=list(recent), summary=summary, today=TODAY, timeout_s=timeout_s
+    )
 
 
 async def test_valid_parse():
     r = FakeRouter(reply("nsu", "Сколько баллов нужно на ФИТ?", ["a", "b"], True, "ФИТ"))
     a = await run(r, "а баллы?")
     assert (a.route, a.standalone_question, a.subqueries, a.chain, a.focus, a.fallback) == (
-        "nsu", "Сколько баллов нужно на ФИТ?", ["a", "b"], True, "ФИТ", False)
+        "nsu",
+        "Сколько баллов нужно на ФИТ?",
+        ["a", "b"],
+        True,
+        "ФИТ",
+        False,
+    )
 
 
 async def test_call_kwargs():
@@ -60,7 +72,13 @@ async def test_call_kwargs():
 async def test_invalid_json_fallback():
     a = await run(FakeRouter("{not json"), "вопрос")
     assert (a.route, a.standalone_question, a.subqueries, a.chain, a.focus, a.fallback) == (
-        "nsu", "вопрос", [], False, "", True)
+        "nsu",
+        "вопрос",
+        [],
+        False,
+        "",
+        True,
+    )
 
 
 async def test_truncated_json_fallback():
@@ -105,8 +123,9 @@ async def test_short_off_topic_kept():
 
 
 async def test_fenced_json():
-    a = await run(FakeRouter("```json\n" + reply("general", "Что такое производная?") + "\n```"),
-                  "объясни, что такое производная")
+    a = await run(
+        FakeRouter("```json\n" + reply("general", "Что такое производная?") + "\n```"), "объясни, что такое производная"
+    )
     assert a.route == "general" and not a.fallback
 
 
@@ -133,8 +152,11 @@ async def test_recent_truncation_and_layout():
     msgs = r.calls[0]["messages"]
     assert [m["role"] for m in msgs] == ["system", "user"]
     u = msgs[1]["content"]
-    assert u.index("Сводка диалога: Речь о ФИТ") < u.index("Последние ходы:") < u.index(
-        "Текущая реплика: а на магистратуре?")
+    assert (
+        u.index("Сводка диалога: Речь о ФИТ")
+        < u.index("Последние ходы:")
+        < u.index("Текущая реплика: а на магистратуре?")
+    )
     assert "я" * 600 + "…" in u and "я" * 601 not in u
 
 

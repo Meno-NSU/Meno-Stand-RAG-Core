@@ -5,6 +5,7 @@ of their union -> cache jsonl.
 eval (CPU, instant): replays fusion weights / rerank depth / (N reranked + M BM25 slots) on the cache and
 prints doc-level metrics against the gold doc_ids of the item key facts.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -53,11 +54,20 @@ def collect(args) -> None:
             b = [p for p, _ in bm25.search(q, args.k)]
             union = list(dict.fromkeys(d + b))
             scores = reranker.score(q, [release.chunks[p].index_text for p in union])
-            out.write(json.dumps({
-                "id": it["id"], "gold": _gold(it), "dense": d, "bm25": b,
-                "bge": {str(p): round(float(s), 5) for p, s in zip(union, scores)},
-                "doc": {str(p): release.chunks[p].doc_id for p in union},
-            }, ensure_ascii=False) + "\n")
+            out.write(
+                json.dumps(
+                    {
+                        "id": it["id"],
+                        "gold": _gold(it),
+                        "dense": d,
+                        "bm25": b,
+                        "bge": {str(p): round(float(s), 5) for p, s in zip(union, scores)},
+                        "doc": {str(p): release.chunks[p].doc_id for p in union},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
             out.flush()
             if n % 50 == 0:
                 print(f"{n}/{len(items)}", file=sys.stderr, flush=True)
@@ -83,17 +93,23 @@ def parity(args) -> None:
     ta = tb = 0.0
     for it in items:
         q = (qmap.get(it["id"]) or [it["question"]])[0]
-        t0 = time.perf_counter(); ra = [p for p, _ in a.search(q, 50)]; ta += time.perf_counter() - t0
-        t0 = time.perf_counter(); rb = [p for p, _ in b.search(q, 50)]; tb += time.perf_counter() - t0
+        t0 = time.perf_counter()
+        ra = [p for p, _ in a.search(q, 50)]
+        ta += time.perf_counter() - t0
+        t0 = time.perf_counter()
+        rb = [p for p, _ in b.search(q, 50)]
+        tb += time.perf_counter() - t0
         ov10 += len(set(ra[:10]) & set(rb[:10])) / 10
         ov50 += len(set(ra) & set(rb)) / 50
         gold = set(_gold(it))
         hit_a += any(release.chunks[p].doc_id in gold for p in ra[:10])
         hit_b += any(release.chunks[p].doc_id in gold for p in rb[:10])
     n = len(items)
-    print(f"items {n} | top-10 overlap {ov10 / n:.3f} top-50 overlap {ov50 / n:.3f} | "
-          f"R@10 bm25s {hit_a / n:.3f} qdrant {hit_b / n:.3f} | ms/query bm25s {ta / n * 1000:.1f} "
-          f"qdrant {tb / n * 1000:.1f}")
+    print(
+        f"items {n} | top-10 overlap {ov10 / n:.3f} top-50 overlap {ov50 / n:.3f} | "
+        f"R@10 bm25s {hit_a / n:.3f} qdrant {hit_b / n:.3f} | ms/query bm25s {ta / n * 1000:.1f} "
+        f"qdrant {tb / n * 1000:.1f}"
+    )
 
 
 def wrrf(lists: list[list[int]], weights: list[float], k: int = 60) -> list[int]:
@@ -129,10 +145,14 @@ def evaluate(args) -> None:
     for kc in (50, 100):
         for depth in (20, 40, 60):
             for wb in (0.5, 0.75, 1.0, 1.5, 2.0):
-                print(f"cand/list {kc:3d} depth {depth:2d} w_bm25 {wb:4.2f} | "
-                      + metrics(lambda r: ranked(r, wb, kc, depth)))
-    print("bge over the whole union (ceiling)   | "
-          + metrics(lambda r: sorted(map(int, r["bge"]), key=lambda p: -r["bge"][str(p)])))
+                print(
+                    f"cand/list {kc:3d} depth {depth:2d} w_bm25 {wb:4.2f} | "
+                    + metrics(lambda r: ranked(r, wb, kc, depth))
+                )
+    print(
+        "bge over the whole union (ceiling)   | "
+        + metrics(lambda r: sorted(map(int, r["bge"]), key=lambda p: -r["bge"][str(p)]))
+    )
 
     def mix_recall(wb, kc, depth, total, m):
         hit = 0
@@ -173,8 +193,15 @@ def main(argv=None) -> None:
     pa.add_argument("--qdrant-collection", required=True)
     e = sub.add_parser("eval")
     e.add_argument("--cache", required=True)
-    e.add_argument("--also", nargs=3, type=float, action="append", default=[],
-                   metavar=("W_BM25", "CAND", "DEPTH"), help="extra fusion setting for the slot table")
+    e.add_argument(
+        "--also",
+        nargs=3,
+        type=float,
+        action="append",
+        default=[],
+        metavar=("W_BM25", "CAND", "DEPTH"),
+        help="extra fusion setting for the slot table",
+    )
     args = ap.parse_args(argv)
     if args.cmd == "eval":
         args.also = [(w, int(c), int(d)) for w, c, d in args.also]

@@ -11,8 +11,7 @@ from meno_rag.v2._batching import run_batched
 
 MAX_LENGTH = 512
 QWEN3_INSTRUCT = (
-    "Instruct: Given a question about Novosibirsk State University, "
-    "retrieve passages that answer it\nQuery: "
+    "Instruct: Given a question about Novosibirsk State University, retrieve passages that answer it\nQuery: "
 )
 
 
@@ -79,8 +78,15 @@ class FridaEmbedder(_BaseEmbedder):
     query_prefix = "search_query: "
     doc_prefix = "search_document: "
 
-    def __init__(self, tokenizer: Any = None, model: Any = None, *, path: str | None = None,
-                 device: str = "cpu", dtype: str | None = None) -> None:
+    def __init__(
+        self,
+        tokenizer: Any = None,
+        model: Any = None,
+        *,
+        path: str | None = None,
+        device: str = "cpu",
+        dtype: str | None = None,
+    ) -> None:
         if tokenizer is None:
             from transformers import AutoTokenizer, T5EncoderModel
 
@@ -97,8 +103,15 @@ class Qwen3Embedder(_BaseEmbedder):
     query_prefix = QWEN3_INSTRUCT
     doc_prefix = ""
 
-    def __init__(self, tokenizer: Any = None, model: Any = None, *, path: str | None = None,
-                 device: str = "cpu", dtype: str | None = None) -> None:
+    def __init__(
+        self,
+        tokenizer: Any = None,
+        model: Any = None,
+        *,
+        path: str | None = None,
+        device: str = "cpu",
+        dtype: str | None = None,
+    ) -> None:
         if tokenizer is None:
             from transformers import AutoModel, AutoTokenizer
 

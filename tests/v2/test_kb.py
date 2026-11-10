@@ -16,19 +16,30 @@ def _gz(path: Path, rows: list[dict]) -> None:
 
 def _chunk(cid: str, doc: str, indexed: bool) -> dict:
     return {
-        "chunk_id": cid, "doc_id": doc, "url": f"https://x/{doc}", "title": "T " + doc,
-        "date": None, "doc_type": "news", "tier": "A", "text": "текст " + cid,
-        "index_text": "idx " + cid, "indexed": indexed, "extra": "ignored",
+        "chunk_id": cid,
+        "doc_id": doc,
+        "url": f"https://x/{doc}",
+        "title": "T " + doc,
+        "date": None,
+        "doc_type": "news",
+        "tier": "A",
+        "text": "текст " + cid,
+        "index_text": "idx " + cid,
+        "indexed": indexed,
+        "extra": "ignored",
     }
 
 
 def _make(root: Path, num_docs: int) -> None:
     _gz(root / "chunks/part-00000.jsonl.gz", [_chunk("a", "d1", True), _chunk("b", "d1", False)])
     _gz(root / "chunks/part-00001.jsonl.gz", [_chunk("c", "d2", True)])
-    _gz(root / "docs.jsonl.gz", [
-        {"doc_id": "d1", "title": "T d1", "urls": ["u1"], "tier": "A", "doc_type": "news"},
-        {"doc_id": "d2", "title": "T d2", "urls": ["u2"], "tier": "B", "doc_type": "page"},
-    ])
+    _gz(
+        root / "docs.jsonl.gz",
+        [
+            {"doc_id": "d1", "title": "T d1", "urls": ["u1"], "tier": "A", "doc_type": "news"},
+            {"doc_id": "d2", "title": "T d2", "urls": ["u2"], "tier": "B", "doc_type": "page"},
+        ],
+    )
     p = root / "ragcore/knowledge/bm25/params.index.json"
     p.parent.mkdir(parents=True)
     p.write_text(json.dumps({"num_docs": num_docs}))

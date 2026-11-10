@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Sequence
 
 
-def rrf(lists: Sequence[Sequence[tuple[int, float]]], k: int = 60,
-        limit: int | None = None) -> list[tuple[int, float]]:
+def rrf(lists: Sequence[Sequence[tuple[int, float]]], k: int = 60, limit: int | None = None) -> list[tuple[int, float]]:
     """Fuse ranked lists of (position, score); only the order of each list matters.
 
     A position repeated inside one list contributes once, at its best rank.

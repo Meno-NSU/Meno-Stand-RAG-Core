@@ -78,7 +78,8 @@ def test_split_truncates_huge_latest_turn():
 def test_summary_store_lru_and_key():
     st = SummaryStore(max_entries=2)
     a, b, c = [{"role": "user", "content": "a"}], [{"role": "user", "content": "b"}], [{"role": "user", "content": "c"}]
-    st.put(a, "A"); st.put(b, "B")
+    st.put(a, "A")
+    st.put(b, "B")
     assert st.get(a) == "A"
     st.put(c, "C")
     assert st.get(b) is None and st.get(a) == "A" and st.get(c) == "C"
@@ -182,9 +183,12 @@ def test_recall_stipend_and_unrelated():
 
 def test_recall_ranks_and_orders_chronologically():
     older = [
-        {"role": "user", "content": "стипендия аспирантам размер"}, {"role": "assistant", "content": "ок"},
-        {"role": "user", "content": "общежитие"}, {"role": "assistant", "content": "ок"},
-        {"role": "user", "content": "стипендия"}, {"role": "assistant", "content": "ок"},
+        {"role": "user", "content": "стипендия аспирантам размер"},
+        {"role": "assistant", "content": "ок"},
+        {"role": "user", "content": "общежитие"},
+        {"role": "assistant", "content": "ок"},
+        {"role": "user", "content": "стипендия"},
+        {"role": "assistant", "content": "ок"},
     ]
     got = recall_old_turns(older, "размер стипендии аспирантам и общежитие", k=2)
     assert got[:2] == older[:2]

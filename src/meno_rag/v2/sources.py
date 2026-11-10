@@ -77,8 +77,9 @@ def _iso_date(raw: str | None) -> str:
     return m[1] if m else ""
 
 
-def to_sources(used: list[tuple[Candidate, float]], docs: dict, max_sources: int,
-               source_weight: float = 0.0) -> list[dict]:
+def to_sources(
+    used: list[tuple[Candidate, float]], docs: dict, max_sources: int, source_weight: float = 0.0
+) -> list[dict]:
     """Shown sources, best attributed first (with source_weight: attribution adjusted by the source prior)."""
     has_site = {c.chunk.doc_id for c, _ in used if not _is_social(c.chunk.url)}
     out: list[dict] = []

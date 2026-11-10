@@ -13,9 +13,28 @@ logger = logging.getLogger(__name__)
 
 ROUTES = ("nsu", "general", "meta_dialog", "rework", "chitchat", "off_topic", "prompt_injection")
 NSU_STEMS = (
-    "нгу", "университет", "факультет", "институт", "кафедр", "лаборатор", "общежит",
-    "стипенд", "поступ", "экзамен", "сесси", "расписан", "аспирант", "магистр",
-    "бакалавр", "академгород", "деканат", "ректор", "преподава", "студент", "курс", "ции",
+    "нгу",
+    "университет",
+    "факультет",
+    "институт",
+    "кафедр",
+    "лаборатор",
+    "общежит",
+    "стипенд",
+    "поступ",
+    "экзамен",
+    "сесси",
+    "расписан",
+    "аспирант",
+    "магистр",
+    "бакалавр",
+    "академгород",
+    "деканат",
+    "ректор",
+    "преподава",
+    "студент",
+    "курс",
+    "ции",
 )
 # stems that must be a whole word (otherwise "ции" fires inside "информации", "станции")
 WHOLE_WORD_STEMS = frozenset({"ции"})
@@ -84,7 +103,7 @@ def _build_user_message(question: str, recent: list[dict], summary: str) -> str:
     parts: list[str] = []
     if summary.strip():
         parts.append(f"Сводка диалога: {summary.strip()}")
-    turns = recent[-2 * RECENT_EXCHANGES:]
+    turns = recent[-2 * RECENT_EXCHANGES :]
     if turns:
         lines = ["Последние ходы:"]
         for m in turns:

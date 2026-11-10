@@ -51,8 +51,13 @@ def upsert_hybrid(store: QdrantStore, name: str, arr, chunks, batch: int, worker
             points = []
             for j, (row, (ids, vals)) in enumerate(zip(rows, sparse)):
                 c = chunks[i + j]
-                points.append({"id": i + j, "payload": {"doc_id": c.doc_id, "date": c.date},
-                               "vector": {"": row.tolist(), SPARSE_NAME: {"indices": ids, "values": vals}}})
+                points.append(
+                    {
+                        "id": i + j,
+                        "payload": {"doc_id": c.doc_id, "date": c.date},
+                        "vector": {"": row.tolist(), SPARSE_NAME: {"indices": ids, "values": vals}},
+                    }
+                )
             store.upsert_points(name, points)
             if (i // batch) % 50 == 0:
                 print(f"upserted {min(i + batch, total)}/{total}", file=sys.stderr, flush=True)

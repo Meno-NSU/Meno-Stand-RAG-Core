@@ -21,10 +21,7 @@ def retriever(tmp_path):
     idx = bm25s.BM25()
     idx.index(toks)
     idx.save(str(tmp_path / "bm25"))
-    chunks = [
-        Chunk(f"c{i}", f"d{i}", "", "", None, None, None, t, t)
-        for i, t in enumerate(TEXTS)
-    ]
+    chunks = [Chunk(f"c{i}", f"d{i}", "", "", None, None, None, t, t) for i, t in enumerate(TEXTS)]
     rel = KbRelease(chunks=chunks, by_id={c.chunk_id: i for i, c in enumerate(chunks)})
     return Bm25Retriever(rel, tmp_path / "bm25")
 

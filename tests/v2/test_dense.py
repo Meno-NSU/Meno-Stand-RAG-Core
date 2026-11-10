@@ -78,9 +78,7 @@ def test_meta_n_mismatch_with_file(tmp_path):
 
 def test_build_matrix_chunks_progress(capsys):
     m = rand_matrix(n=30)
-    rel = KbRelease(chunks=[
-        Chunk(f"c{i}", "d", "", "", None, None, None, "t", str(i)) for i in range(30)
-    ])
+    rel = KbRelease(chunks=[Chunk(f"c{i}", "d", "", "", None, None, None, "t", str(i)) for i in range(30)])
     e = FakeEmbedder(m)
     out = build_matrix(e, rel, batch_size=4, part_size=10)
     assert torch.equal(out, m)

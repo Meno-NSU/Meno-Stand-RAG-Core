@@ -26,11 +26,21 @@ FIT = "Факультет информационных технологий го
 STAFF = "Группа 22215: Иванов А. А., Петров Б. Б., Солихов Руслан Махмаднабиевич, Сидоров В. В."
 CHUNKS = {
     "stip": Chunk("stip", "d-stip", "https://nsu.ru/stip", "Стипендии", "2026-09-01", "regulation", None, STIP, STIP),
-    "dorm": Chunk("dorm", "d-dorm", "https://nsu.ru/dorm", "Общежития", "2025-05-10", "housing_or_campus", None,
-                  DORM, DORM),
+    "dorm": Chunk(
+        "dorm", "d-dorm", "https://nsu.ru/dorm", "Общежития", "2025-05-10", "housing_or_campus", None, DORM, DORM
+    ),
     "fit": Chunk("fit", "d-fit", "https://nsu.ru/fit", "ФИТ", None, "faculty_card", None, FIT, FIT),
-    "staff": Chunk("staff", "d-staff", "https://nsu.ru/groups", "Бакалавриат - 4 курс", "2026-09-01", "web_page", None,
-                   STAFF, STAFF),
+    "staff": Chunk(
+        "staff",
+        "d-staff",
+        "https://nsu.ru/groups",
+        "Бакалавриат - 4 курс",
+        "2026-09-01",
+        "web_page",
+        None,
+        STAFF,
+        STAFF,
+    ),
 }
 POS = {cid: i for i, cid in enumerate(CHUNKS)}
 
@@ -55,6 +65,8 @@ def _contexts_from_trace(trace: dict[str, Any]) -> list[dict]:
             }
         )
     return out
+
+
 # ---------------------------------------------------------------------------------------------
 
 
@@ -98,8 +110,9 @@ class FakeSearch:
             best[cid] = max(best.get(cid, sc), sc)
         cands = [Candidate(POS[c], CHUNKS[c], s) for c, s in sorted(best.items(), key=lambda p: -p[1])]
         by_id = {c.chunk.chunk_id: c for c in cands}
-        return SearchResult(cands, coverage, {"embed_dense": 1.0, "bm25": 1.0, "rrf": 0.1, "rerank": 2.0},
-                            [by_id[c] for c, _ in lex])
+        return SearchResult(
+            cands, coverage, {"embed_dense": 1.0, "bm25": 1.0, "rrf": 0.1, "rerank": 2.0}, [by_id[c] for c, _ in lex]
+        )
 
 
 class FakeLLM:
@@ -115,8 +128,9 @@ class FakeLLM:
         if name == "turn_analysis":
             return json.dumps(self.analysis, ensure_ascii=False)
         if name == "search_queries":
-            return json.dumps({"queries": self.reformulations.pop(0) if self.reformulations else []},
-                              ensure_ascii=False)
+            return json.dumps(
+                {"queries": self.reformulations.pop(0) if self.reformulations else []}, ensure_ascii=False
+            )
         if name == "source_check":
             return json.dumps({"keep": [0, 1, 2, 3, 4]})
         if stage == StageName.GENERATION:
@@ -144,14 +158,25 @@ class FakeSchedule:
 
 
 def analysis(route="nsu", standalone="Какой размер стипендии в НГУ?", subqueries=(), chain=False):
-    return {"route": route, "standalone_question": standalone, "subqueries": list(subqueries),
-            "chain": chain, "focus": ""}
+    return {
+        "route": route,
+        "standalone_question": standalone,
+        "subqueries": list(subqueries),
+        "chain": chain,
+        "focus": "",
+    }
 
 
 def make(llm, table=None, schedule=None, **settings):
     s = Settings(_env_file=None, **settings)
-    pipe = V2Pipeline(search=FakeSearch(table or {}), llm_router=llm, settings=s, summary_store=SummaryStore(),
-                      docs={}, schedule=schedule)
+    pipe = V2Pipeline(
+        search=FakeSearch(table or {}),
+        llm_router=llm,
+        settings=s,
+        summary_store=SummaryStore(),
+        docs={},
+        schedule=schedule,
+    )
     pipe.today_fn = lambda: TODAY
     return pipe
 
@@ -166,8 +191,7 @@ async def prepare(pipe, question="сколько платят стипендию
     async def sink(ev):
         events.append(ev)
 
-    out = await pipe.prepare(messages=msgs(question, history), runtime=RUNTIME, stage_sink=sink,
-                             capture_trace=trace)
+    out = await pipe.prepare(messages=msgs(question, history), runtime=RUNTIME, stage_sink=sink, capture_trace=trace)
     return out, events
 
 
@@ -198,8 +222,9 @@ async def test_chitchat_no_search_no_sources():
 
 async def test_nsu_covered_first_round_is_single_round():
     q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q, subqueries=["размер стипендии", "общежития НГУ"]),
-                  answer=f"{STIP} Ещё: {DORM}")
+    llm = FakeLLM(
+        analysis(standalone=q, subqueries=["размер стипендии", "общежития НГУ"]), answer=f"{STIP} Ещё: {DORM}"
+    )
     table = {q: [("stip", 0.8)], "размер стипендии": [("stip", 0.9)], "общежития НГУ": [("dorm", 0.7)]}
     pipe = make(llm, table)
     out, events = await prepare(pipe)
@@ -226,14 +251,23 @@ async def test_nsu_covered_first_round_is_single_round():
 
 async def test_uncovered_subquery_triggers_second_round():
     q = "Стипендия и общежитие ФИТ"
-    llm = FakeLLM(analysis(standalone=q, subqueries=["стипендия ФИТ", "общежитие ФИТ"]),
-                  answer=STIP, reformulations=[["общежития студентов НГУ Пирогова"]])
-    table = {q: [("stip", 0.6)], "стипендия ФИТ": [("stip", 0.9)], "общежитие ФИТ": [("fit", 0.1)],
-             "общежития студентов НГУ Пирогова": [("dorm", 0.8)]}
+    llm = FakeLLM(
+        analysis(standalone=q, subqueries=["стипендия ФИТ", "общежитие ФИТ"]),
+        answer=STIP,
+        reformulations=[["общежития студентов НГУ Пирогова"]],
+    )
+    table = {
+        q: [("stip", 0.6)],
+        "стипендия ФИТ": [("stip", 0.9)],
+        "общежитие ФИТ": [("fit", 0.1)],
+        "общежития студентов НГУ Пирогова": [("dorm", 0.8)],
+    }
     pipe = make(llm, table)
     out, events = await prepare(pipe, q, trace=True)
-    assert [c[0] for c in pipe.search.calls] == [[q, "стипендия ФИТ", "общежитие ФИТ"],
-                                                  ["общежития студентов НГУ Пирогова"]]
+    assert [c[0] for c in pipe.search.calls] == [
+        [q, "стипендия ФИТ", "общежитие ФИТ"],
+        ["общежития студентов НГУ Пирогова"],
+    ]
     reform = next(c for c in llm.calls if c["kind"] == "search_queries")
     assert reform["timeout"] == 15
     prompt = reform["messages"][-1]["content"]
@@ -270,7 +304,8 @@ async def test_general_without_context_appends_note_and_no_sources():
     text = await stream(pipe, out)
     assert text.endswith("\n\n" + GENERAL_NOTE)
     assert (await pipe.generate_text(outcome=out, runtime=RUNTIME)).endswith(
-        "Производная — это скорость изменения функции.\n\n" + GENERAL_NOTE)
+        "Производная — это скорость изменения функции.\n\n" + GENERAL_NOTE
+    )
     assert await pipe.finalize_sources(out, text) == []
 
 
@@ -283,13 +318,19 @@ async def test_trace_is_readable_by_benchmark_runner():
     assert t["search_queries"] == [q]
     ctx = _contexts_from_trace(t)
     assert [(c["chunk_id"], c["rank"]) for c in ctx] == [("stip", 1), ("dorm", 2)]
-    assert ctx[0] == {"chunk_id": "stip", "url": "https://nsu.ru/stip", "title": "Стипендии", "text": STIP,
-                      "rank": 1}
+    assert ctx[0] == {"chunk_id": "stip", "url": "https://nsu.ru/stip", "title": "Стипендии", "text": STIP, "rank": 1}
     fit = next(c for c in t["rerank"]["candidates"] if c["chunk_id"] == "fit")
     assert fit == {"chunk_id": "fit", "rank": 3, "score": 0.1, "kept": False}
     v2 = t["v2"]
-    assert set(v2) == {"route", "rounds", "standalone_question", "subqueries", "coverage", "timings_ms",
-                       "sources_debug"}
+    assert set(v2) == {
+        "route",
+        "rounds",
+        "standalone_question",
+        "subqueries",
+        "coverage",
+        "timings_ms",
+        "sources_debug",
+    }
     assert v2["route"] == "nsu" and v2["rounds"] == 1 and v2["standalone_question"] == q
     assert v2["coverage"] == {q: 0.9}
     assert {"query_rewrite", "retrieval", "rerank", "context_assembly"} <= set(v2["timings_ms"])
@@ -309,8 +350,10 @@ async def test_no_trace_without_capture():
 
 async def test_stage_events_use_only_known_names():
     q = "Стипендия и общежитие"
-    llm = FakeLLM(analysis(standalone=q, subqueries=["стипендия", "общежитие"], chain=True),
-                  reformulations=[["общежития НГУ"], []])
+    llm = FakeLLM(
+        analysis(standalone=q, subqueries=["стипендия", "общежитие"], chain=True),
+        reformulations=[["общежития НГУ"], []],
+    )
     pipe = make(llm, {"стипендия": [("stip", 0.9)], "общежитие": [("fit", 0.1)], "общежития НГУ": [("dorm", 0.2)]})
     _, events = await prepare(pipe, q)
     assert events
@@ -336,9 +379,11 @@ async def test_analysis_failure_falls_back_to_nsu_search():
 # --- schedule ------------------------------------------------------------------------------
 
 BLOCK = ScheduleBlock(
-    title="Расписание группы 26201", url="https://table.nsu.ru/group/26201", date="2026-11-01",
+    title="Расписание группы 26201",
+    url="https://table.nsu.ru/group/26201",
+    date="2026-11-01",
     text="Расписание группы 26201 (ФИТ) на неделю с 02.11 по 08.11, по данным table.nsu.ru на 01.11.2026\n"
-         "Понедельник\n09:00–10:35 · Математический анализ (лекция) · ауд. 1156 · Иванов И. И.",
+    "Понедельник\n09:00–10:35 · Математический анализ (лекция) · ауд. 1156 · Иванов И. И.",
 )
 
 
@@ -365,8 +410,9 @@ async def test_schedule_block_without_intent_does_not_cover():
     pipe = make(FakeLLM(analysis(standalone=q)), {q: [("fit", 0.2)]}, schedule=FakeSchedule([BLOCK]), v2_max_rounds=1)
     await prepare(pipe, q)
     assert len(pipe.search.calls) == 1
-    pipe2 = make(FakeLLM(analysis(standalone=q), reformulations=[["ещё"]]), {q: [("fit", 0.2)]},
-                 schedule=FakeSchedule([BLOCK]))
+    pipe2 = make(
+        FakeLLM(analysis(standalone=q), reformulations=[["ещё"]]), {q: [("fit", 0.2)]}, schedule=FakeSchedule([BLOCK])
+    )
     await prepare(pipe2, q)
     assert len(pipe2.search.calls) == 2  # not marked covered -> reformulation round
 
@@ -388,8 +434,10 @@ async def test_schedule_block_prevents_refusal_and_is_nsu_only():
 async def test_single_system_message_first_with_memory_block():
     history = []
     for i in range(12):
-        history += [("user", f"вопрос номер {i} про общежития " + "а" * 150),
-                    ("assistant", f"ответ номер {i} про общежития " + "б" * 300)]
+        history += [
+            ("user", f"вопрос номер {i} про общежития " + "а" * 150),
+            ("assistant", f"ответ номер {i} про общежития " + "б" * 300),
+        ]
     q = "Какой размер стипендии в НГУ?"
     llm = FakeLLM(analysis(standalone=q))
     pipe = make(llm, {q: [("stip", 0.9)]}, v2_history_budget_tokens=600)
@@ -417,8 +465,10 @@ async def test_prompt_plus_answer_fits_model_context():
     huge = "Расскажите про стипендию " + "очень " * 8000
     history = []
     for i in range(40):
-        history += [("user", f"вопрос номер {i} про общежития " + "а" * 400),
-                    ("assistant", f"ответ номер {i} про общежития " + "б" * 800)]
+        history += [
+            ("user", f"вопрос номер {i} про общежития " + "а" * 400),
+            ("assistant", f"ответ номер {i} про общежития " + "б" * 800),
+        ]
     q = "Какой размер стипендии в НГУ?"
     table = {q: [("stip", 0.9), ("dorm", 0.8), ("fit", 0.7)]}
     for ctx_limit, expect_drop in ((16384, False), (6800, True)):

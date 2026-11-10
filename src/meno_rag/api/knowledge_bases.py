@@ -27,10 +27,7 @@ LEGACY_KB = KnowledgeBase(
 V2_KB = KnowledgeBase(
     id=V2_KB_ID,
     name="База НГУ (ноябрь 2026) · новый поиск",
-    description=(
-        "Выпуск базы за ноябрь 2026 (kb/chunks/v1, f374a7ed) с гибридным поиском "
-        "и кросс-энкодером."
-    ),
+    description=("Выпуск базы за ноябрь 2026 (kb/chunks/v1, f374a7ed) с гибридным поиском и кросс-энкодером."),
     rag_engine_id="v2_rag",
 )
 

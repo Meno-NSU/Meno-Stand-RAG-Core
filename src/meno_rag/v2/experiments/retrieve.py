@@ -1,4 +1,5 @@
 """Retrieval experiment CLI: run one config over benchmark items, write results + stage timings."""
+
 from __future__ import annotations
 
 import argparse
@@ -196,15 +197,25 @@ def main(argv: list[str] | None = None) -> None:
                 ranked = [(ranked[i][0], float(scores[i])) for i in order]
             ranked = ranked[:OUT_K]
             timer.samples.setdefault("total", []).append((time.perf_counter() - t_total) * 1000)
-            out.write(json.dumps({
-                "item_id": iid,
-                "query": query,
-                "ranked": [
-                    {"doc_id": release.chunks[p].doc_id, "url": release.chunks[p].url,
-                     "chunk_id": release.chunks[p].chunk_id, "score": float(s)}
-                    for p, s in ranked
-                ],
-            }, ensure_ascii=False) + "\n")
+            out.write(
+                json.dumps(
+                    {
+                        "item_id": iid,
+                        "query": query,
+                        "ranked": [
+                            {
+                                "doc_id": release.chunks[p].doc_id,
+                                "url": release.chunks[p].url,
+                                "chunk_id": release.chunks[p].chunk_id,
+                                "score": float(s),
+                            }
+                            for p, s in ranked
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
             out.flush()
             done += 1
             if done % PROGRESS_EVERY == 0:

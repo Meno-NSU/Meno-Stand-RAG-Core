@@ -9,6 +9,7 @@ score MODEL (GPU): scores every pair with one reranker -> <out>/<model>.jsonl
 eval: ordering (R@k, MRR inside the top 40), gate (ROC AUC of the top score, answerable vs unanswerable;
   answerable kept / feedback chunks passing at the score that rejects 50% / 80% of unanswerable), ms per pair.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -19,8 +20,10 @@ from pathlib import Path
 
 from meno_rag.v2.experiments.mix import wrrf
 
-QWEN3_TASK = ("Given a question from a student or an applicant of Novosibirsk State University, judge whether the "
-              "document contains information that answers it")
+QWEN3_TASK = (
+    "Given a question from a student or an applicant of Novosibirsk State University, judge whether the "
+    "document contains information that answers it"
+)
 MXBAI_TEMPLATE = (
     "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n"
     "<|im_start|>user\nquery: {q}\ndocument: {d}\nYou are a search relevance expert who evaluates how well documents "
@@ -49,11 +52,20 @@ def prep(args) -> None:
     for r in _jsonl(args.cache):
         top = wrrf([r["dense"][:50], r["bm25"][:50]], [1.0, 1.0])[:40]
         q = (qmap.get(r["id"]) or [questions[r["id"]]])[0]  # the query mix.py collect retrieved with
-        out.append({"set": "answerable", "id": r["id"], "query": q, "gold": r["gold"],
-                    "docs": [release.chunks[p].doc_id for p in top], "texts": [text(p) for p in top]})
+        out.append(
+            {
+                "set": "answerable",
+                "id": r["id"],
+                "query": q,
+                "gold": r["gold"],
+                "docs": [release.chunks[p].doc_id for p in top],
+                "texts": [text(p) for p in top],
+            }
+        )
     bm25 = Bm25Retriever(release, kb / "ragcore" / "knowledge" / "bm25")
-    dense = QdrantRetriever(QdrantStore(args.qdrant_url), args.qdrant_collection,
-                            load_embedder("frida", args.frida, "cuda"))
+    dense = QdrantRetriever(
+        QdrantStore(args.qdrant_url), args.qdrant_collection, load_embedder("frida", args.frida, "cuda")
+    )
     for it in _jsonl(args.bench_items):
         if it.get("answerable") or it.get("history"):
             continue
@@ -64,8 +76,14 @@ def prep(args) -> None:
     for r in _jsonl(args.fb_records):
         ids = [c["chunk_id"] for c in r["contexts"] if c["chunk_id"] in release.by_id]
         if ids:
-            out.append({"set": "feedback", "id": r["item_id"], "query": fb[r["item_id"]],
-                        "texts": [release.chunks[release.by_id[c]].index_text for c in ids]})
+            out.append(
+                {
+                    "set": "feedback",
+                    "id": r["item_id"],
+                    "query": fb[r["item_id"]],
+                    "texts": [release.chunks[release.by_id[c]].index_text for c in ids],
+                }
+            )
     with open(args.pairs, "w", encoding="utf-8") as f:
         for row in out:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -86,8 +104,14 @@ class _Seq:
     def score(self, q, texts):
         out = []
         for i in range(0, len(texts), self.batch):
-            enc = self.tok([q] * len(texts[i:i + self.batch]), texts[i:i + self.batch], truncation="only_second",
-                           max_length=self.max_length, padding=True, return_tensors="pt").to("cuda")
+            enc = self.tok(
+                [q] * len(texts[i : i + self.batch]),
+                texts[i : i + self.batch],
+                truncation="only_second",
+                max_length=self.max_length,
+                padding=True,
+                return_tensors="pt",
+            ).to("cuda")
             with self.torch.no_grad():
                 out += self.model(**enc).logits[:, 0].float().cpu().tolist()
         return out
@@ -115,8 +139,9 @@ class _Mxbai:
         prompts = [MXBAI_TEMPLATE.format(q=q, d=self._cut(t)) for t in texts]
         out = []
         for i in range(0, len(prompts), self.batch):
-            enc = self.tok(prompts[i:i + self.batch], padding=True, return_tensors="pt",
-                           add_special_tokens=False).to("cuda")
+            enc = self.tok(prompts[i : i + self.batch], padding=True, return_tensors="pt", add_special_tokens=False).to(
+                "cuda"
+            )
             with self.torch.no_grad():
                 last = self.model(**enc, logits_to_keep=1).logits[:, -1, :].float()
             out += (last[:, self.yes] - last[:, self.no]).cpu().tolist()
@@ -133,8 +158,9 @@ def _qwen3_last_token(r):
         budget = max(1, max_length - len(r.prefix_ids) - len(r.suffix_ids))
         bodies = [f"<Instruct>: {rerank.QWEN3_INSTRUCTION}\n<Query>: {query}\n<Document>: {t}" for t in texts]
         body_ids = r.tokenizer(bodies, add_special_tokens=False, truncation=True, max_length=budget)["input_ids"]
-        enc = r.tokenizer.pad({"input_ids": [r.prefix_ids + b + r.suffix_ids for b in body_ids]}, padding=True,
-                              return_tensors="pt")
+        enc = r.tokenizer.pad(
+            {"input_ids": [r.prefix_ids + b + r.suffix_ids for b in body_ids]}, padding=True, return_tensors="pt"
+        )
         enc = {k: v.to(r.device) for k, v in enc.items()}
         with torch.inference_mode():
             logits = r.model(**enc, logits_to_keep=1).logits[:, -1, :].float()
@@ -149,9 +175,11 @@ def load(name, path):
     """-> score(query, texts) -> list[float]"""
     if name == "bge":
         from meno_rag.v2.rerank import load_reranker
+
         return load_reranker("bge", path, "cuda").score
     if name == "qwen3":
         from meno_rag.v2 import rerank
+
         rerank.QWEN3_INSTRUCTION = QWEN3_TASK
         return _qwen3_last_token(rerank.load_reranker("qwen3", path, "cuda"))
     if name.startswith("mxbai"):
@@ -187,8 +215,10 @@ def _auc(pos, neg):
 
 def evaluate(args) -> None:
     rows = {(r["set"], r["id"]): r for r in _jsonl(args.pairs)}
-    print(f"{'model':12s} {'R@1':>5s} {'R@3':>5s} {'R@5':>5s} {'R@10':>5s} {'MRR':>5s} | {'AUC':>5s} | "
-          "rej50%: ans kept / fb pass | rej80%: ans kept / fb pass | ms/pair")
+    print(
+        f"{'model':12s} {'R@1':>5s} {'R@3':>5s} {'R@5':>5s} {'R@10':>5s} {'MRR':>5s} | {'AUC':>5s} | "
+        "rej50%: ans kept / fb pass | rej80%: ans kept / fb pass | ms/pair"
+    )
     for name in args.models:
         p = Path(args.out) / f"{name}.jsonl"
         if not p.exists():
@@ -213,19 +243,32 @@ def evaluate(args) -> None:
             cells.append(f"{sum(x >= thr for x in top_a) / len(top_a):.2f} / {sum(x >= thr for x in fb) / len(fb):.2f}")
         t = Path(args.out) / f"{name}.timing.json"
         ms = json.loads(t.read_text())["ms_per_pair"] if t.exists() else float("nan")
-        print(f"{name:12s} {at(1):.3f} {at(3):.3f} {at(5):.3f} {at(10):.3f} {mrr:.3f} | "
-              f"{_auc(top_a, top_u):.3f} |       {cells[0]}       |       {cells[1]}       | {ms:.1f}")
-    print(f"(answerable {len([k for k in rows if k[0] == 'answerable'])}, unanswerable "
-          f"{len([k for k in rows if k[0] == 'unanswerable'])}, feedback chunks from "
-          f"{len([k for k in rows if k[0] == 'feedback'])} questions)")
+        print(
+            f"{name:12s} {at(1):.3f} {at(3):.3f} {at(5):.3f} {at(10):.3f} {mrr:.3f} | "
+            f"{_auc(top_a, top_u):.3f} |       {cells[0]}       |       {cells[1]}       | {ms:.1f}"
+        )
+    print(
+        f"(answerable {len([k for k in rows if k[0] == 'answerable'])}, unanswerable "
+        f"{len([k for k in rows if k[0] == 'unanswerable'])}, feedback chunks from "
+        f"{len([k for k in rows if k[0] == 'feedback'])} questions)"
+    )
 
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="meno-rag-v2-rerank-pilot", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("prep")
-    for a in ("--kb", "--cache", "--items", "--queries", "--bench-items", "--fb-items", "--fb-records", "--pairs",
-              "--frida"):
+    for a in (
+        "--kb",
+        "--cache",
+        "--items",
+        "--queries",
+        "--bench-items",
+        "--fb-items",
+        "--fb-records",
+        "--pairs",
+        "--frida",
+    ):
         p.add_argument(a, required=True)
     p.add_argument("--qdrant-url", default="http://127.0.0.1:6433")
     p.add_argument("--qdrant-collection", default="nsu_kb_current")

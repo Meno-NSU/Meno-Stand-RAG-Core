@@ -12,12 +12,10 @@ from meno_rag.v2._batching import run_batched
 from meno_rag.v2.embed import _dtype, _to_device
 
 MAX_LENGTH = 512
-QWEN3_INSTRUCTION = (
-    "Given a question about Novosibirsk State University, retrieve passages that answer it"
-)
+QWEN3_INSTRUCTION = "Given a question about Novosibirsk State University, retrieve passages that answer it"
 QWEN3_PREFIX = (
     "<|im_start|>system\nJudge whether the Document meets the requirements based on the "
-    "Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\"."
+    'Query and the Instruct provided. Note that the answer can only be "yes" or "no".'
     "<|im_end|>\n<|im_start|>user\n"
 )
 QWEN3_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -38,8 +36,9 @@ MXBAI_MAX_DOC_TOKENS = 800
 
 
 class Reranker(Protocol):
-    def score(self, query: str, texts: list[str], batch_size: int = 32,
-              max_length: int = MAX_LENGTH) -> list[float]: ...
+    def score(
+        self, query: str, texts: list[str], batch_size: int = 32, max_length: int = MAX_LENGTH
+    ) -> list[float]: ...
 
 
 class _BaseReranker:
@@ -58,19 +57,17 @@ class _BaseReranker:
     def _score_batch(self, query: str, texts: list[str], max_length: int) -> list[float]:
         raise NotImplementedError
 
-    def score(self, query: str, texts: list[str], batch_size: int = 32,
-              max_length: int = MAX_LENGTH) -> list[float]:
+    def score(self, query: str, texts: list[str], batch_size: int = 32, max_length: int = MAX_LENGTH) -> list[float]:
         if not texts:
             return []
-        parts = run_batched(
-            texts, lambda batch: self._score_batch(query, list(batch), max_length), batch_size
-        )
+        parts = run_batched(texts, lambda batch: self._score_batch(query, list(batch), max_length), batch_size)
         return [s for part in parts for s in part]
 
 
 class BgeReranker(_BaseReranker):
-    def __init__(self, tokenizer: Any = None, model: Any = None, *, path: str | None = None,
-                 device: str = "cpu") -> None:
+    def __init__(
+        self, tokenizer: Any = None, model: Any = None, *, path: str | None = None, device: str = "cpu"
+    ) -> None:
         if tokenizer is None:
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
@@ -94,15 +91,14 @@ class BgeReranker(_BaseReranker):
 
 
 class Qwen3Reranker(_BaseReranker):
-    def __init__(self, tokenizer: Any = None, model: Any = None, *, path: str | None = None,
-                 device: str = "cpu") -> None:
+    def __init__(
+        self, tokenizer: Any = None, model: Any = None, *, path: str | None = None, device: str = "cpu"
+    ) -> None:
         if tokenizer is None:
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(path, padding_side="left")
-            model = _to_device(
-                AutoModelForCausalLM.from_pretrained(path, dtype=_dtype(device)), device
-            )
+            model = _to_device(AutoModelForCausalLM.from_pretrained(path, dtype=_dtype(device)), device)
         super().__init__(tokenizer, model)
         self.prefix_ids = tokenizer(QWEN3_PREFIX, add_special_tokens=False)["input_ids"]
         self.suffix_ids = tokenizer(QWEN3_SUFFIX, add_special_tokens=False)["input_ids"]
@@ -111,12 +107,8 @@ class Qwen3Reranker(_BaseReranker):
 
     def _score_batch(self, query, texts, max_length):
         budget = max(1, max_length - len(self.prefix_ids) - len(self.suffix_ids))
-        bodies = [
-            f"<Instruct>: {QWEN3_INSTRUCTION}\n<Query>: {query}\n<Document>: {t}" for t in texts
-        ]
-        body_ids = self.tokenizer(
-            bodies, add_special_tokens=False, truncation=True, max_length=budget
-        )["input_ids"]
+        bodies = [f"<Instruct>: {QWEN3_INSTRUCTION}\n<Query>: {query}\n<Document>: {t}" for t in texts]
+        body_ids = self.tokenizer(bodies, add_special_tokens=False, truncation=True, max_length=budget)["input_ids"]
         ids = [self.prefix_ids + b + self.suffix_ids for b in body_ids]
         enc = self.tokenizer.pad({"input_ids": ids}, padding=True, return_tensors="pt")
         enc = {k: v.to(self.device) for k, v in enc.items()}
@@ -131,8 +123,16 @@ class MxbaiReranker(_BaseReranker):
     model's prompt, mapped to [0, 1] as sigmoid((raw - MXBAI_CENTER) / MXBAI_SCALE). max_length counts document
     tokens only (the prompt and the query come on top)."""
 
-    def __init__(self, tokenizer: Any = None, model: Any = None, *, path: str | None = None,
-                 device: str = "cpu", true_id: int = 16, false_id: int = 15) -> None:
+    def __init__(
+        self,
+        tokenizer: Any = None,
+        model: Any = None,
+        *,
+        path: str | None = None,
+        device: str = "cpu",
+        true_id: int = 16,
+        false_id: int = 15,
+    ) -> None:
         if tokenizer is None:
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -145,8 +145,9 @@ class MxbaiReranker(_BaseReranker):
         super().__init__(tokenizer, model)
         self.true_id, self.false_id = true_id, false_id
 
-    def score(self, query: str, texts: list[str], batch_size: int = 8,
-              max_length: int = MXBAI_MAX_DOC_TOKENS) -> list[float]:
+    def score(
+        self, query: str, texts: list[str], batch_size: int = 8, max_length: int = MXBAI_MAX_DOC_TOKENS
+    ) -> list[float]:
         return super().score(query, texts, batch_size, max_length)
 
     def _score_batch(self, query, texts, max_length):

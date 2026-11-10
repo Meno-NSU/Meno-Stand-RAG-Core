@@ -1,4 +1,5 @@
 """Loader for a pinned knowledge-base release (gzip JSONL chunks + docs)."""
+
 from __future__ import annotations
 
 import gzip
@@ -60,15 +61,9 @@ def load_release(root: Path) -> KbRelease:
     docs_path = root / "docs.jsonl.gz"
     if docs_path.exists():
         for d in _iter_jsonl_gz(docs_path):
-            rel.docs[d["doc_id"]] = {
-                k: d.get(k) for k in ("title", "urls", "tier", "doc_type")
-            }
-    params = json.loads(
-        (root / "ragcore/knowledge/bm25/params.index.json").read_text(encoding="utf-8")
-    )
+            rel.docs[d["doc_id"]] = {k: d.get(k) for k in ("title", "urls", "tier", "doc_type")}
+    params = json.loads((root / "ragcore/knowledge/bm25/params.index.json").read_text(encoding="utf-8"))
     expected = params["num_docs"]
     if len(rel.chunks) != expected:
-        raise ValueError(
-            f"indexed chunks {len(rel.chunks)} != params.index.json num_docs {expected}"
-        )
+        raise ValueError(f"indexed chunks {len(rel.chunks)} != params.index.json num_docs {expected}")
     return rel

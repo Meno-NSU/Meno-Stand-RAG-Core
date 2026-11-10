@@ -18,8 +18,22 @@ from meno_rag.v2.rerank import (
     load_reranker,
 )
 
-WORDS = ["hello", "world", "foo", "bar", "baz", "yes", "no", "question", "answer",
-         "<|im_start|>system", "Judge", "<Instruct>:", "<Query>:", "<Document>:"]
+WORDS = [
+    "hello",
+    "world",
+    "foo",
+    "bar",
+    "baz",
+    "yes",
+    "no",
+    "question",
+    "answer",
+    "<|im_start|>system",
+    "Judge",
+    "<Instruct>:",
+    "<Query>:",
+    "<Document>:",
+]
 
 
 def make_tok(padding_side="right"):
@@ -31,21 +45,32 @@ def make_tok(padding_side="right"):
     from tokenizers.processors import TemplateProcessing
 
     t.post_processor = TemplateProcessing(
-        single="[CLS] $A [SEP]", pair="[CLS] $A [SEP] $B [SEP]",
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B [SEP]",
         special_tokens=[("[CLS]", 2), ("[SEP]", 3)],
     )
     return PreTrainedTokenizerFast(
-        tokenizer_object=t, pad_token="[PAD]", unk_token="[UNK]",
-        cls_token="[CLS]", sep_token="[SEP]", padding_side=padding_side,
+        tokenizer_object=t,
+        pad_token="[PAD]",
+        unk_token="[UNK]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+        padding_side=padding_side,
     )
 
 
 def bge():
     tok = make_tok()
     torch.manual_seed(0)
-    cfg = BertConfig(vocab_size=len(tok), hidden_size=16, num_hidden_layers=1,
-                     num_attention_heads=2, intermediate_size=32, num_labels=1,
-                     max_position_embeddings=1100)
+    cfg = BertConfig(
+        vocab_size=len(tok),
+        hidden_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=32,
+        num_labels=1,
+        max_position_embeddings=1100,
+    )
     return BgeReranker.from_objects(tok, AutoModelForSequenceClassification.from_config(cfg).eval())
 
 
@@ -67,9 +92,16 @@ class SpyModel:
 def qwen(spy=False):
     tok = make_tok("left")
     torch.manual_seed(0)
-    cfg = Qwen3Config(vocab_size=len(tok), hidden_size=32, intermediate_size=64,
-                      num_hidden_layers=1, num_attention_heads=2,
-                      num_key_value_heads=2, head_dim=16, max_position_embeddings=1100)
+    cfg = Qwen3Config(
+        vocab_size=len(tok),
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=1100,
+    )
     model = AutoModelForCausalLM.from_config(cfg).eval()
     if spy:
         model = SpyModel(model)
@@ -79,9 +111,16 @@ def qwen(spy=False):
 def mxbai(spy=False):
     tok = make_tok("left")
     torch.manual_seed(0)
-    cfg = Qwen3Config(vocab_size=len(tok), hidden_size=32, intermediate_size=64,
-                      num_hidden_layers=1, num_attention_heads=2,
-                      num_key_value_heads=2, head_dim=16, max_position_embeddings=2048)
+    cfg = Qwen3Config(
+        vocab_size=len(tok),
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=2048,
+    )
     model = AutoModelForCausalLM.from_config(cfg).eval()
     if spy:
         model = SpyModel(model)
@@ -93,8 +132,9 @@ def test_mxbai_scores_are_calibrated_logit_differences():
     r.true_id, r.false_id = 5, 6
     out = r.score("question", ["hello world", "foo bar"])
     assert len(out) == 2 and all(0.0 <= x <= 1.0 for x in out)
-    enc = r.tokenizer([MXBAI_TEMPLATE.format(query="question", document="hello world")],
-                      return_tensors="pt", add_special_tokens=False)
+    enc = r.tokenizer(
+        [MXBAI_TEMPLATE.format(query="question", document="hello world")], return_tensors="pt", add_special_tokens=False
+    )
     with torch.inference_mode():
         last = r.model(**enc).logits[0, -1].float()
     raw = float(last[5] - last[6])
@@ -107,7 +147,7 @@ def test_mxbai_truncates_the_document_only_and_ends_with_the_prompt():
     ids = r.model.inputs[0]
     tail = r.tokenizer("Relevance:<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)["input_ids"]
     for row in ids:  # left padding: every sequence ends with the model's prompt tail
-        assert row[-len(tail):].tolist() == tail
+        assert row[-len(tail) :].tolist() == tail
     foo = r.tokenizer("foo", add_special_tokens=False)["input_ids"][0]
     assert int((ids[0] == foo).sum()) == 10  # the document cut to max_length tokens
 
@@ -141,13 +181,14 @@ def test_bge_long_query_falls_back():
 
 def test_qwen_input_ends_with_suffix_and_respects_max_length():
     r = qwen(spy=True)
-    suffix = r.tokenizer("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-                         add_special_tokens=False)["input_ids"]
+    suffix = r.tokenizer("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", add_special_tokens=False)[
+        "input_ids"
+    ]
     r.score("question", ["foo " * 800, "hello"], max_length=64, batch_size=8)
     ids = r.model.inputs[0]
     assert ids.shape[1] <= 64
     for row in ids:  # left padding: the sequence ends with the suffix
-        assert row[-len(suffix):].tolist() == suffix
+        assert row[-len(suffix) :].tolist() == suffix
 
 
 def test_qwen_yes_no_ids_used():

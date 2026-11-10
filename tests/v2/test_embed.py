@@ -11,9 +11,29 @@ from transformers import (
 
 from meno_rag.v2.embed import FridaEmbedder, Qwen3Embedder, load_embedder
 
-WORDS = ["search_query:", "search_document:", "Instruct:", "Query:", "hello", "world",
-         "Given", "a", "question", "about", "Novosibirsk", "State", "University,",
-         "retrieve", "passages", "that", "answer", "it", "foo", "bar", "baz"]
+WORDS = [
+    "search_query:",
+    "search_document:",
+    "Instruct:",
+    "Query:",
+    "hello",
+    "world",
+    "Given",
+    "a",
+    "question",
+    "about",
+    "Novosibirsk",
+    "State",
+    "University,",
+    "retrieve",
+    "passages",
+    "that",
+    "answer",
+    "it",
+    "foo",
+    "bar",
+    "baz",
+]
 
 
 def make_tok(padding_side="right"):
@@ -23,8 +43,11 @@ def make_tok(padding_side="right"):
     t = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
     t.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     return PreTrainedTokenizerFast(
-        tokenizer_object=t, pad_token="[PAD]", unk_token="[UNK]",
-        eos_token="</s>", padding_side=padding_side,
+        tokenizer_object=t,
+        pad_token="[PAD]",
+        unk_token="[UNK]",
+        eos_token="</s>",
+        padding_side=padding_side,
     )
 
 
@@ -47,9 +70,15 @@ def tiny_t5(vocab):
 
 def tiny_qwen(vocab):
     torch.manual_seed(0)
-    cfg = Qwen3Config(vocab_size=vocab, hidden_size=32, intermediate_size=64,
-                      num_hidden_layers=1, num_attention_heads=2,
-                      num_key_value_heads=2, head_dim=16)
+    cfg = Qwen3Config(
+        vocab_size=vocab,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=16,
+    )
     return AutoModel.from_config(cfg).eval()
 
 
@@ -68,8 +97,10 @@ def qwen(spy=False, side="left"):
 @pytest.mark.parametrize("make", [frida, qwen])
 def test_shape_dtype_norm(make):
     e = make()
-    for out in (e.encode_queries(["hello world", "foo"]),
-                e.encode_docs(["hello world", "foo bar baz", "a"], batch_size=2)):
+    for out in (
+        e.encode_queries(["hello world", "foo"]),
+        e.encode_docs(["hello world", "foo bar baz", "a"], batch_size=2),
+    ):
         assert out.dtype == torch.float16
         assert out.shape[1] == e.dim == 32
         norms = out.float().norm(dim=1)
@@ -89,8 +120,7 @@ def test_qwen_prefixes():
     e.encode_queries(["hello"])
     e.encode_docs(["world"])
     assert e.tokenizer.calls[0] == [
-        "Instruct: Given a question about Novosibirsk State University, "
-        "retrieve passages that answer it\nQuery: hello"
+        "Instruct: Given a question about Novosibirsk State University, retrieve passages that answer it\nQuery: hello"
     ]
     assert e.tokenizer.calls[1] == ["world"]
 

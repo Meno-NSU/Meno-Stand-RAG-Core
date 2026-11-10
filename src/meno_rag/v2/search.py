@@ -1,4 +1,5 @@
 """Async hybrid search (dense + BM25 -> RRF -> cross-encoder) with all heavy work on one thread."""
+
 from __future__ import annotations
 
 import asyncio
@@ -53,21 +54,36 @@ class SearchService:
         return await loop.run_in_executor(self._executor, fn, *args)
 
     async def search(
-        self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1,
-        lexical_extra: tuple[str, ...] = (), lexical_tokens: tuple[str, ...] = (),
+        self,
+        queries: list[str],
+        rerank_queries: list[str],
+        lexical_top: int = 0,
+        lexical_for: int = 1,
+        lexical_extra: tuple[str, ...] = (),
+        lexical_tokens: tuple[str, ...] = (),
     ) -> SearchResult:
         """lexical_top > 0 also returns the top BM25 hits of the first lexical_for queries, scored even when
         RRF dropped them. lexical_extra: index tokens added to the first query's BM25 search.
         lexical_tokens: the slots come instead from a BM25 search of these index tokens alone (e.g. a rare
         name and its inflection forms, which the question's other words would outweigh)."""
         return await self.run_gpu(
-            self._search_sync, list(queries), list(rerank_queries), lexical_top, lexical_for, tuple(lexical_extra),
+            self._search_sync,
+            list(queries),
+            list(rerank_queries),
+            lexical_top,
+            lexical_for,
+            tuple(lexical_extra),
             tuple(lexical_tokens),
         )
 
     def _search_sync(
-        self, queries: list[str], rerank_queries: list[str], lexical_top: int = 0, lexical_for: int = 1,
-        lexical_extra: tuple[str, ...] = (), lexical_tokens: tuple[str, ...] = (),
+        self,
+        queries: list[str],
+        rerank_queries: list[str],
+        lexical_top: int = 0,
+        lexical_for: int = 1,
+        lexical_extra: tuple[str, ...] = (),
+        lexical_tokens: tuple[str, ...] = (),
     ) -> SearchResult:
         s = self.settings
         t = {"embed_dense": 0.0, "bm25": 0.0, "rrf": 0.0, "rerank": 0.0}
@@ -149,8 +165,12 @@ def load_search_service(settings) -> SearchService:
         ("V2_EMBEDDER_PATH", settings.v2_embedder_path),
         ("V2_RERANKER_PATH", settings.v2_reranker_path),
     ]
-    required.insert(1, ("V2_MATRIX_DIR", settings.v2_matrix_dir) if backend == "matrix"
-                    else ("V2_QDRANT_COLLECTION", settings.v2_qdrant_collection))
+    required.insert(
+        1,
+        ("V2_MATRIX_DIR", settings.v2_matrix_dir)
+        if backend == "matrix"
+        else ("V2_QDRANT_COLLECTION", settings.v2_qdrant_collection),
+    )
     for env, val in required:
         if not val or not str(val).strip():
             raise ValueError(f"{env} is empty: required to load the v2 search service")

@@ -196,7 +196,16 @@ def test_v2_sse_order(make_client):
     c, _ = make_client()
     ev = _events(_post(c, kb=V2_KB_ID, stream=True))
     assert ev == [
-        "stage", "role", "stage", "token", "token", "stage", "sources", "finish", "summary", "[DONE]",
+        "stage",
+        "role",
+        "stage",
+        "token",
+        "token",
+        "stage",
+        "sources",
+        "finish",
+        "summary",
+        "[DONE]",
     ]
 
 
@@ -204,7 +213,16 @@ def test_legacy_sse_order_unchanged(make_client):
     c, _ = make_client()
     ev = _events(_post(c, stream=True))
     assert ev == [
-        "stage", "sources", "role", "stage", "token", "token", "stage", "finish", "summary", "[DONE]",
+        "stage",
+        "sources",
+        "role",
+        "stage",
+        "token",
+        "token",
+        "stage",
+        "finish",
+        "summary",
+        "[DONE]",
     ]
 
 

@@ -7,8 +7,7 @@ from typing import Any, Callable, Sequence
 import torch
 
 
-def run_batched(items: Sequence[Any], fn: Callable[[Sequence[Any]], Any],
-                batch_size: int) -> list[Any]:
+def run_batched(items: Sequence[Any], fn: Callable[[Sequence[Any]], Any], batch_size: int) -> list[Any]:
     """Apply ``fn`` to consecutive slices of ``items``; return per-batch results.
 
     On ``torch.cuda.OutOfMemoryError`` the batch size is halved and the same

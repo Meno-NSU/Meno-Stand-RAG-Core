@@ -10,8 +10,7 @@ def _release(n=3):
     rel = KbRelease()
     for i in range(n):
         rel.by_id[f"c{i}"] = i
-        rel.chunks.append(Chunk(f"c{i}", f"d{i}", f"http://u/{i}", "t", None, None, None,
-                                f"text{i}", f"idx{i}"))
+        rel.chunks.append(Chunk(f"c{i}", f"d{i}", f"http://u/{i}", "t", None, None, None, f"text{i}", f"idx{i}"))
     return rel
 
 
@@ -28,6 +27,7 @@ class FakeBm25:
 class FakeEmb:
     def encode_queries(self, texts):
         import torch
+
         return torch.zeros((1, 2))
 
 
@@ -56,18 +56,39 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "load_matrix", lambda p, d, expected_n=None: object())
     monkeypatch.setattr(R, "load_reranker", lambda n, p, d: FakeReranker())
     items = tmp_path / "items.jsonl"
-    items.write_text("\n".join(json.dumps({"id": f"i{i}", "question": f"q{i} x"})
-                               for i in range(3)) + "\n", encoding="utf-8")
+    items.write_text(
+        "\n".join(json.dumps({"id": f"i{i}", "question": f"q{i} x"}) for i in range(3)) + "\n", encoding="utf-8"
+    )
     queries = tmp_path / "queries.jsonl"
-    queries.write_text(json.dumps({"item_key": "i0", "queries": ["rewritten"]}) + "\n",
-                       encoding="utf-8")
+    queries.write_text(json.dumps({"item_key": "i0", "queries": ["rewritten"]}) + "\n", encoding="utf-8")
 
     def run(config, *extra):
         out, tim = tmp_path / "out.jsonl", tmp_path / "t.json"
-        R.main(["--kb", str(tmp_path), "--items", str(items), "--queries", str(queries),
-                "--config", config, "--out", str(out), "--timings", str(tim), "--device", "cpu",
-                "--model-path", "frida=/m", "--model-path", "bge=/b",
-                "--matrix-dir", "frida=/x", *extra])
+        R.main(
+            [
+                "--kb",
+                str(tmp_path),
+                "--items",
+                str(items),
+                "--queries",
+                str(queries),
+                "--config",
+                config,
+                "--out",
+                str(out),
+                "--timings",
+                str(tim),
+                "--device",
+                "cpu",
+                "--model-path",
+                "frida=/m",
+                "--model-path",
+                "bge=/b",
+                "--matrix-dir",
+                "frida=/x",
+                *extra,
+            ]
+        )
         rows = [json.loads(line) for line in out.read_text(encoding="utf-8").split("\n") if line]
         return rows, json.loads(tim.read_text())
 
@@ -120,8 +141,7 @@ def test_limit(env):
     assert len(rows) == 2 and tim["n_items"] == 2
 
 
-@pytest.mark.parametrize("cfg", ["bm25", "dense:frida", "hybrid:qwen3",
-                                 "hybrid:frida+rerank:bge"])
+@pytest.mark.parametrize("cfg", ["bm25", "dense:frida", "hybrid:qwen3", "hybrid:frida+rerank:bge"])
 def test_parse_ok(cfg):
     assert R.parse_config(cfg).name == cfg
 
@@ -134,6 +154,5 @@ def test_parse_bad(cfg):
 
 def test_bad_config_exit_2(tmp_path):
     with pytest.raises(SystemExit) as e:
-        R.main(["--kb", ".", "--items", "i", "--queries", "q", "--config", "nope",
-                "--out", "o", "--timings", "t"])
+        R.main(["--kb", ".", "--items", "i", "--queries", "q", "--config", "nope", "--out", "o", "--timings", "t"])
     assert e.value.code == 2

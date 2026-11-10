@@ -107,9 +107,13 @@ def test_kb_list_hides_v2_by_default(make_client, monkeypatch):
 def test_arena_accepts_virtual_ids(make_client):
     c, _ = _client(make_client)
     vote = {
-        "model_a": "meno-lite", "kb_a": LEGACY_KB_ID,
-        "model_b": "meno-lite@menon-1.1", "kb_b": V2_KB_ID,
-        "winner": "b", "question": "q", "session_id": "s1",
+        "model_a": "meno-lite",
+        "kb_a": LEGACY_KB_ID,
+        "model_b": "meno-lite@menon-1.1",
+        "kb_b": V2_KB_ID,
+        "winner": "b",
+        "question": "q",
+        "session_id": "s1",
     }
     r = c.post("/v1/arena/vote", json=vote)
     assert r.status_code in (200, 201), r.text

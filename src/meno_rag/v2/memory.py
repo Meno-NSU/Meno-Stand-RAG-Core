@@ -25,9 +25,7 @@ FALLBACK_USER_CHARS = 200
 SUMMARY_CACHE_SIZE = 2048
 MIN_STEM_LEN = 5
 CHUNK_FACTOR = 4
-_STOP_WORDS = (
-    "говор напомн начал раньш ранее вчер спрашива сказа расскаж упомина"
-).split()
+_STOP_WORDS = ("говор напомн начал раньш ранее вчер спрашива сказа расскаж упомина").split()
 _stemmer = SnowballStemmer("russian")
 _STOP_STEMS = frozenset(_STOP_WORDS) | {_stemmer.stem(w) for w in _STOP_WORDS}
 
@@ -164,9 +162,7 @@ async def summarize(
 
     Returns (text, ok); on failure text is a deterministic fallback and ok is False.
     """
-    transcript = "\n".join(
-        f"{'Пользователь' if m['role'] == 'user' else 'Ассистент'}: {m['content']}" for m in older
-    )
+    transcript = "\n".join(f"{'Пользователь' if m['role'] == 'user' else 'Ассистент'}: {m['content']}" for m in older)
     parts = []
     if previous_summary:
         parts.append(f"Прежняя сводка:\n{previous_summary}")

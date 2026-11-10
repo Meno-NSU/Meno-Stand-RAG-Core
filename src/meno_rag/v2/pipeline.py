@@ -206,8 +206,13 @@ class V2Pipeline:
             StageName.QUERY_REWRITE,
             StageStatus.COMPLETED,
             _ms(t0),
-            {"route": an.route, "standalone_question": an.standalone_question, "subqueries": an.subqueries,
-             "chain": an.chain, "fallback": an.fallback},
+            {
+                "route": an.route,
+                "standalone_question": an.standalone_question,
+                "subqueries": an.subqueries,
+                "chain": an.chain,
+                "fallback": an.fallback,
+            },
         )
 
         searched = an.route in SEARCH_ROUTES
@@ -225,7 +230,11 @@ class V2Pipeline:
             await emit(StageName.CONTEXT_ASSEMBLY, StageStatus.STARTED)
             t2 = time.perf_counter()
             context, kept = assemble_context(
-                ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, s.v2_max_context_chunks, forced,
+                ranked,
+                s.v2_rerank_threshold,
+                s.v2_context_budget_tokens,
+                s.v2_max_context_chunks,
+                forced,
                 s.v2_source_prior_weight,
             )
             await emit(
@@ -259,8 +268,12 @@ class V2Pipeline:
         if len(kept) > 0 and self._answer_room(qa_messages) < MIN_ANSWER_ROOM:
             while kept and self._answer_room(qa_messages) < ENOUGH_ANSWER_ROOM:
                 context, kept = assemble_context(
-                    ranked, s.v2_rerank_threshold, s.v2_context_budget_tokens, len(kept) - 1,
-                    forced[: max(len(kept) - 1, 0) // 2], s.v2_source_prior_weight,
+                    ranked,
+                    s.v2_rerank_threshold,
+                    s.v2_context_budget_tokens,
+                    len(kept) - 1,
+                    forced[: max(len(kept) - 1, 0) // 2],
+                    s.v2_source_prior_weight,
                 )
                 qa_messages = build(context)
             refusal = an.route == "nsu" and not kept
@@ -332,8 +345,9 @@ class V2Pipeline:
                     kw["lexical_tokens"] = tuple(forms)
             result = await self.search.search(round_queries, round_queries, **kw)
             if kw and rare:
-                forced = [c for c in getattr(result, "lexical_top", [])
-                          if c.score < thr and self._has_term(c.chunk, forms)][: s.v2_max_context_chunks // 2]
+                forced = [
+                    c for c in getattr(result, "lexical_top", []) if c.score < thr and self._has_term(c.chunk, forms)
+                ][: s.v2_max_context_chunks // 2]
             wall = _ms(t0)
             rerank_ms = round(float(result.timings_ms.get("rerank", 0.0)), 2)
             await emit(
@@ -355,16 +369,20 @@ class V2Pipeline:
                 StageName.RERANK,
                 StageStatus.COMPLETED,
                 rerank_ms,
-                {"round": rounds, "coverage": {q: round(float(v), 4) for q, v in result.coverage.items()},
-                 "above_threshold": sum(c.score >= thr for c in result.candidates)},
+                {
+                    "round": rounds,
+                    "coverage": {q: round(float(v), 4) for q, v in result.coverage.items()},
+                    "above_threshold": sum(c.score >= thr for c in result.candidates),
+                },
             )
             uncovered = [t for t in targets if target_cov[t] < thr]
             if rounds >= s.v2_max_rounds or not (uncovered or (an.chain and rounds == 1)):
                 break
             found = sorted(best.values(), key=lambda c: (-c.score, c.pos))
             titles = _dedup([c.chunk.title for c in [*schedule_cands, *found]])[:REFORMULATE_TITLES]
-            new = await self._reformulate(standalone, uncovered, an.chain, all_queries, titles, rounds + 1,
-                                          runtime, emit)
+            new = await self._reformulate(
+                standalone, uncovered, an.chain, all_queries, titles, rounds + 1, runtime, emit
+            )
             round_queries = new
             aims = {q: (uncovered[min(i, len(uncovered) - 1)] if uncovered else None) for i, q in enumerate(new)}
 
@@ -446,8 +464,12 @@ class V2Pipeline:
             },
             "rerank": {
                 "candidates": [
-                    {"chunk_id": c.chunk.chunk_id, "rank": rank[id(c)], "score": round(float(c.score), 6),
-                     "kept": c.chunk.chunk_id in kept_ids}
+                    {
+                        "chunk_id": c.chunk.chunk_id,
+                        "rank": rank[id(c)],
+                        "score": round(float(c.score), 6),
+                        "kept": c.chunk.chunk_id in kept_ids,
+                    }
                     for c in listed
                 ]
             },

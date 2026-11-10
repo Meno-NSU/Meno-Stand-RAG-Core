@@ -8,6 +8,7 @@ Only the order inside the cached union is measured, not bge-m3's own recall over
 bge-m3 is loaded with plain transformers: dense = normalized CLS; sparse = relu(sparse_linear(hidden)) max-pooled
 per token id, special tokens dropped; sparse score = sum over shared token ids of q_w * d_w.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,8 +37,9 @@ class M3:
         torch = self.torch
         dense, sparse = [], []
         for i in range(0, len(texts), batch):
-            enc = self.tok(texts[i : i + batch], padding=True, truncation=True, max_length=max_length,
-                           return_tensors="pt").to(self.device)
+            enc = self.tok(
+                texts[i : i + batch], padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+            ).to(self.device)
             with torch.no_grad():
                 h = self.model(**enc).last_hidden_state
                 d = torch.nn.functional.normalize(h[:, 0].float(), dim=-1)
@@ -71,11 +73,18 @@ def score(args) -> None:
             pos = [int(p) for p in r["bge"]]
             (qd,), (qs,) = m3.encode([q])
             dd, ds = m3.encode([release.chunks[p].index_text for p in pos])
-            out.write(json.dumps({
-                "id": r["id"],
-                "m3d": {str(p): round(float(qd @ d), 5) for p, d in zip(pos, dd)},
-                "m3s": {str(p): round(sum(w * v.get(t, 0.0) for t, w in qs.items()), 5) for p, v in zip(pos, ds)},
-            }) + "\n")
+            out.write(
+                json.dumps(
+                    {
+                        "id": r["id"],
+                        "m3d": {str(p): round(float(qd @ d), 5) for p, d in zip(pos, dd)},
+                        "m3s": {
+                            str(p): round(sum(w * v.get(t, 0.0) for t, w in qs.items()), 5) for p, v in zip(pos, ds)
+                        },
+                    }
+                )
+                + "\n"
+            )
             if n % 50 == 0:
                 print(f"{n}/{len(rows)}", file=sys.stderr, flush=True)
 
@@ -90,8 +99,10 @@ def evaluate(args) -> None:
         hits = [_first_hit(order_fn(rows[i], m3[i]), rows[i]["doc"], set(rows[i]["gold"])) for i in ids]
         at = lambda k: sum(1 for h in hits if h and h <= k) / n  # noqa: E731
         mrr = sum(1 / h for h in hits if h) / n
-        print(f"{name:48s} R@1 {at(1):.3f} R@3 {at(3):.3f} R@5 {at(5):.3f} R@10 {at(10):.3f} "
-              f"R@40 {at(40):.3f} MRR {mrr:.3f}")
+        print(
+            f"{name:48s} R@1 {at(1):.3f} R@3 {at(3):.3f} R@5 {at(5):.3f} R@10 {at(10):.3f} "
+            f"R@40 {at(40):.3f} MRR {mrr:.3f}"
+        )
 
     by = lambda d: sorted(map(int, d), key=lambda p: -d[str(p)])  # noqa: E731
     bge = lambda r, top: sorted(top, key=lambda p: -r["bge"][str(p)])  # noqa: E731
@@ -101,19 +112,28 @@ def evaluate(args) -> None:
     report("bge (cross-encoder) alone", lambda r, m: by(r["bge"]))
     print("-- first stage (what reaches the reranker), RRF k=60")
     report("FRIDA + BM25 (current)", lambda r, m: wrrf([r["dense"][:50], r["bm25"][:50]], [1, 1]))
-    report("FRIDA + BM25 + m3 sparse", lambda r, m: wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3s"])[:50]],
-                                                         [1, 1, 1]))
-    report("FRIDA + BM25 + m3 dense", lambda r, m: wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3d"])[:50]],
-                                                        [1, 1, 1]))
-    report("FRIDA + BM25 + m3 sparse + m3 dense",
-           lambda r, m: wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3s"])[:50], by(m["m3d"])[:50]], [1, 1, 1, 1]))
+    report(
+        "FRIDA + BM25 + m3 sparse", lambda r, m: wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3s"])[:50]], [1, 1, 1])
+    )
+    report(
+        "FRIDA + BM25 + m3 dense", lambda r, m: wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3d"])[:50]], [1, 1, 1])
+    )
+    report(
+        "FRIDA + BM25 + m3 sparse + m3 dense",
+        lambda r, m: wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3s"])[:50], by(m["m3d"])[:50]], [1, 1, 1, 1]),
+    )
     print("-- after bge on the top 40 of each first stage")
     report("FRIDA + BM25 -> bge (current)", lambda r, m: bge(r, wrrf([r["dense"][:50], r["bm25"][:50]], [1, 1])[:40]))
-    report("FRIDA + BM25 + m3 sparse -> bge",
-           lambda r, m: bge(r, wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3s"])[:50]], [1, 1, 1])[:40]))
-    report("FRIDA + BM25 + m3 sparse + m3 dense -> bge",
-           lambda r, m: bge(r, wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3s"])[:50], by(m["m3d"])[:50]],
-                                    [1, 1, 1, 1])[:40]))
+    report(
+        "FRIDA + BM25 + m3 sparse -> bge",
+        lambda r, m: bge(r, wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3s"])[:50]], [1, 1, 1])[:40]),
+    )
+    report(
+        "FRIDA + BM25 + m3 sparse + m3 dense -> bge",
+        lambda r, m: bge(
+            r, wrrf([r["dense"][:50], r["bm25"][:50], by(m["m3s"])[:50], by(m["m3d"])[:50]], [1, 1, 1, 1])[:40]
+        ),
+    )
 
 
 def main(argv=None) -> None:

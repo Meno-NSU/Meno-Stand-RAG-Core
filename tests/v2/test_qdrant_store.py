@@ -90,8 +90,13 @@ def test_upsert_batching_and_ids(store, fake, kind):
     store.create_collection("c", 3)
     m = np.arange(15, dtype=np.float16).reshape(5, 3)
     prog = []
-    n = store.upsert_matrix("c", m if kind == "np" else torch.from_numpy(m), batch=2, start_id=100,
-                            progress=lambda d, t: prog.append((d, t)))
+    n = store.upsert_matrix(
+        "c",
+        m if kind == "np" else torch.from_numpy(m),
+        batch=2,
+        start_id=100,
+        progress=lambda d, t: prog.append((d, t)),
+    )
     assert n == 5
     puts = [r for r in fake.requests if r[1] == "/collections/c/points"]
     assert [len(r[2]["points"]) for r in puts] == [2, 2, 1]
@@ -153,8 +158,14 @@ def test_load_search_service_count_check(monkeypatch, fake, store):
     monkeypatch.setattr(search_mod, "Bm25Retriever", lambda *a, **k: None)
     monkeypatch.setattr(search_mod, "load_embedder", lambda *a, **k: None)
     monkeypatch.setattr(search_mod, "QdrantStore", lambda url: store)
-    s = Settings(_env_file=None, V2_EMBEDDER_PATH="/x", V2_RERANKER_PATH="/z", V2_DEVICE="cpu",
-                 V2_VECTOR_BACKEND="qdrant", V2_QDRANT_COLLECTION="c")
+    s = Settings(
+        _env_file=None,
+        V2_EMBEDDER_PATH="/x",
+        V2_RERANKER_PATH="/z",
+        V2_DEVICE="cpu",
+        V2_VECTOR_BACKEND="qdrant",
+        V2_QDRANT_COLLECTION="c",
+    )
     with pytest.raises(ValueError, match=r"3 points.*10 chunks"):
         load_search_service(s)
 
@@ -166,8 +177,14 @@ def test_lexical_backend_validation(monkeypatch, fake, store):
     monkeypatch.setattr(search_mod, "Bm25Retriever", lambda *a, **k: pytest.fail("bm25s must not load"))
     monkeypatch.setattr(search_mod, "load_embedder", lambda *a, **k: None)
     monkeypatch.setattr(search_mod, "QdrantStore", lambda url: store)
-    base = dict(_env_file=None, V2_EMBEDDER_PATH="/x", V2_RERANKER_PATH="/z", V2_DEVICE="cpu",
-                V2_QDRANT_COLLECTION="c", V2_LEXICAL_BACKEND="qdrant")
+    base = dict(
+        _env_file=None,
+        V2_EMBEDDER_PATH="/x",
+        V2_RERANKER_PATH="/z",
+        V2_DEVICE="cpu",
+        V2_QDRANT_COLLECTION="c",
+        V2_LEXICAL_BACKEND="qdrant",
+    )
     with pytest.raises(ValueError, match="needs V2_VECTOR_BACKEND=qdrant"):
         load_search_service(Settings(**base, V2_MATRIX_DIR="/m"))
     with pytest.raises(ValueError, match="no 'bm25' sparse vector"):
@@ -185,8 +202,14 @@ def test_embed_device_override(monkeypatch, fake, store):
     monkeypatch.setattr(search_mod, "load_embedder", lambda name, path, device, **k: seen.setdefault("emb", device))
     monkeypatch.setattr(search_mod, "load_reranker", lambda name, path, device: seen.setdefault("rr", device))
     monkeypatch.setattr(search_mod, "QdrantStore", lambda url: store)
-    base = dict(_env_file=None, V2_EMBEDDER_PATH="/x", V2_RERANKER_PATH="/z", V2_DEVICE="cpu",
-                V2_QDRANT_COLLECTION="c", V2_EMBED_DEVICE="meta")
+    base = dict(
+        _env_file=None,
+        V2_EMBEDDER_PATH="/x",
+        V2_RERANKER_PATH="/z",
+        V2_DEVICE="cpu",
+        V2_QDRANT_COLLECTION="c",
+        V2_EMBED_DEVICE="meta",
+    )
     with pytest.raises(ValueError, match="only supported with V2_VECTOR_BACKEND=qdrant"):
         load_search_service(Settings(**base, V2_MATRIX_DIR="/m"))
     load_search_service(Settings(**base, V2_VECTOR_BACKEND="qdrant"))

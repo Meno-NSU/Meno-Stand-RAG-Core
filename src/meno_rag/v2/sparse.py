@@ -7,6 +7,7 @@ fixed when the release is indexed). Query values are term counts. Tokens are the
 as the bm25s index (`tokenize_and_normalize_text`); term ids are crc32 of the stem, so no vocabulary
 file is needed.
 """
+
 from __future__ import annotations
 
 import zlib

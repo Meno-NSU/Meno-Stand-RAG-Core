@@ -1,4 +1,5 @@
 """BM25 retrieval over a pinned release index."""
+
 from __future__ import annotations
 
 import math
