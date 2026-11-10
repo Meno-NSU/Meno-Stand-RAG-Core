@@ -853,3 +853,22 @@ def test_the_shutdown_stops_the_registry_before_closing_the_stand_client(monkeyp
     finally:
         get_settings.cache_clear()
     assert client_closed_at_aclose == [False]
+
+
+def test_the_entries_carry_the_version_fields():
+    reg, _ = _registry(manifest(llms=[{"id": "gemma", "name": "Gemma 4"}], default_llm="gemma", name="RAGU"))
+    e = _run(_listed(reg))[0]
+    assert (e["stand_id"], e["stand_name"], e["llm_id"], e["llm_name"]) == ("lab", "RAGU", "gemma", "Gemma 4")
+
+
+def test_our_name_for_a_stand_wins_over_its_manifest():
+    reg, _ = _registry(manifest(name="RAGU"), name="Поиск по документам")
+    e = _run(_listed(reg))[0]
+    assert e["stand_name"] == "Поиск по документам"
+    assert e["backend_name"] == "RAGU"  # unchanged: older frontends keep what they had
+
+
+def test_a_plain_stand_without_a_name_is_named_by_its_id():
+    reg, _ = _registry(None)  # a plain endpoint: no manifest
+    e = _run(_listed(reg))[0]
+    assert e["stand_name"] == "lab" and e["stand_id"] == "lab"
