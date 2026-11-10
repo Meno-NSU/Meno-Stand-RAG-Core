@@ -85,3 +85,50 @@ def test_load_reranker_http():
     assert r.truncate_tokens == 256
     with pytest.raises(ValueError):
         load_reranker("http", "", "cpu")
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_overall_deadline_across_batches_raises():
+    clock = _Clock()
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        clock.now += 0.6  # each batch "takes" 0.6 s of the 1 s budget
+        return _echo(request)
+
+    r = _make(handler, timeout_s=1.0)
+    r._clock = clock
+    with pytest.raises(RuntimeError, match="deadline"):
+        r.score("q", [str(i / 100) for i in range(70)])
+    assert len(calls) == 2  # the third batch is never sent
+
+
+def test_per_request_timeout_never_exceeds_remaining_budget():
+    clock = _Clock()
+    seen = []
+
+    def handler(request):
+        seen.append(request.extensions["timeout"]["read"])
+        clock.now += 0.4
+        return _echo(request)
+
+    r = _make(handler, timeout_s=1.0)
+    r._clock = clock
+    r.score("q", [str(i / 100) for i in range(70)])
+    assert seen == pytest.approx([1.0, 0.6, 0.2])
+
+
+@pytest.mark.parametrize("bad_index", [2, -1, 0])
+def test_out_of_range_or_repeated_index_raises(bad_index):
+    results = [{"index": 0, "relevance_score": 0.1}, {"index": bad_index, "relevance_score": 0.2}]
+    r = _make(lambda req: httpx.Response(200, json={"results": results}))
+    with pytest.raises(RuntimeError, match="rerank service"):
+        r.score("q", ["a", "b"])

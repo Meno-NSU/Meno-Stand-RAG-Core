@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -173,20 +175,28 @@ class HttpReranker:
         self.url = url.rstrip("/")
         self.model = model
         self.truncate_tokens = truncate_tokens
+        self.timeout_s = timeout_s
+        self._clock: Callable[[], float] = time.monotonic
         self._client = httpx.Client(timeout=timeout_s)
 
-    def _score_batch(self, query: str, texts: list[str]) -> list[float]:
+    def _score_batch(self, query: str, texts: list[str], deadline: float) -> list[float]:
+        endpoint = f"{self.url}/v1/rerank"
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            raise RuntimeError(f"rerank service {endpoint}: deadline of {self.timeout_s}s exceeded")
         body: dict[str, Any] = {"model": self.model, "query": query, "documents": texts}
         if self.truncate_tokens:
             body["truncate_prompt_tokens"] = self.truncate_tokens
-        endpoint = f"{self.url}/v1/rerank"
         try:
-            resp = self._client.post(endpoint, json=body)
+            resp = self._client.post(endpoint, json=body, timeout=remaining)
             resp.raise_for_status()
             results = resp.json()["results"]
             scores: list[float | None] = [None] * len(texts)
             for r in results:
-                scores[int(r["index"])] = float(r["relevance_score"])
+                i = int(r["index"])
+                if not 0 <= i < len(texts) or scores[i] is not None:
+                    raise ValueError(f"index {i} is out of range or repeated for {len(texts)} documents")
+                scores[i] = float(r["relevance_score"])
         except httpx.HTTPError as e:
             raise RuntimeError(f"rerank service {endpoint} failed: {e!r}") from e
         except (KeyError, IndexError, TypeError, ValueError) as e:
@@ -196,9 +206,11 @@ class HttpReranker:
         return cast("list[float]", scores)
 
     def score(self, query: str, texts: list[str], batch_size: int = 32, max_length: int = MAX_LENGTH) -> list[float]:
+        """One overall deadline of ``timeout_s`` covers all batches; each request's timeout is the time left."""
         if not texts:
             return []
-        parts = run_batched(texts, lambda batch: self._score_batch(query, list(batch)), batch_size)
+        deadline = self._clock() + self.timeout_s
+        parts = run_batched(texts, lambda batch: self._score_batch(query, list(batch), deadline), batch_size)
         return [s for part in parts for s in part]
 
 
