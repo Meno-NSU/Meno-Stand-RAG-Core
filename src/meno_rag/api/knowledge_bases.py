@@ -62,7 +62,7 @@ def split_virtual_model(model_id: str | None) -> tuple[str | None, bool]:
 
 
 def parse_model_aliases(raw: str) -> list[tuple[str, str]]:
-    """``base_id=display name;...`` -> [(base_id, display name)]."""
+    """``key=display name;...`` -> [(key, display name)] (V2_MODEL_ALIASES, LLM_DISPLAY_NAMES)."""
     out = []
     for part in raw.split(";"):
         base, sep, name = part.partition("=")
@@ -91,7 +91,7 @@ def virtual_model_entries(settings: Settings, models: list[dict]) -> list[dict]:
                 "stand_id": metrics.MENON_11,
                 "stand_name": metrics.BUILTIN_STAND_NAMES[metrics.MENON_11],
                 "llm_id": base_id,
-                "llm_name": base_id,
+                "llm_name": base.get("llm_name", base_id),
             }
         )
     return entries
@@ -101,4 +101,4 @@ def apply_llm_display_names(entries: list[dict], raw: str) -> None:
     """Sets each entry's ``llm_name`` from the ``LLM_DISPLAY_NAMES`` map, by its ``llm_id``."""
     names = dict(parse_model_aliases(raw))
     for entry in entries:
-        entry["llm_name"] = names.get(entry["llm_id"], entry["llm_name"])
+        entry["llm_name"] = names.get(entry.get("llm_id", ""), entry["llm_name"])

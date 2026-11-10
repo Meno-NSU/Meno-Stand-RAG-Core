@@ -140,3 +140,15 @@ def test_the_default_entry_belongs_to_menon_10(make_client):  # noqa: F811  (fix
     c, _ = _client(make_client, ids=())
     first = c.get("/v1/models").json()["data"][0]
     assert first["stand_id"] == "menon-1.0" and first["llm_id"] == first["id"]
+    assert first["stand_name"] == "Менон 1.0" and first["llm_name"] == first["id"]
+
+
+def test_a_menon_11_copy_takes_the_llm_name_of_its_base():
+    from types import SimpleNamespace
+
+    from meno_rag.api.knowledge_bases import virtual_model_entries
+
+    s = SimpleNamespace(v2_enabled=True, v2_expose_as="models", v2_model_aliases="x=Менон 1.1 (X)")
+    base = {"id": "x", "llm_id": "x", "llm_name": "Икс"}
+    (copy,) = virtual_model_entries(s, [base])  # type: ignore[arg-type]
+    assert copy["llm_id"] == "x" and copy["llm_name"] == "Икс"

@@ -544,7 +544,8 @@ async def service_status(request: Request):
 
 
 def _menon_10_fields(llm_id: str, llm_name: str) -> dict[str, str]:
-    """The version-picker fields of an entry served by our own legacy pipeline."""
+    """The version-picker fields of an entry served by our own legacy pipeline.
+    Note: with LEGACY_ENABLED=false these plain entries are answered by v2 although labelled menon-1.0 (deferred)."""
     return {
         "stand_id": metrics_mod.MENON_10,
         "stand_name": metrics_mod.BUILTIN_STAND_NAMES[metrics_mod.MENON_10],
@@ -613,9 +614,10 @@ async def list_models(request: Request):
         )
 
     if not merged:
+        default_id = settings.default_model or "menon-1"
         merged = [
             {
-                "id": settings.default_model or "menon-1",
+                "id": default_id,
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "menon",
@@ -623,9 +625,9 @@ async def list_models(request: Request):
                 "featured": False,
                 "stages": ["rewrite", "rerank", "generation"],
                 "status": {"state": "available", "until": None, "last_error": None},
-                "display_name": settings.default_model or "menon-1",
+                "display_name": default_id,
                 "context_length": None,
-                **_menon_10_fields(settings.default_model or "menon-1", settings.default_model or "menon-1"),
+                **_menon_10_fields(default_id, default_id),
             }
         ]
 

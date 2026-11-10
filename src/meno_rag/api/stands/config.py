@@ -3,7 +3,7 @@
   [{"id": "ragu", "url": "http://host:9006", "api_key": "...", "arena": true, "max_concurrent": 16, "name": "..."}]
 
 id: [a-z0-9][a-z0-9.-]{0,31}, assigned by us; url: http(s) base of the stand; api_key, arena (default false),
-max_concurrent (default 32) and name (shown for an endpoint without a manifest) are optional."""
+max_concurrent (default 32) and name (the menu name: this, else the manifest's name, else the id) are optional."""
 
 from __future__ import annotations
 

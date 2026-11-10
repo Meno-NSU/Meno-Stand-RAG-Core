@@ -62,3 +62,4 @@ def test_an_openrouter_entry_is_a_menon_10_model_named_by_its_display_name(clien
     assert entry["stand_id"] == "menon-1.0"
     assert entry["llm_id"] == entry["id"]
     assert entry["llm_name"] == entry["display_name"]
+    assert entry["stand_name"] == "Менон 1.0"

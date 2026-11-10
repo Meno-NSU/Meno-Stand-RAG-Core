@@ -261,7 +261,7 @@ To connect one:
 ## API
 
 - `GET /healthz`
-- `GET /v1/models`
+- `GET /v1/models`: besides the older fields, every entry carries `stand_id`, `stand_name`, `llm_id` and `llm_name` for the version picker. Built-in models belong to `menon-1.0` (`Менон 1.0`); their `@menon-1.1` copies to `menon-1.1` (`Менон 1.1`); a stand's entries to the stand. A stand's name is the `name` in `STANDS_FILE`, else its manifest's `name`, else its id. `llm_name` is the model's display name, replaced by `LLM_DISPLAY_NAMES` (`llm_id=name;...`, default `gemma-4-12B-it=Gemma 4 12B`) when it maps the `llm_id`.
 - `POST /v1/models/refresh`
 - `GET /v1/knowledge-bases`
 - `POST /v1/chat/completions`
