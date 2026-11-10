@@ -201,6 +201,6 @@ async def analyze(
             timeout_s,
         )
         return _postprocess(_extract_json(text), question)
-    except Exception as exc:
+    except Exception as exc:  # any failure degrades to the nsu path
         logger.warning("turn analysis failed, falling back to nsu: %r", exc)
         return _fallback(question)

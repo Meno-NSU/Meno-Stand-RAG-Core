@@ -132,6 +132,6 @@ async def llm_check(llm_router, runtime, answer: str, sources: list[dict]) -> li
         keep = json.loads(raw)["keep"]
         idx = {int(i) for i in keep}
         return [s for i, s in enumerate(sources) if i in idx]
-    except Exception:
+    except Exception:  # any failure leaves sources unchanged
         log.warning("source llm_check failed", exc_info=True)
         return sources
