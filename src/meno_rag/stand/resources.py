@@ -43,14 +43,17 @@ def _resolve_device(requested: str) -> str:
 def resolve_shared_frida(settings: Settings, search: Any) -> tuple[Any, Any, str] | None:
     """Менон 1.1's FRIDA (tokenizer, model, device) for Менон 1.0 to reuse, or None.
 
-    None when LEGACY_FRIDA_FROM_V2 is off (silent) or Менон 1.1 is not loaded / has another embedder (logged with
-    the reason); Менон 1.0 then loads its own FRIDA as before.
+    None when LEGACY_FRIDA_FROM_V2 is off (silent) or Менон 1.1 is disabled / not loaded / has another embedder
+    (logged with the reason); Менон 1.0 then loads its own FRIDA as before. The dimension check against Менон 1.0's
+    FAISS index happens in ``load_stand_resources`` (the index is read there).
     """
     if not settings.legacy_frida_from_v2:
         return None
     reason = ""
     embedder = getattr(getattr(search, "dense", None), "embedder", None) if search is not None else None
-    if search is None:
+    if not settings.v2_enabled:
+        reason = "v2_disabled"
+    elif search is None:
         reason = "v2_not_loaded"
     elif not isinstance(embedder, FridaEmbedder):
         reason = "v2_embedder_not_frida"
@@ -58,7 +61,8 @@ def resolve_shared_frida(settings: Settings, search: Any) -> tuple[Any, Any, str
         logger.warning("legacy_frida_not_shared", reason=reason)
         return None
     device = str(embedder.device)
-    logger.info("legacy_frida_shared", device=device)
+    model_name = getattr(getattr(embedder.model, "config", None), "_name_or_path", None)
+    logger.info("legacy_frida_shared", device=device, model=model_name)
     return embedder.tokenizer, embedder.model, device
 
 
@@ -70,6 +74,15 @@ def load_stand_resources(settings: Settings, frida: tuple[Any, Any, str] | None 
     faiss_retriever = faiss.read_index(str(settings.faiss_index_path))
     if not faiss_retriever.is_trained:
         raise RuntimeError(f'The Faiss index from "{settings.faiss_index_path}" is not trained.')
+
+    if frida is not None:
+        hidden = getattr(getattr(frida[1], "config", None), "hidden_size", None)
+        index_dim = getattr(faiss_retriever, "d", None)
+        if hidden is not None and index_dim is not None and int(hidden) != int(index_dim):
+            logger.warning(
+                "legacy_frida_not_shared", reason="dimension_mismatch", model_dim=int(hidden), index_dim=int(index_dim)
+            )
+            frida = None
 
     bm25_retriever = bm25s.BM25.load(str(settings.bm25_index_dir), load_corpus=False)
     stemmer = SnowballStemmer("russian")
