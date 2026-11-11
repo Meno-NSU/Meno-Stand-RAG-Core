@@ -209,30 +209,22 @@ def test_a_stopped_answer_that_was_retried_is_left_out_of_the_restore(client, db
     ]
 
 
-def test_the_feedback_endpoints_keep_every_step(client, db_path):
+def test_the_feedback_endpoints_keep_what_was_written_and_nothing_per_click(client, db_path):
     headers = _guest_headers(client)
     _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
-    for value, comment in (("up", None), ("down", "не тот год")):
+    clear = {"completion_id": "run-1", "session_id": "c1"}
+    for value, comment in (("up", None), ("down", "не тот год"), ("up", "не тот год"), ("down", None)):
         body = {"completion_id": "run-1", "session_id": "c1", "value": value, "comment": comment}
         assert client.post("/v1/feedback", json=body, headers=headers).status_code == 200
-    assert (
-        client.post(
-            "/v1/feedback/clear", json={"completion_id": "run-1", "session_id": "c1"}, headers=headers
-        ).status_code
-        == 200
-    )
+        assert client.post("/v1/feedback/clear", json=clear, headers=headers).status_code == 200
     assert (
         client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "maybe"}, headers=headers).status_code
         == 200
     )
 
     async def _read(session):
-        rows = await session.execute(text("SELECT kind, action, value, comment FROM feedback_events ORDER BY id"))
-        return [tuple(r) for r in rows.all()]
+        rows = await session.execute(text("SELECT value, comment FROM feedback_comments ORDER BY id"))
+        current = await session.execute(text("SELECT count(*) FROM message_feedback"))
+        return [tuple(r) for r in rows.all()], current.scalar_one()
 
-    assert _with_db(db_path, _read) == [
-        ("rating", "set", "up", None),
-        ("rating", "set", "down", "не тот год"),
-        ("rating", "clear", None, None),
-        ("survey", "set", "maybe", None),
-    ]
+    assert _with_db(db_path, _read) == ([("down", "не тот год")], 0)

@@ -34,6 +34,10 @@ from meno_rag.db.session import Base
 
 logger = structlog.get_logger(__name__)
 
+# Tables an older migration created and a later one replaced: the models no longer define them, but a database
+# still at that older revision has them, and the bootstrap after a reset would fail to create them again.
+RETIRED_TABLES = frozenset({"feedback_events"})  # 0019, replaced by feedback_comments in 0020
+
 
 def _ensure_sqlite_parent(sync_url: str) -> None:
     # Mirrors meno_rag.db.migrate._ensure_sqlite_parent for the same reason.
@@ -52,9 +56,9 @@ def run_reset(sync_url: str, *, confirm: bool) -> int:
     dialect = engine.dialect.name
     try:
         existing = set(inspect(engine).get_table_names())
-        # We only drop ORM-known tables plus ``alembic_version`` — never any
-        # foreign tables an operator may have created in the same database.
-        targets = sorted((set(Base.metadata.tables) | {"alembic_version"}) & existing)
+        # We only drop ORM-known tables, retired ones of ours, plus ``alembic_version`` —
+        # never any foreign tables an operator may have created in the same database.
+        targets = sorted((set(Base.metadata.tables) | RETIRED_TABLES | {"alembic_version"}) & existing)
 
         if not targets:
             logger.info("db.reset.noop", dialect=dialect)
@@ -76,8 +80,10 @@ def run_reset(sync_url: str, *, confirm: bool) -> int:
         # metadata.drop_all walks the dependency graph and drops in FK order,
         # which works on both SQLite and Postgres.
         Base.metadata.drop_all(engine)
-        # alembic_version is not registered on Base.metadata; drop it directly.
+        # alembic_version and retired tables are not registered on Base.metadata; drop them directly.
         with engine.begin() as conn:
+            for table in sorted(RETIRED_TABLES):
+                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
             conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
         logger.info("db.reset.done", dialect=dialect, dropped=targets)
         print(f"Dropped {len(targets)} table(s): {', '.join(targets)}")
