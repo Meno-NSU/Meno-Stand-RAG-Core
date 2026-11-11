@@ -53,6 +53,19 @@ async def test_every_rating_change_and_clear_is_kept(db):
 
 
 @pytest.mark.asyncio
+async def test_a_clear_that_finds_nothing_of_the_callers_is_not_an_event(db):
+    async with db.sessionmaker() as s:
+        await repositories.upsert_message_feedback(s, run_id="r1", session_id="s1", value="up", guest_session_id="g1")
+        await s.commit()
+    async with db.sessionmaker() as s:
+        await repositories.clear_message_feedback(s, run_id="r1", session_id="s1", guest_session_id="g2")  # not hers
+        await repositories.clear_message_feedback(s, run_id="r9", session_id="s1", guest_session_id="g1")  # no rating
+        await s.commit()
+
+    assert [(e[1], e[7]) for e in await _events(db)] == [("set", "g1")]
+
+
+@pytest.mark.asyncio
 async def test_every_survey_answer_is_kept(db):
     for answer in ("maybe", "yes"):
         async with db.sessionmaker() as s:

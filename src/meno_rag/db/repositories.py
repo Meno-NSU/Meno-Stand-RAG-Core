@@ -500,20 +500,21 @@ async def clear_message_feedback(
         clause.append(MessageFeedback.user_id == user_id)
     elif guest_session_id is not None:
         clause.append(MessageFeedback.guest_session_id == guest_session_id)
-    # Kept even when nothing was removed: the clear is still something the caller did.
-    await append_feedback_event(
-        session,
-        kind="rating",
-        action="clear",
-        run_id=run_id,
-        session_id=session_id,
-        user_id=user_id,
-        guest_session_id=guest_session_id,
-    )
     result = await session.execute(delete(MessageFeedback).where(*clause))
     # DELETE yields a CursorResult (has rowcount) at runtime; the async execute()
     # return type is the broader Result, so mypy needs the hint.
-    return result.rowcount or 0  # type: ignore[attr-defined]
+    removed: int = result.rowcount or 0  # type: ignore[attr-defined]
+    if removed:  # a clear that found nothing of the caller's changed nothing, so the history stays as it was
+        await append_feedback_event(
+            session,
+            kind="rating",
+            action="clear",
+            run_id=run_id,
+            session_id=session_id,
+            user_id=user_id,
+            guest_session_id=guest_session_id,
+        )
+    return removed
 
 
 async def get_conversation_feedback(

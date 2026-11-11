@@ -36,6 +36,13 @@ class _Pipeline:
             yield token
 
 
+class _LateSourcesPipeline(_Pipeline):
+    """Менон 1.1: sources are attributed to the finished text, after the last word."""
+
+    async def finalize_sources(self, outcome, answer, runtime):
+        await asyncio.Event().wait()  # the attribution rerank is slow today
+
+
 @pytest.fixture
 async def db(tmp_path):
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'i.sqlite3'}")
@@ -46,7 +53,7 @@ async def db(tmp_path):
         await database.close()
 
 
-def _stream(db, pipeline, *, arena: bool = False, guest: str = "g1"):
+def _stream(db, pipeline, *, arena: bool = False, guest: str = "g1", kb_id: str = main_mod.LEGACY_KB_ID):
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(pipeline=pipeline, database=db, trace_writer=None))
     )
@@ -62,6 +69,7 @@ def _stream(db, pipeline, *, arena: bool = False, guest: str = "g1"):
         max_tokens=128,
         temperature=None,
         guest_session_id=guest,
+        kb_id=kb_id,
     )
 
 
@@ -161,6 +169,21 @@ async def test_a_client_that_leaves_after_the_last_word_got_a_finished_answer(db
     stored = await _stored(db)
     assert stored["messages"] == [("user", "Q?", False, []), ("assistant", "".join(TOKENS), False, ["T"])]
     assert stored["runs"] == [("Q?", None, len("".join(TOKENS)), None)]
+    assert ("generation", "completed") in stored["stages"]
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_leaves_while_sources_are_attributed_got_the_whole_text(db):
+    await _grant(db, guest_session_id="g1", improvement=True)
+    gen = _stream(db, _LateSourcesPipeline(), kb_id="nsu-kb-2026-11")
+    await _read_until(gen, '"stage": "generation", "status": "completed"')
+    await gen.aclose()
+    await main_mod.drain_persist_tasks(5)
+
+    stored = await _stored(db)
+    # The text is complete, so it is not marked interrupted; the sources were never shown.
+    assert stored["messages"] == [("user", "Q?", False, []), ("assistant", "".join(TOKENS), False, [])]
+    assert stored["runs"] == [("Q?", "after_answer", len("".join(TOKENS)), None)]
     assert ("generation", "completed") in stored["stages"]
 
 

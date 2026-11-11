@@ -409,6 +409,51 @@ def test_client_disconnect_frees_the_slots_and_closes_the_stand(make_client, tmp
     ]
 
 
+def test_a_stopped_stand_answer_keeps_its_run_with_the_improvement_consent(make_client, tmp_path):  # noqa: F811
+    from tests.stands.test_stand_trace import _consenting_guest
+
+    c, db, reg = stand_client(make_client, tmp_path, _slow_stand({"closed": False}, hold=asyncio.Event()))
+    target = reg.resolve("gemma@lab")
+    _consenting_guest(c, db)
+
+    async def guest(session):  # the guest who just consented
+        return (await session.execute(text("SELECT guest_session_id FROM consent_events LIMIT 1"))).scalar_one()
+
+    guest_id = with_db(db, guest)
+
+    async def run():
+        gen = main_mod._stand_stream_response(
+            request=SimpleNamespace(app=c.app),
+            payload=ChatCompletionRequest.model_validate(ASK),
+            target=target,
+            runtime=main_mod._stand_runtime(target),
+            completion_id="chatcmpl-stop",
+            created_ts=1,
+            session_id="session-stop",
+            user_id=None,
+            guest_session_id=guest_id,
+            on_finish=None,
+            bench=False,
+        )
+        seen = ""
+        while "Сессия " not in seen:
+            seen += await anext(gen)
+        await gen.aclose()  # Stop
+        assert await main_mod.drain_persist_tasks(5) == 0
+
+    c.portal.call(run)
+
+    async def read(session):
+        q = "SELECT user_question, interrupted_stage, response_len, stand_build FROM pipeline_runs"
+        runs = [tuple(r) for r in (await session.execute(text(q))).all()]
+        cut = (await session.execute(text("SELECT raw_completion FROM generation_records"))).scalars().all()
+        return runs, cut
+
+    runs, completions = with_db(db, read)
+    assert [r[:3] for r in runs] == [("У первого курса", "generation", len("Сессия "))]
+    assert completions == ["Сессия "]
+
+
 def test_a_stand_removed_mid_answer_finishes_it(make_client, tmp_path):  # noqa: F811
     state = {"closed": False}
     c, db, reg = stand_client(make_client, tmp_path, _slow_stand(state, hold=None))

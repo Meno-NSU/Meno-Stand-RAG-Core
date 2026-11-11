@@ -87,7 +87,8 @@ def test_a_stream_cancelled_before_it_starts_frees_its_slots(make_client, tmp_pa
         return taken, inspect.getasyncgenstate(response.body_iterator)
 
     taken, generator_state = c.portal.call(run)
-    assert taken == [1] * len(slots) and generator_state == inspect.AGEN_CREATED  # it never ran a step
+    # It never ran a step, so only the response can have freed the slots; the response then closed it.
+    assert taken == [1] * len(slots) and generator_state == inspect.AGEN_CLOSED
     assert [s.active for s in slots] == [0] * len(slots)
 
 
@@ -113,7 +114,8 @@ def test_a_stream_whose_client_left_before_it_started_frees_its_slots(make_clien
         return taken, inspect.getasyncgenstate(response.body_iterator)
 
     taken, generator_state = c.portal.call(run)
-    assert taken == [1] * len(slots) and generator_state == inspect.AGEN_CREATED  # it never ran a step
+    # It never ran a step, so only the response can have freed the slots; the response then closed it.
+    assert taken == [1] * len(slots) and generator_state == inspect.AGEN_CLOSED
     assert [s.active for s in slots] == [0] * len(slots)
 
 
@@ -163,3 +165,42 @@ def test_a_client_that_leaves_mid_stream_frees_its_slots_once(make_client, tmp_p
     when_the_response_ended = c.portal.call(run)
     assert when_the_response_ended == [1] * len(slots)
     assert [s.active for s in slots] == [1] * len(slots)
+
+
+@pytest.mark.parametrize("path", ["menon-1", "stand"])
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+def test_the_response_closes_its_generator_when_the_client_leaves(make_client, tmp_path, path, spec_version):  # noqa: F811
+    # Starlette never closes the body: a client that leaves while the body is paused at a yield (a slow client whose
+    # socket buffer is full, then gone; or a send that fails) would leave the generator suspended until the garbage
+    # collector got to it, and only then store the stopped answer and close the upstream stream.
+    c, model, slots = _setup(make_client, tmp_path, path)
+    scope = _scope(c, spec_version)
+
+    async def run():
+        response = await _response(c, model, scope)
+        stuck = asyncio.Event()
+        bodies = 0
+
+        async def send(message):
+            nonlocal bodies
+            if message["type"] != "http.response.body":
+                return
+            bodies += 1
+            if bodies < 2:
+                return
+            if spec_version == "2.4":  # Starlette reads a failed send as the disconnect
+                raise OSError("the client closed the connection")
+            stuck.set()
+            await asyncio.Event().wait()
+
+        async def receive():  # with 2.3 Starlette listens for the disconnect beside the stream
+            await stuck.wait()
+            return {"type": "http.disconnect"}
+
+        with suppress(ClientDisconnect):
+            await asyncio.wait_for(response(scope, receive, send), 10)
+        closed = inspect.getasyncgenstate(response.body_iterator) == inspect.AGEN_CLOSED
+        await main_mod.drain_persist_tasks(5)
+        return closed, [s.active for s in slots]
+
+    assert c.portal.call(run) == (True, [0] * len(slots))

@@ -4,15 +4,19 @@ The chat generators free their slots (the shared admission slot and a stand's) i
 generator that never ran a step never runs it, not even on aclose or garbage collection, and Starlette awaits
 send(http.response.start) before it first iterates the body: a client that leaves at that moment (BaseHTTPMiddleware
 then cancels the app) would leave the slots taken for good. One that leaves mid-stream leaves the generator suspended
-until something closes it."""
+until something closes it: Starlette never does, so the response closes it when it ends."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
 
+import anyio
+import structlog
 from starlette.responses import ContentStream, StreamingResponse
 from starlette.types import Receive, Scope, Send
+
+logger = structlog.get_logger(__name__)
 
 
 def once(release: Callable[[], None]) -> Callable[[], None]:
@@ -40,4 +44,16 @@ class ReleasingStreamingResponse(StreamingResponse):
         try:
             await super().__call__(scope, receive, send)
         finally:
-            self._release()
+            try:
+                # A client that left while the body was paused at a yield (a full socket buffer, a failed send) leaves
+                # the generator suspended: its `finally` (store the stopped answer, close the upstream stream, free
+                # the slots) would run only when the garbage collector got to it, maybe after shutdown. Shielded:
+                # this runs inside the scope the disconnect cancelled. A finished generator closes as a no-op.
+                aclose = getattr(self.body_iterator, "aclose", None)
+                if aclose is not None:
+                    with anyio.CancelScope(shield=True):
+                        await aclose()
+            except Exception as exc:
+                logger.warning("stream_body_close_failed", error=str(exc))
+            finally:
+                self._release()

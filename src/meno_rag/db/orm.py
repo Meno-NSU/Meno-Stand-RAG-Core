@@ -10,6 +10,10 @@ from sqlalchemy.types import JSON
 
 from meno_rag.db.session import Base
 
+# pipeline_runs.interrupted_stage values that leave the answer text incomplete; "after_answer" (the whole text had been
+# streamed when the client left) does not.
+TEXT_CUT_STAGES = ("prepare", "generation")
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
@@ -91,8 +95,9 @@ class PipelineRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_retryable: Mapped[bool | None] = mapped_column(nullable=True)
     error_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # The stage that was running when the client stopped listening ("prepare" or "generation"); None for a run that
-    # ran to its end or failed. Not an error: the run itself was fine.
+    # The stage that was running when the client stopped listening: "prepare" or "generation" (TEXT_CUT_STAGES: the
+    # answer is incomplete) or "after_answer" (the text was complete); None for a run that ran to its end or failed.
+    # Not an error: the run itself was fine.
     interrupted_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

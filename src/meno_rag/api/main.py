@@ -63,7 +63,7 @@ from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings, parse_cors_origins
 from meno_rag.db import repositories
 from meno_rag.db.backup import backup_scheduler
-from meno_rag.db.orm import Conversation
+from meno_rag.db.orm import TEXT_CUT_STAGES, Conversation
 from meno_rag.db.session import Database
 from meno_rag.db.trace_store import TraceStore
 from meno_rag.db.trace_writer import TraceWriter
@@ -1322,6 +1322,7 @@ async def _stream_response(
     # was shown before it left.
     stored = False
     persist_task: asyncio.Task[None] | None = None
+    text_done = False  # every word was streamed (Менон 1.1 may still be attributing its sources)
     try:
         while not prepare_task.done() or not stage_queue.empty():
             try:
@@ -1376,6 +1377,7 @@ async def _stream_response(
             )
         generation_ms = round((time.perf_counter() - gen_started) * 1000, 2)
         stage_durations[StageName.GENERATION] = generation_ms
+        text_done = True
         yield StageEvent(
             stage=StageName.GENERATION,
             status=StageStatus.COMPLETED,
@@ -1499,7 +1501,7 @@ async def _stream_response(
             # The client left (Stop, a closed tab, a lost network): keep the question and what it was shown.
             # Guarded: nothing here may keep the slots below from being released.
             try:
-                interrupted_at = "generation" if outcome is not None else "prepare"
+                interrupted_at = "prepare" if outcome is None else "after_answer" if text_done else "generation"
                 streamed = "".join(answer_parts)
                 logger.info(
                     "chat_stream_interrupted",
@@ -1511,7 +1513,7 @@ async def _stream_response(
                     question=outcome.question if outcome is not None else _last_user_message(payload),
                     answer=streamed,
                     outcome=outcome,
-                    generation_ms=0.0,
+                    generation_ms=stage_durations.get(StageName.GENERATION, 0.0),
                     total_ms=round((time.perf_counter() - started) * 1000, 2),
                     interrupted_stage=interrupted_at,
                     shown_sources=outcome.sources if outcome is not None and not late_sources else [],
@@ -1810,7 +1812,7 @@ async def _stand_stream_response(
         if not stored and not bench:
             # The client left: keep the question and what the stand had streamed (see _stream_response).
             try:
-                interrupted_at = "generation" if relay.parts else "prepare"
+                interrupted_at = "after_answer" if relay.finished else "generation" if relay.parts else "prepare"
                 logger.info(
                     "chat_stream_interrupted",
                     request_id=completion_id,
@@ -1819,7 +1821,8 @@ async def _stand_stream_response(
                 )
                 store_answer(
                     _stand_outcome(payload, relay, capture_trace=capture_trace) if relay.parts else None,
-                    generation_ms=0.0,
+                    generation_ms=relay.stage_durations.get(StageName.GENERATION)
+                    or (round((time.perf_counter() - first_token_at) * 1000, 2) if first_token_at else 0.0),
                     total_ms=round((time.perf_counter() - started) * 1000, 2),
                     interrupted_stage=interrupted_at,
                     shown_sources=list(relay.sources),
@@ -2036,10 +2039,14 @@ async def _persist_success(
 ) -> None:
     """Store an answer: history always, the pipeline detail with the improvement consent.
 
-    With ``interrupted_stage`` ("prepare" or "generation") the client stopped listening before the end: ``answer``
-    is what had been streamed (maybe nothing), the generation stage is not recorded as completed, and ``outcome`` is
-    None when preparation had not finished, in which case ``stage_durations`` holds the stages that had.
-    ``shown_sources`` are the sources the user saw, by default ``outcome.sources``."""
+    With ``interrupted_stage`` the client stopped listening before the end of the stream. "prepare" (before the first
+    word) and "generation" (mid-text) cut the text: ``answer`` is what had been streamed, maybe nothing, the message is
+    marked interrupted and the generation stage is not recorded as completed. "after_answer" means the whole text had
+    been streamed (Менон 1.1 was still attributing its sources, or a stand had not closed its stream): the answer is
+    complete, only ``pipeline_runs.interrupted_stage`` tells. ``outcome`` is None when preparation had not finished,
+    in which case ``stage_durations`` holds the stages that had. ``shown_sources`` are the sources the user saw, by
+    default ``outcome.sources``."""
+    text_cut = interrupted_stage in TEXT_CUT_STAGES
     if shown_sources is None:
         shown_sources = outcome.sources if outcome is not None else []
     try:
@@ -2104,7 +2111,7 @@ async def _persist_success(
                     # Outside the `if improvement:` block below on purpose: these are the
                     # sources the user was shown, part of the answer, not analytics.
                     sources=shown_sources,
-                    interrupted=interrupted_stage is not None,
+                    interrupted=text_cut,
                 )
 
             # Extended RAG pipeline records + the JSONL trace are analysis detail —
@@ -2146,7 +2153,7 @@ async def _persist_success(
                         duration_ms=duration_ms,
                         detail=outcome.stage_details.get(stage) if outcome is not None else None,
                     )
-                if interrupted_stage is None:
+                if not text_cut:
                     await repositories.add_pipeline_stage(
                         session,
                         run_id=run_id,
