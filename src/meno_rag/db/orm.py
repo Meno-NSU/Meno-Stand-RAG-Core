@@ -198,25 +198,24 @@ class MessageFeedback(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
-class FeedbackEvent(Base):
-    """Every rating, comment, clear and survey answer, in the order they came (append-only).
+class FeedbackComment(Base):
+    """Every distinct comment text sent about an answer, kept once (append-only).
 
-    message_feedback and session_surveys hold only the current value, which a later change overwrites and a clear
-    deletes; this log keeps each step for analysis. kind: "rating" (run_id set) or "survey"; action: "set", "clear"
-    (value and comment empty) or "snapshot" (the current value copied in when this table was created, migration 0019).
-    Owner columns as in MessageFeedback; erasure deletes these rows too."""
+    message_feedback holds the current rating and comment: switching the thumb overwrites it, a clear deletes it,
+    a rewrite replaces the text. Ratings alone carry no history (clicking back and forth says nothing), but what a
+    person wrote does, so each new text lands here with the rating it was sent with and stays. Sending the same
+    text again adds nothing, so only typing grows this table. Owner columns as in MessageFeedback; erasure deletes
+    these rows too."""
 
-    __tablename__ = "feedback_events"
+    __tablename__ = "feedback_comments"
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
-    kind: Mapped[str] = mapped_column(String(16), nullable=False)
-    action: Mapped[str] = mapped_column(String(16), nullable=False)
-    run_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)
+    run_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
-    value: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    value: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    comment: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

@@ -45,7 +45,7 @@ def test_0019_snapshots_current_feedback_and_round_trips(tmp_path):
                 )
             )
 
-        alembic_command.upgrade(_cfg(url), "head")
+        alembic_command.upgrade(_cfg(url), "0019_keep_user_data")
 
         with engine.connect() as c:
             events = c.execute(
@@ -72,6 +72,6 @@ def test_0019_snapshots_current_feedback_and_round_trips(tmp_path):
             assert c.execute(text("SELECT content FROM messages WHERE id = 'm1'")).scalar_one() == "A"
             assert c.execute(text("SELECT value FROM message_feedback")).scalar_one() == "down"
 
-        alembic_command.upgrade(_cfg(url), "head")  # and up again
+        alembic_command.upgrade(_cfg(url), "0019_keep_user_data")  # and up again
     finally:
         engine.dispose()
