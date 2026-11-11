@@ -61,6 +61,9 @@ class AnswerTurn(BaseModel):
     request_id: str | None = None
     sources: list[SourceRef] = Field(default_factory=list)
     feedback: TurnFeedback | None = None
+    # The client stopped listening before the answer ended (Stop, a closed tab, a lost network): `content` is what
+    # had been streamed by then, possibly empty.
+    interrupted: bool = False
 
 
 class ArenaTurnSide(BaseModel):

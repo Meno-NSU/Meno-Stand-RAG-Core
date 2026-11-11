@@ -80,6 +80,7 @@ def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> UserTurn 
             request_id=message.request_id,
             sources=[SourceRef.model_validate(s) for s in (message.sources or [])],
             feedback=TurnFeedback.model_validate(raw_feedback) if raw_feedback is not None else None,
+            interrupted=bool(message.interrupted),
         )
     raise ValueError(f"Unrecognised turn kind: {kind!r}")
 

@@ -87,6 +87,34 @@ def test_turns_carry_content_model_request_id_and_sources(client, db_path):
     assert answer["sources"] == SOURCES
 
 
+def test_an_interrupted_answer_comes_back_marked(client, db_path):
+    headers = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
+
+    async def _write(session):  # a second turn the client stopped listening to
+        await repositories.append_message(session, conversation_id="c1", role="user", content="Ещё?")
+        await repositories.append_message(
+            session,
+            conversation_id="c1",
+            role="assistant",
+            content="Част",
+            model="qwen",
+            request_id="run-2",
+            sources=[],
+            interrupted=True,
+        )
+
+    _with_db(db_path, _write)
+    turns = client.get("/v1/conversations/c1", headers=headers).json()["turns"]
+
+    assert [(t["kind"], t["content"], t.get("interrupted")) for t in turns] == [
+        ("user", "Вопрос?", None),
+        ("answer", "Ответ.", False),
+        ("user", "Ещё?", None),
+        ("answer", "Част", True),
+    ]
+
+
 def test_feedback_and_survey_come_back_on_restore(client, db_path):
     headers = _guest_headers(client)
     _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))

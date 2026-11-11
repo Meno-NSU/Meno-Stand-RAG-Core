@@ -80,6 +80,7 @@ async def append_message(
     knowledge_base_id: str | None = None,
     request_id: str | None = None,
     sources: list[dict[str, str]] | None = None,
+    interrupted: bool = False,
 ) -> None:
     await ensure_conversation(session, conversation_id)
     session.add(
@@ -91,6 +92,7 @@ async def append_message(
             knowledge_base_id=knowledge_base_id,
             request_id=request_id,
             sources=None if sources is None else shown_source_refs(sources),
+            interrupted=interrupted,
         )
     )
 
@@ -330,6 +332,7 @@ async def create_pipeline_run(
     user_id: str | None = None,
     guest_session_id: str | None = None,
     stand_build: str | None = None,
+    interrupted_stage: str | None = None,
 ) -> None:
     """``user_id``/``guest_session_id`` tag the row with its subject so it can be found and
     erased even when ``session_id`` never gets a matching ``conversations`` row — the arena
@@ -359,6 +362,7 @@ async def create_pipeline_run(
             user_id=user_id,
             guest_session_id=guest_session_id,
             stand_build=stand_build,
+            interrupted_stage=interrupted_stage,
         )
     )
 
