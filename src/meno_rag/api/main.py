@@ -1812,7 +1812,10 @@ async def _stand_stream_response(
         if not stored and not bench:
             # The client left: keep the question and what the stand had streamed (see _stream_response).
             try:
-                interrupted_at = "after_answer" if relay.finished else "generation" if relay.parts else "prepare"
+                if not relay.parts:  # a finish_reason without any text is no answer (stand_empty_answer)
+                    interrupted_at = "prepare"
+                else:
+                    interrupted_at = "after_answer" if relay.finished else "generation"
                 logger.info(
                     "chat_stream_interrupted",
                     request_id=completion_id,
@@ -2039,13 +2042,13 @@ async def _persist_success(
 ) -> None:
     """Store an answer: history always, the pipeline detail with the improvement consent.
 
-    With ``interrupted_stage`` the client stopped listening before the end of the stream. "prepare" (before the first
-    word) and "generation" (mid-text) cut the text: ``answer`` is what had been streamed, maybe nothing, the message is
-    marked interrupted and the generation stage is not recorded as completed. "after_answer" means the whole text had
-    been streamed (Менон 1.1 was still attributing its sources, or a stand had not closed its stream): the answer is
-    complete, only ``pipeline_runs.interrupted_stage`` tells. ``outcome`` is None when preparation had not finished,
-    in which case ``stage_durations`` holds the stages that had. ``shown_sources`` are the sources the user saw, by
-    default ``outcome.sources``."""
+    With ``interrupted_stage`` the client stopped listening before the end of the stream, and the message is marked
+    interrupted, as the client showed it. "prepare" (before the first word) and "generation" (mid-text) cut the text:
+    ``answer`` is what had been streamed, maybe nothing, and the generation stage is not recorded as completed.
+    "after_answer" means the whole text had been streamed (Менон 1.1 was still attributing its sources, or a stand
+    had not closed its stream): the text is complete and its generation stage is recorded. ``outcome`` is None when
+    preparation had not finished, in which case ``stage_durations`` holds the stages that had. ``shown_sources`` are
+    the sources the user saw, by default ``outcome.sources``."""
     text_cut = interrupted_stage in TEXT_CUT_STAGES
     if shown_sources is None:
         shown_sources = outcome.sources if outcome is not None else []
@@ -2111,7 +2114,7 @@ async def _persist_success(
                     # Outside the `if improvement:` block below on purpose: these are the
                     # sources the user was shown, part of the answer, not analytics.
                     sources=shown_sources,
-                    interrupted=text_cut,
+                    interrupted=interrupted_stage is not None,
                 )
 
             # Extended RAG pipeline records + the JSONL trace are analysis detail —

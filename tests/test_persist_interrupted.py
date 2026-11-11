@@ -181,8 +181,8 @@ async def test_a_client_that_leaves_while_sources_are_attributed_got_the_whole_t
     await main_mod.drain_persist_tasks(5)
 
     stored = await _stored(db)
-    # The text is complete, so it is not marked interrupted; the sources were never shown.
-    assert stored["messages"] == [("user", "Q?", False, []), ("assistant", "".join(TOKENS), False, [])]
+    # The whole text, marked interrupted as the client showed it; the sources were never shown.
+    assert stored["messages"] == [("user", "Q?", False, []), ("assistant", "".join(TOKENS), True, [])]
     assert stored["runs"] == [("Q?", "after_answer", len("".join(TOKENS)), None)]
     assert ("generation", "completed") in stored["stages"]
 

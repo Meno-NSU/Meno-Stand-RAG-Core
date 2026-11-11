@@ -96,7 +96,8 @@ def _without_retried(messages: list[Message]) -> list[Message]:
             and answer.interrupted
             and question.role == "user"
             and following.role == "user"
-            and following.content == question.content
+            # The pipelines store the question with its whitespace collapsed; a Stop before that kept it as typed.
+            and following.content.split() == question.content.split()
         ):
             retried.update((i - 1, i))
     return [m for i, m in enumerate(messages) if i not in retried]

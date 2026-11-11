@@ -62,7 +62,8 @@ class Message(Base):
     turn_kind: Mapped[str] = mapped_column(String(16), default="answer", server_default="answer", nullable=False)
     arena: Mapped[dict | None] = mapped_column(JsonCompat, nullable=True)
     # True for an answer the client stopped listening to (the user pressed Stop, closed the tab, lost the network):
-    # `content` is the part that was streamed before that, possibly empty.
+    # `content` is what was streamed before that, possibly nothing, possibly all of it (the run's interrupted_stage
+    # tells which).
     interrupted: Mapped[bool] = mapped_column(default=False, server_default=false(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

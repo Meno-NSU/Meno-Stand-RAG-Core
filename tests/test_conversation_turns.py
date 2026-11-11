@@ -185,8 +185,8 @@ def test_a_stopped_answer_that_was_retried_is_left_out_of_the_restore(client, db
     async def _write(session):
         await repositories.ensure_conversation(session, "c1", guest_session_id=guest_id)
         for content, answer, interrupted in (
-            ("Когда сессия?", "Сесс", True),  # Stop, Retry
-            ("Когда сессия?", "", True),  # Stop before the first word, Retry
+            ("Когда  сессия?\n", "", True),  # Stop before the first word: the question kept as typed; Retry
+            ("Когда сессия?", "Сесс", True),  # Stop (the pipeline collapsed the whitespace), Retry
             ("Когда сессия?", "Сессия в январе.", False),
             ("А пересдачи?", "Пере", True),  # Stop, then a different question: kept
             ("Где деканат?", "В главном корпусе.", False),
