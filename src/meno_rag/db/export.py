@@ -3,7 +3,8 @@
 Opens the database read-only (SELECT only — never writes) and emits one JSON
 object per dialogue turn. Two formats:
   - finetuning: OpenAI chat shape {"messages": [system, user, assistant]};
-    --with-context uses the full assembled prompt, else the clean question.
+    --with-context uses the full assembled prompt, else the clean question. Answers the
+    client stopped mid-text are left out: their completion is a fragment, not a target.
   - analytics: one flat record per turn (metadata + retrieved + few-shots).
 """
 
@@ -16,11 +17,11 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TextIO
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, or_, select
 from sqlalchemy.orm import Session
 
 from meno_rag.config import get_settings
-from meno_rag.db.orm import GenerationRecord, MessageFeedback, PipelineRun
+from meno_rag.db.orm import TEXT_CUT_STAGES, GenerationRecord, MessageFeedback, PipelineRun
 from meno_rag.db.trace_store import PipelineTrace, TraceBase
 
 
@@ -32,6 +33,7 @@ def _rows(session: Session, *, session_id: str | None):
     stmt = (
         select(GenerationRecord, PipelineRun)
         .join(PipelineRun, GenerationRecord.run_id == PipelineRun.id)
+        .where(or_(PipelineRun.interrupted_stage.is_(None), PipelineRun.interrupted_stage.not_in(TEXT_CUT_STAGES)))
         .order_by(PipelineRun.created_at)
     )
     if session_id is not None:
@@ -75,6 +77,8 @@ def iter_analytics(session: Session, *, session_id: str | None = None) -> Iterat
             "search_queries": run.search_queries,
             "total_ms": run.total_ms,
             "response_len": run.response_len,
+            # Set when the client stopped listening (see PipelineRun.interrupted_stage): the answer may be a fragment.
+            "interrupted_stage": run.interrupted_stage,
             "model": run.generation_model,
             "retrieved": gen.retrieved,
             "fewshots": gen.fewshots,

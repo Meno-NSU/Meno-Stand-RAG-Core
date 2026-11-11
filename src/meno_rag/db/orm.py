@@ -3,12 +3,16 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, false
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
 from meno_rag.db.session import Base
+
+# pipeline_runs.interrupted_stage values that leave the answer text incomplete; "after_answer" (the whole text had been
+# streamed when the client left) does not.
+TEXT_CUT_STAGES = ("prepare", "generation")
 
 
 def utcnow() -> datetime:
@@ -57,6 +61,10 @@ class Message(Base):
     # alternation the backend requires still holds.
     turn_kind: Mapped[str] = mapped_column(String(16), default="answer", server_default="answer", nullable=False)
     arena: Mapped[dict | None] = mapped_column(JsonCompat, nullable=True)
+    # True for an answer the client stopped listening to (the user pressed Stop, closed the tab, lost the network):
+    # `content` is what was streamed before that, possibly nothing, possibly all of it (the run's interrupted_stage
+    # tells which).
+    interrupted: Mapped[bool] = mapped_column(default=False, server_default=false(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
@@ -88,6 +96,10 @@ class PipelineRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_retryable: Mapped[bool | None] = mapped_column(nullable=True)
     error_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The stage that was running when the client stopped listening: "prepare" or "generation" (TEXT_CUT_STAGES: the
+    # answer is incomplete) or "after_answer" (the text was complete); None for a run that ran to its end or failed.
+    # Not an error: the run itself was fine.
+    interrupted_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     stages: Mapped[list[PipelineStageRun]] = relationship(back_populates="pipeline_run", cascade="all, delete-orphan")
@@ -184,6 +196,28 @@ class MessageFeedback(Base):
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class FeedbackEvent(Base):
+    """Every rating, comment, clear and survey answer, in the order they came (append-only).
+
+    message_feedback and session_surveys hold only the current value, which a later change overwrites and a clear
+    deletes; this log keeps each step for analysis. kind: "rating" (run_id set) or "survey"; action: "set", "clear"
+    (value and comment empty) or "snapshot" (the current value copied in when this table was created, migration 0019).
+    Owner columns as in MessageFeedback; erasure deletes these rows too."""
+
+    __tablename__ = "feedback_events"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    guest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    value: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class SessionSurvey(Base):

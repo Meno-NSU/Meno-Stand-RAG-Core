@@ -4,7 +4,7 @@ import asyncio
 import random
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing, asynccontextmanager, suppress
 from types import SimpleNamespace
@@ -63,7 +63,7 @@ from meno_rag.cache.redis_client import ArenaLock, make_redis
 from meno_rag.config import Settings, get_settings, parse_cors_origins
 from meno_rag.db import repositories
 from meno_rag.db.backup import backup_scheduler
-from meno_rag.db.orm import Conversation
+from meno_rag.db.orm import TEXT_CUT_STAGES, Conversation
 from meno_rag.db.session import Database
 from meno_rag.db.trace_store import TraceStore
 from meno_rag.db.trace_writer import TraceWriter
@@ -374,6 +374,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Answers still being stored (a client that left just before shutdown) need the database and the trace writer.
+    await drain_persist_tasks(PERSIST_DRAIN_TIMEOUT_S)
     if backup_task is not None:
         backup_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -1288,10 +1290,39 @@ async def _stream_response(
     async def sink(event: StageEvent) -> None:
         await stage_queue.put(event)
 
+    def store_answer(**turn: Any) -> asyncio.Task[None]:
+        return _spawn_persist(
+            _persist_success(
+                database=database,
+                run_id=completion_id,
+                session_id=session_id,
+                model=_public_model(payload, runtime),
+                generation_model=runtime.generation.model_id,
+                core_model=runtime.core.model_id,
+                endpoint=runtime.generation.base_url,
+                stream=True,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                arena=payload.arena,
+                kb_id=participant.kb if participant else kb_id,
+                trace_writer=getattr(request.app.state, "trace_writer", None),
+                **turn,
+            ),
+            request_id=completion_id,
+        )
+
     prepare_task = asyncio.create_task(
         pipeline.prepare(messages=payload.messages, runtime=runtime, stage_sink=sink, capture_trace=capture_trace)
     )
     outcome = None
+    late_sources = False
+    # Set once the answer or the failure is on its way to the database; otherwise `finally` stores what the client
+    # was shown before it left.
+    stored = False
+    persist_task: asyncio.Task[None] | None = None
+    text_done = False  # every word was streamed (Менон 1.1 may still be attributing its sources)
     try:
         while not prepare_task.done() or not stage_queue.empty():
             try:
@@ -1346,6 +1377,7 @@ async def _stream_response(
             )
         generation_ms = round((time.perf_counter() - gen_started) * 1000, 2)
         stage_durations[StageName.GENERATION] = generation_ms
+        text_done = True
         yield StageEvent(
             stage=StageName.GENERATION,
             status=StageStatus.COMPLETED,
@@ -1358,6 +1390,18 @@ async def _stream_response(
             if outcome.sources:
                 yield sse_event("sources", {"sources": outcome.sources})
 
+        total_ms = round((time.perf_counter() - started) * 1000, 2)
+        answer = "".join(answer_parts)
+        if not bench:
+            # Started before the last events go out, so a client that leaves on them leaves a finished answer.
+            stored = True
+            persist_task = store_answer(
+                question=outcome.question,
+                answer=answer,
+                outcome=outcome,
+                generation_ms=generation_ms,
+                total_ms=total_ms,
+            )
         done_chunk = openai_chunk(
             completion_id=completion_id,
             created=created_ts,
@@ -1366,7 +1410,6 @@ async def _stream_response(
             finish_reason="stop",
         )
         yield sse_data(done_chunk)
-        total_ms = round((time.perf_counter() - started) * 1000, 2)
         yield StageSummary(total_ms=total_ms, stages=stage_durations).to_sse()
         if bench:
             # After the answer, not before it: the blob is large and would
@@ -1376,17 +1419,15 @@ async def _stream_response(
                 yield sse_event("pipeline_trace", {"pipeline_trace": trace})
         yield sse_data("[DONE]")
 
-        answer = "".join(answer_parts)
         if bench:
             metrics_mod.record_bench_request(status="ok")
         else:
-            # Recorded BEFORE _persist_success and from the same instant as the
-            # total_ms already sent to the client in StageSummary. Persisting
-            # writes pipeline_runs, stages, sources and generation_records (full
-            # prompt, answer and retrieved-chunk JSON); measuring after it charged
-            # that database work to chat latency, so the histogram reported a
-            # number no user ever experienced. Observed on the live host: the UI
-            # showed 7-8s while p95/p99 read 26s and 29.2s.
+            # From the same instant as the total_ms already sent to the client in StageSummary,
+            # not after the write: persisting writes pipeline_runs, stages, sources and
+            # generation_records (full prompt, answer and retrieved-chunk JSON); measuring after
+            # it charged that database work to chat latency, so the histogram reported a number
+            # no user ever experienced. Observed on the live host: the UI showed 7-8s while
+            # p95/p99 read 26s and 29.2s.
             metrics_mod.record_chat_request(
                 provider=runtime.generation.provider,
                 stream=True,
@@ -1395,28 +1436,9 @@ async def _stream_response(
                 **_metric_labels(participant),
             )
             _record_stage_times(participant, stage_durations)
-            await _persist_success(
-                database=database,
-                run_id=completion_id,
-                session_id=session_id,
-                model=_public_model(payload, runtime),
-                generation_model=runtime.generation.model_id,
-                core_model=runtime.core.model_id,
-                endpoint=runtime.generation.base_url,
-                question=outcome.question,
-                answer=answer,
-                outcome=outcome,
-                generation_ms=generation_ms,
-                total_ms=total_ms,
-                stream=True,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                user_id=user_id,
-                guest_session_id=guest_session_id,
-                arena=payload.arena,
-                kb_id=participant.kb if participant else kb_id,
-                trace_writer=request.app.state.trace_writer,
-            )
+        if persist_task is not None:
+            # The response ends when the answer is stored; if the client leaves meanwhile, the write goes on.
+            await asyncio.shield(persist_task)
     except Exception as exc:
         stage = "generation" if outcome is not None else "prepare"
         classified = classify_error(exc)
@@ -1427,6 +1449,25 @@ async def _stream_response(
             error_code=classified.code,
             error_stage=stage,
         )
+        if not bench and not stored:
+            stored = True
+            persist_task = _spawn_persist(
+                _persist_failure(
+                    database,
+                    completion_id,
+                    session_id,
+                    runtime,
+                    payload,
+                    str(exc),
+                    stream=True,
+                    classified=classified,
+                    stage=stage,
+                    user_id=user_id,
+                    guest_session_id=guest_session_id,
+                    kb_id=participant.kb if participant else kb_id,
+                ),
+                request_id=completion_id,
+            )
         for text in _failure_sse(
             classified,
             stage=stage,
@@ -1447,20 +1488,8 @@ async def _stream_response(
                 seconds=time.perf_counter() - started,
                 **_metric_labels(participant),
             )
-            await _persist_failure(
-                database,
-                completion_id,
-                session_id,
-                runtime,
-                payload,
-                str(exc),
-                stream=True,
-                classified=classified,
-                stage=stage,
-                user_id=user_id,
-                guest_session_id=guest_session_id,
-                kb_id=participant.kb if participant else kb_id,
-            )
+        if persist_task is not None:
+            await asyncio.shield(persist_task)
     finally:
         # If the client disconnected mid-prepare, the background prepare task is
         # still running the (expensive) rewrite/retrieval/rerank work. Cancel it
@@ -1468,6 +1497,30 @@ async def _stream_response(
         # admission slot is about to be released below.
         if not prepare_task.done():
             prepare_task.cancel()
+        if not stored and not bench:
+            # The client left (Stop, a closed tab, a lost network): keep the question and what it was shown.
+            # Guarded: nothing here may keep the slots below from being released.
+            try:
+                interrupted_at = "prepare" if outcome is None else "after_answer" if text_done else "generation"
+                streamed = "".join(answer_parts)
+                logger.info(
+                    "chat_stream_interrupted",
+                    request_id=completion_id,
+                    stage=interrupted_at,
+                    streamed_chars=len(streamed),
+                )
+                store_answer(
+                    question=outcome.question if outcome is not None else _last_user_message(payload),
+                    answer=streamed,
+                    outcome=outcome,
+                    generation_ms=stage_durations.get(StageName.GENERATION, 0.0),
+                    total_ms=round((time.perf_counter() - started) * 1000, 2),
+                    interrupted_stage=interrupted_at,
+                    shown_sources=outcome.sources if outcome is not None and not late_sources else [],
+                    stage_durations=dict(stage_durations),
+                )
+            except Exception as exc:
+                logger.warning("persist_interrupted_failed", request_id=completion_id, error=str(exc))
         if not bench:
             metrics_mod.dec_chat_in_flight()
         if on_finish is not None:
@@ -1622,6 +1675,37 @@ async def _stand_stream_response(
     if not bench:
         metrics_mod.inc_chat_in_flight()
     want_trace = False
+
+    def store_answer(outcome: Any, **turn: Any) -> asyncio.Task[None]:
+        return _spawn_persist(
+            _persist_success(
+                database=database,
+                run_id=completion_id,
+                session_id=session_id,
+                model=target.public_id,
+                generation_model=outcome.generation_model if outcome is not None else target.model,
+                core_model=outcome.core_model if outcome is not None else target.model,
+                endpoint=target.backend.url,
+                question=_last_user_message(payload),
+                answer=relay.answer,
+                outcome=outcome,
+                stream=True,
+                temperature=payload.temperature,
+                max_tokens=payload.max_tokens or 0,
+                user_id=user_id,
+                guest_session_id=guest_session_id,
+                arena=payload.arena,
+                kb_id=target.kb_id,
+                trace_writer=getattr(request.app.state, "trace_writer", None),
+                stand_build=target.build,
+                **turn,
+            ),
+            request_id=completion_id,
+        )
+
+    # As in _stream_response: set once the answer or the failure is on its way to the database.
+    stored = False
+    persist_task: asyncio.Task[None] | None = None
     try:
         # Run details, and the stand's own error text, only for a benchmark or a subject who allowed improvement.
         want_trace = bench or await _has_improvement_consent(
@@ -1649,9 +1733,18 @@ async def _stand_stream_response(
                 yield text
         if not relay.parts:
             raise StandStreamError("stand_empty_answer", "the stand finished without any answer text", retryable=True)
+        total_ms = round((time.perf_counter() - started) * 1000, 2)
+        if not bench:
+            # Started before our last events go out, as in _stream_response.
+            stored = True
+            persist_task = store_answer(
+                _stand_outcome(payload, relay, capture_trace=capture_trace),
+                generation_ms=relay.stage_durations.get(StageName.GENERATION)
+                or round((time.perf_counter() - (first_token_at or started)) * 1000, 2),
+                total_ms=total_ms,
+            )
         for text in relay.closing():
             yield text
-        total_ms = round((time.perf_counter() - started) * 1000, 2)
         yield relay.summary(total_ms)
         yield sse_data("[DONE]")
         if bench:
@@ -1660,33 +1753,8 @@ async def _stand_stream_response(
             metrics_mod.record_chat_request(
                 provider="external", stream=True, status="ok", seconds=total_ms / 1000.0, **_metric_labels(who)
             )
-            outcome = _stand_outcome(payload, relay, capture_trace=capture_trace)
-            generation_ms = relay.stage_durations.get(StageName.GENERATION) or round(
-                (time.perf_counter() - (first_token_at or started)) * 1000, 2
-            )
-            await _persist_success(
-                database=database,
-                run_id=completion_id,
-                session_id=session_id,
-                model=target.public_id,
-                generation_model=outcome.generation_model,
-                core_model=outcome.core_model,
-                endpoint=target.backend.url,
-                question=_last_user_message(payload),
-                answer=relay.answer,
-                outcome=outcome,
-                generation_ms=generation_ms,
-                total_ms=total_ms,
-                stream=True,
-                temperature=payload.temperature,
-                max_tokens=payload.max_tokens or 0,
-                user_id=user_id,
-                guest_session_id=guest_session_id,
-                arena=payload.arena,
-                kb_id=target.kb_id,
-                trace_writer=request.app.state.trace_writer,
-                stand_build=target.build,
-            )
+        if persist_task is not None:
+            await asyncio.shield(persist_task)
     except Exception as exc:
         classified = exc.classified() if isinstance(exc, StandStreamError) else classify_error(exc)
         error, withheld = _stand_error_text(exc, classified, consent=want_trace)
@@ -1698,6 +1766,25 @@ async def _stand_stream_response(
             error_code=classified.code,
             exc_info=not withheld,  # a traceback would carry the text again
         )
+        if not bench and not stored:
+            stored = True
+            persist_task = _spawn_persist(
+                _persist_failure(
+                    database,
+                    completion_id,
+                    session_id,
+                    runtime,
+                    payload,
+                    error,
+                    stream=True,
+                    classified=classified,
+                    stage="generation",
+                    user_id=user_id,
+                    guest_session_id=guest_session_id,
+                    kb_id=target.kb_id,
+                ),
+                request_id=completion_id,
+            )
         for text in _failure_sse(
             classified,
             stage="generation",
@@ -1719,21 +1806,31 @@ async def _stand_stream_response(
                 seconds=time.perf_counter() - started,
                 **_metric_labels(who),
             )
-            await _persist_failure(
-                database,
-                completion_id,
-                session_id,
-                runtime,
-                payload,
-                error,
-                stream=True,
-                classified=classified,
-                stage="generation",
-                user_id=user_id,
-                guest_session_id=guest_session_id,
-                kb_id=target.kb_id,
-            )
+        if persist_task is not None:
+            await asyncio.shield(persist_task)
     finally:
+        if not stored and not bench:
+            # The client left: keep the question and what the stand had streamed (see _stream_response).
+            try:
+                # A finish_reason without any text is no answer (stand_empty_answer): "prepare", not "after_answer".
+                interrupted_at = "prepare" if not relay.parts else "after_answer" if relay.finished else "generation"
+                logger.info(
+                    "chat_stream_interrupted",
+                    request_id=completion_id,
+                    stage=interrupted_at,
+                    streamed_chars=len(relay.answer),
+                )
+                store_answer(
+                    _stand_outcome(payload, relay, capture_trace=capture_trace) if relay.parts else None,
+                    generation_ms=relay.stage_durations.get(StageName.GENERATION)
+                    or (round((time.perf_counter() - first_token_at) * 1000, 2) if first_token_at else 0.0),
+                    total_ms=round((time.perf_counter() - started) * 1000, 2),
+                    interrupted_stage=interrupted_at,
+                    shown_sources=list(relay.sources),
+                    stage_durations={k: v for k, v in relay.stage_durations.items() if k != StageName.GENERATION},
+                )
+            except Exception as exc:
+                logger.warning("persist_interrupted_failed", request_id=completion_id, error=str(exc))
         if not bench:
             metrics_mod.dec_chat_in_flight()
         if on_finish is not None:
@@ -1883,6 +1980,37 @@ def _extract_prompts(qa_messages: list[dict[str, str]]) -> tuple[str, str]:
     return system_prompt, user_prompt
 
 
+# Answers and failures on their way to the database. Each write runs as its own task: when a client leaves, Starlette
+# cancels the response and with it any await inside the body, which used to cut a write short (or skip it). asyncio
+# keeps only weak references to tasks, so this set holds them until they end; shutdown waits for what is left.
+_PERSIST_TASKS: set[asyncio.Task[None]] = set()
+PERSIST_DRAIN_TIMEOUT_S = 10.0
+
+
+def _spawn_persist(coro: Coroutine[Any, Any, None], *, request_id: str) -> asyncio.Task[None]:
+    task = asyncio.create_task(coro)
+    _PERSIST_TASKS.add(task)
+
+    def _done(t: asyncio.Task[None]) -> None:
+        _PERSIST_TASKS.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.warning("persist_task_failed", request_id=request_id, error=str(t.exception()))
+
+    task.add_done_callback(_done)
+    return task
+
+
+async def drain_persist_tasks(timeout_s: float) -> int:
+    """Wait up to ``timeout_s`` for the writes still running; returns how many did not finish."""
+    pending = set(_PERSIST_TASKS)
+    if not pending:
+        return 0
+    _, unfinished = await asyncio.wait(pending, timeout=timeout_s)
+    if unfinished:
+        logger.warning("persist_tasks_unfinished", count=len(unfinished))
+    return len(unfinished)
+
+
 async def _persist_success(
     *,
     database: Database,
@@ -1906,7 +2034,22 @@ async def _persist_success(
     kb_id: str = LEGACY_KB_ID,
     trace_writer: TraceWriter | None = None,
     stand_build: str | None = None,
+    interrupted_stage: str | None = None,
+    shown_sources: list | None = None,
+    stage_durations: dict[str, float] | None = None,
 ) -> None:
+    """Store an answer: history always, the pipeline detail with the improvement consent.
+
+    With ``interrupted_stage`` the client stopped listening before the end of the stream, and the message is marked
+    interrupted, as the client showed it. "prepare" (before the first word) and "generation" (mid-text) cut the text:
+    ``answer`` is what had been streamed, maybe nothing, and the generation stage is not recorded as completed.
+    "after_answer" means the whole text had been streamed (Менон 1.1 was still attributing its sources, or a stand
+    had not closed its stream): the text is complete and its generation stage is recorded. ``outcome`` is None when
+    preparation had not finished, in which case ``stage_durations`` holds the stages that had. ``shown_sources`` are
+    the sources the user saw, by default ``outcome.sources``."""
+    text_cut = interrupted_stage in TEXT_CUT_STAGES
+    if shown_sources is None:
+        shown_sources = outcome.sources if outcome is not None else []
     try:
         async with database.sessionmaker() as session:
             # What we store depends on the subject's recorded consent:
@@ -1968,7 +2111,8 @@ async def _persist_success(
                     request_id=run_id,
                     # Outside the `if improvement:` block below on purpose: these are the
                     # sources the user was shown, part of the answer, not analytics.
-                    sources=outcome.sources,
+                    sources=shown_sources,
+                    interrupted=interrupted_stage is not None,
                 )
 
             # Extended RAG pipeline records + the JSONL trace are analysis detail —
@@ -1976,7 +2120,10 @@ async def _persist_success(
             if improvement:
                 trace = getattr(outcome, "trace", None)
                 if trace_writer is not None and trace is not None:
-                    trace_writer.enqueue(run_id=run_id, session_id=session_id, trace={**trace, "answer": answer})
+                    extra = {"interrupted_stage": interrupted_stage} if interrupted_stage else {}
+                    trace_writer.enqueue(
+                        run_id=run_id, session_id=session_id, trace={**trace, "answer": answer, **extra}
+                    )
                 await repositories.create_pipeline_run(
                     session,
                     run_id=run_id,
@@ -1987,50 +2134,54 @@ async def _persist_success(
                     endpoint=endpoint,
                     knowledge_base_id=kb_id,
                     user_question=question,
-                    search_queries=outcome.search_queries,
+                    search_queries=outcome.search_queries if outcome is not None else None,
                     total_ms=total_ms,
                     response_len=len(answer),
                     stream=stream,
                     user_id=user_id,
                     guest_session_id=guest_session_id,
                     stand_build=stand_build,
+                    interrupted_stage=interrupted_stage,
                 )
                 await session.flush()  # ensure pipeline_run id is visible for generation_record FK
-                for stage, duration_ms in outcome.stage_durations_ms.items():
+                completed = outcome.stage_durations_ms if outcome is not None else (stage_durations or {})
+                for stage, duration_ms in completed.items():
                     await repositories.add_pipeline_stage(
                         session,
                         run_id=run_id,
                         stage=stage,
                         status=StageStatus.COMPLETED,
                         duration_ms=duration_ms,
-                        detail=outcome.stage_details.get(stage),
+                        detail=outcome.stage_details.get(stage) if outcome is not None else None,
                     )
-                await repositories.add_pipeline_stage(
-                    session,
-                    run_id=run_id,
-                    stage=StageName.GENERATION,
-                    status=StageStatus.COMPLETED,
-                    duration_ms=generation_ms,
-                    detail=None,
-                )
-                await repositories.add_sources(session, run_id=run_id, sources=outcome.sources)
-                system_prompt, user_prompt = _extract_prompts(outcome.qa_messages)
-                await repositories.create_generation_record(
-                    session,
-                    run_id=run_id,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    dialogue_history=outcome.prepared_dialogue_history,
-                    raw_completion=answer,
-                    retrieved=outcome.retrieved,
-                    fewshots=outcome.fewshots,
-                    generation_params={
-                        "generation_model": generation_model,
-                        "core_model": core_model,
-                        "temperature": temperature,
-                        "max_output_tokens": max_tokens,
-                    },
-                )
+                if not text_cut:
+                    await repositories.add_pipeline_stage(
+                        session,
+                        run_id=run_id,
+                        stage=StageName.GENERATION,
+                        status=StageStatus.COMPLETED,
+                        duration_ms=generation_ms,
+                        detail=None,
+                    )
+                if outcome is not None:  # None: interrupted while preparing, no sources or prompt yet
+                    await repositories.add_sources(session, run_id=run_id, sources=outcome.sources)
+                    system_prompt, user_prompt = _extract_prompts(outcome.qa_messages)
+                    await repositories.create_generation_record(
+                        session,
+                        run_id=run_id,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        dialogue_history=outcome.prepared_dialogue_history,
+                        raw_completion=answer,
+                        retrieved=outcome.retrieved,
+                        fewshots=outcome.fewshots,
+                        generation_params={
+                            "generation_model": generation_model,
+                            "core_model": core_model,
+                            "temperature": temperature,
+                            "max_output_tokens": max_tokens,
+                        },
+                    )
             await session.commit()
     except Exception as exc:
         # Persistence is best-effort: a successful answer was already produced/

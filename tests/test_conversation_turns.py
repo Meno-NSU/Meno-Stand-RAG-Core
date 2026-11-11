@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from meno_rag.api import auth, feedback, guest, history
 from meno_rag.config import Settings
@@ -87,6 +87,34 @@ def test_turns_carry_content_model_request_id_and_sources(client, db_path):
     assert answer["sources"] == SOURCES
 
 
+def test_an_interrupted_answer_comes_back_marked(client, db_path):
+    headers = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
+
+    async def _write(session):  # a second turn the client stopped listening to
+        await repositories.append_message(session, conversation_id="c1", role="user", content="Ещё?")
+        await repositories.append_message(
+            session,
+            conversation_id="c1",
+            role="assistant",
+            content="Част",
+            model="qwen",
+            request_id="run-2",
+            sources=[],
+            interrupted=True,
+        )
+
+    _with_db(db_path, _write)
+    turns = client.get("/v1/conversations/c1", headers=headers).json()["turns"]
+
+    assert [(t["kind"], t["content"], t.get("interrupted")) for t in turns] == [
+        ("user", "Вопрос?", None),
+        ("answer", "Ответ.", False),
+        ("user", "Ещё?", None),
+        ("answer", "Част", True),
+    ]
+
+
 def test_feedback_and_survey_come_back_on_restore(client, db_path):
     headers = _guest_headers(client)
     _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
@@ -147,3 +175,64 @@ def test_openapi_publishes_the_turn_shapes(client):
     schema = client.get("/openapi.json").json()
     names = set(schema["components"]["schemas"])
     assert {"UserTurn", "AnswerTurn", "ArenaTurn", "ArenaTurnSide", "ConversationResponse"} <= names
+
+
+def test_a_stopped_answer_that_was_retried_is_left_out_of_the_restore(client, db_path):
+    # The client drops the stopped bubble on Retry and asks the same question again: it shows the question once.
+    headers = _guest_headers(client)
+    guest_id = _guest_session_id(db_path)
+
+    async def _write(session):
+        await repositories.ensure_conversation(session, "c1", guest_session_id=guest_id)
+        for content, answer, interrupted in (
+            ("Когда  сессия?\n", "", True),  # Stop before the first word: the question kept as typed; Retry
+            ("Когда сессия?", "Сесс", True),  # Stop (the pipeline collapsed the whitespace), Retry
+            ("Когда сессия?", "Сессия в январе.", False),
+            ("А пересдачи?", "Пере", True),  # Stop, then a different question: kept
+            ("Где деканат?", "В главном корпусе.", False),
+        ):
+            await repositories.append_message(session, conversation_id="c1", role="user", content=content)
+            await repositories.append_message(
+                session, conversation_id="c1", role="assistant", content=answer, interrupted=interrupted
+            )
+
+    _with_db(db_path, _write)
+    turns = client.get("/v1/conversations/c1", headers=headers).json()["turns"]
+
+    assert [(t["kind"], t["content"], t.get("interrupted")) for t in turns] == [
+        ("user", "Когда сессия?", None),
+        ("answer", "Сессия в январе.", False),
+        ("user", "А пересдачи?", None),
+        ("answer", "Пере", True),
+        ("user", "Где деканат?", None),
+        ("answer", "В главном корпусе.", False),
+    ]
+
+
+def test_the_feedback_endpoints_keep_every_step(client, db_path):
+    headers = _guest_headers(client)
+    _seed_answer_turn(db_path, conv_id="c1", guest_session_id=_guest_session_id(db_path))
+    for value, comment in (("up", None), ("down", "не тот год")):
+        body = {"completion_id": "run-1", "session_id": "c1", "value": value, "comment": comment}
+        assert client.post("/v1/feedback", json=body, headers=headers).status_code == 200
+    assert (
+        client.post(
+            "/v1/feedback/clear", json={"completion_id": "run-1", "session_id": "c1"}, headers=headers
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post("/v1/feedback/survey", json={"session_id": "c1", "answer": "maybe"}, headers=headers).status_code
+        == 200
+    )
+
+    async def _read(session):
+        rows = await session.execute(text("SELECT kind, action, value, comment FROM feedback_events ORDER BY id"))
+        return [tuple(r) for r in rows.all()]
+
+    assert _with_db(db_path, _read) == [
+        ("rating", "set", "up", None),
+        ("rating", "set", "down", "не тот год"),
+        ("rating", "clear", None, None),
+        ("survey", "set", "maybe", None),
+    ]

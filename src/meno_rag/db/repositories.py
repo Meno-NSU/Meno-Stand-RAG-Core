@@ -11,6 +11,7 @@ from meno_rag.db.orm import (
     ArenaVote,
     ConsentEvent,
     Conversation,
+    FeedbackEvent,
     GenerationRecord,
     GuestSession,
     Message,
@@ -79,6 +80,7 @@ async def append_message(
     knowledge_base_id: str | None = None,
     request_id: str | None = None,
     sources: list[dict[str, str]] | None = None,
+    interrupted: bool = False,
 ) -> None:
     await ensure_conversation(session, conversation_id)
     session.add(
@@ -90,6 +92,7 @@ async def append_message(
             knowledge_base_id=knowledge_base_id,
             request_id=request_id,
             sources=None if sources is None else shown_source_refs(sources),
+            interrupted=interrupted,
         )
     )
 
@@ -98,12 +101,13 @@ async def delete_conversation_cascade(session: AsyncSession, conversation_id: st
     """Delete a conversation and every record linked to it (one transaction; caller commits).
 
     Only ``messages`` has a real FK to ``conversations`` (ON DELETE CASCADE). The
-    pipeline_runs subtree, feedback, surveys, and arena votes are joined by the plain
+    pipeline_runs subtree, feedback (current values and their history), surveys, and arena votes are joined by the plain
     ``session_id`` string, so we delete them explicitly. Deleting a pipeline_run cascades
     to its stage runs / sources / generation record via their ``run_id`` FK.
     """
     await session.execute(delete(ArenaVote).where(ArenaVote.session_id == conversation_id))
     await session.execute(delete(MessageFeedback).where(MessageFeedback.session_id == conversation_id))
+    await session.execute(delete(FeedbackEvent).where(FeedbackEvent.session_id == conversation_id))
     await session.execute(delete(SessionSurvey).where(SessionSurvey.session_id == conversation_id))
     await session.execute(delete(PipelineRun).where(PipelineRun.session_id == conversation_id))
     await session.execute(delete(Conversation).where(Conversation.id == conversation_id))
@@ -149,7 +153,8 @@ async def delete_subject_data(
     one, which the write-side ownership policy in api/feedback.py and api/arena.py still
     lets anyone touch; see conversation_owner_matches). ArenaVote, MessageFeedback,
     SessionSurvey, and PipelineRun all carry both a user_id column and a guest_session_id
-    column, so the two branches reach equally far: for a user we sweep all four by user_id;
+    column (so does FeedbackEvent, the history of feedback and survey answers, swept beside
+    MessageFeedback), so the two branches reach equally far: for a user we sweep all four by user_id;
     for a guest, by guest_session_id. Aggregate Elo (arena_ratings) is anonymous and stays
     regardless.
 
@@ -180,12 +185,14 @@ async def delete_subject_data(
     if user_id is not None:
         await session.execute(delete(ArenaVote).where(ArenaVote.user_id == user_id))
         await session.execute(delete(MessageFeedback).where(MessageFeedback.user_id == user_id))
+        await session.execute(delete(FeedbackEvent).where(FeedbackEvent.user_id == user_id))
         await session.execute(delete(SessionSurvey).where(SessionSurvey.user_id == user_id))
         await session.execute(delete(PipelineRun).where(PipelineRun.user_id == user_id))
         await session.execute(delete(User).where(User.id == user_id))
     else:
         await session.execute(delete(ArenaVote).where(ArenaVote.guest_session_id == guest_session_id))
         await session.execute(delete(MessageFeedback).where(MessageFeedback.guest_session_id == guest_session_id))
+        await session.execute(delete(FeedbackEvent).where(FeedbackEvent.guest_session_id == guest_session_id))
         await session.execute(delete(SessionSurvey).where(SessionSurvey.guest_session_id == guest_session_id))
         await session.execute(delete(PipelineRun).where(PipelineRun.guest_session_id == guest_session_id))
         await session.execute(delete(GuestSession).where(GuestSession.id == guest_session_id))
@@ -325,6 +332,7 @@ async def create_pipeline_run(
     user_id: str | None = None,
     guest_session_id: str | None = None,
     stand_build: str | None = None,
+    interrupted_stage: str | None = None,
 ) -> None:
     """``user_id``/``guest_session_id`` tag the row with its subject so it can be found and
     erased even when ``session_id`` never gets a matching ``conversations`` row — the arena
@@ -354,6 +362,7 @@ async def create_pipeline_run(
             user_id=user_id,
             guest_session_id=guest_session_id,
             stand_build=stand_build,
+            interrupted_stage=interrupted_stage,
         )
     )
 
@@ -390,6 +399,34 @@ async def add_sources(session: AsyncSession, *, run_id: str, sources: list[dict[
         )
 
 
+async def append_feedback_event(
+    session: AsyncSession,
+    *,
+    kind: str,
+    action: str,
+    session_id: str,
+    run_id: str | None = None,
+    value: str | None = None,
+    comment: str | None = None,
+    user_id: str | None = None,
+    guest_session_id: str | None = None,
+) -> None:
+    """One step in the feedback history (see FeedbackEvent); written in the caller's transaction, beside the
+    change to the current value, so the two never disagree."""
+    session.add(
+        FeedbackEvent(
+            kind=kind,
+            action=action,
+            run_id=run_id,
+            session_id=session_id,
+            value=value,
+            comment=comment,
+            user_id=user_id,
+            guest_session_id=guest_session_id,
+        )
+    )
+
+
 async def upsert_message_feedback(
     session: AsyncSession,
     *,
@@ -407,6 +444,17 @@ async def upsert_message_feedback(
         )
     )
     feedback = result.scalar_one_or_none()
+    await append_feedback_event(
+        session,
+        kind="rating",
+        action="set",
+        run_id=run_id,
+        session_id=session_id,
+        value=value,
+        comment=comment,
+        user_id=user_id,
+        guest_session_id=guest_session_id,
+    )
     if feedback is None:
         session.add(
             MessageFeedback(
@@ -455,7 +503,18 @@ async def clear_message_feedback(
     result = await session.execute(delete(MessageFeedback).where(*clause))
     # DELETE yields a CursorResult (has rowcount) at runtime; the async execute()
     # return type is the broader Result, so mypy needs the hint.
-    return result.rowcount or 0  # type: ignore[attr-defined]
+    removed: int = result.rowcount or 0  # type: ignore[attr-defined]
+    if removed:  # a clear that found nothing of the caller's changed nothing, so the history stays as it was
+        await append_feedback_event(
+            session,
+            kind="rating",
+            action="clear",
+            run_id=run_id,
+            session_id=session_id,
+            user_id=user_id,
+            guest_session_id=guest_session_id,
+        )
+    return removed
 
 
 async def get_conversation_feedback(
@@ -675,6 +734,15 @@ async def upsert_session_survey(
 ) -> None:
     result = await session.execute(select(SessionSurvey).where(SessionSurvey.session_id == session_id))
     survey = result.scalar_one_or_none()
+    await append_feedback_event(
+        session,
+        kind="survey",
+        action="set",
+        session_id=session_id,
+        value=answer,
+        user_id=user_id,
+        guest_session_id=guest_session_id,
+    )
     if survey is None:
         session.add(
             SessionSurvey(

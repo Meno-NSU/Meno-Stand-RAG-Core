@@ -80,8 +80,27 @@ def _serialize_turn(message: Message, *, feedback: dict[str, dict]) -> UserTurn 
             request_id=message.request_id,
             sources=[SourceRef.model_validate(s) for s in (message.sources or [])],
             feedback=TurnFeedback.model_validate(raw_feedback) if raw_feedback is not None else None,
+            interrupted=bool(message.interrupted),
         )
     raise ValueError(f"Unrecognised turn kind: {kind!r}")
+
+
+def _without_retried(messages: list[Message]) -> list[Message]:
+    """Leave out a question and its interrupted answer when the next question repeats it: that is Retry after Stop, and
+    the client then shows the question once, with the new answer in place of the stopped one. The rows stay stored."""
+    retried: set[int] = set()
+    for i in range(1, len(messages) - 1):
+        question, answer, following = messages[i - 1], messages[i], messages[i + 1]
+        if (
+            answer.role == "assistant"
+            and answer.interrupted
+            and question.role == "user"
+            and following.role == "user"
+            # The pipelines store the question with its whitespace collapsed; a Stop before that kept it as typed.
+            and following.content.split() == question.content.split()
+        ):
+            retried.update((i - 1, i))
+    return [m for i, m in enumerate(messages) if i not in retried]
 
 
 @router.post("/v1/chat/completions/clear_history", response_model=ClearHistoryResponse)
@@ -155,5 +174,5 @@ async def get_conversation(conversation_id: str, request: Request) -> Conversati
     return ConversationResponse(
         id=conversation_id,
         survey=SurveyAnswer.model_validate(survey) if survey is not None else None,
-        turns=[_serialize_turn(m, feedback=feedback) for m in messages],
+        turns=[_serialize_turn(m, feedback=feedback) for m in _without_retried(messages)],
     )
