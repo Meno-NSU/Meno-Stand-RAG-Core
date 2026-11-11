@@ -5,8 +5,9 @@ told nothing. A rating is the current opinion of an answer, which message_feedba
 holds the survey answer); what carries information beyond it is the text people write. feedback_comments keeps each
 distinct comment text sent about an answer once, with the rating it was sent with.
 
-Every distinct comment in the log is carried over, dated by its first appearance; the rest of the log duplicates
-the current values or records clicks, and is dropped with the table.
+Every distinct comment in the log is carried over (per answer and author), dated by its first appearance, and so is a
+current comment the log missed; the rest of the log duplicates the current values or records clicks, and is dropped
+with the table.
 
 Revision ID: 0020_feedback_comments
 Revises: 0019_keep_user_data
@@ -27,6 +28,13 @@ depends_on = None
 _OWNER_COLUMNS = ("run_id", "session_id", "user_id", "guest_session_id")
 
 
+def _same_author(a: str, b: str) -> str:
+    """Null-safe equality of the owner columns, written the way both SQLite and PostgreSQL accept."""
+    return " AND ".join(
+        f"({a}.{c} = {b}.{c} OR ({a}.{c} IS NULL AND {b}.{c} IS NULL))" for c in ("user_id", "guest_session_id")
+    )
+
+
 def upgrade() -> None:
     op.create_table(
         "feedback_comments",
@@ -41,9 +49,10 @@ def upgrade() -> None:
     )
     for column in _OWNER_COLUMNS:
         op.create_index(f"ix_feedback_comments_{column}", "feedback_comments", [column])
-    # The first row of each (answer, text) in log order, which is time order (0019 wrote its snapshot oldest first).
+    # The first row of each (answer, author, text) in log order, which is time order (0019 wrote its snapshot oldest
+    # first).
     op.execute(
-        """
+        f"""
         INSERT INTO feedback_comments (run_id, session_id, user_id, guest_session_id, value, comment, created_at)
         SELECT e.run_id, e.session_id, e.user_id, e.guest_session_id, e.value, e.comment, e.created_at
           FROM feedback_events AS e
@@ -51,9 +60,24 @@ def upgrade() -> None:
            AND e.id = (
                SELECT MIN(f.id) FROM feedback_events AS f
                 WHERE f.kind = 'rating' AND f.run_id = e.run_id AND f.session_id = e.session_id
-                  AND f.comment = e.comment
+                  AND {_same_author("f", "e")} AND f.comment = e.comment
            )
          ORDER BY e.id
+        """
+    )
+    # A current comment the log missed (written by code older than 0019 running on a database already at 0019).
+    op.execute(
+        f"""
+        INSERT INTO feedback_comments (run_id, session_id, user_id, guest_session_id, value, comment, created_at)
+        SELECT m.run_id, m.session_id, m.user_id, m.guest_session_id, m.value, m.comment, m.updated_at
+          FROM message_feedback AS m
+         WHERE m.comment IS NOT NULL AND TRIM(m.comment) <> ''
+           AND NOT EXISTS (
+               SELECT 1 FROM feedback_comments AS k
+                WHERE k.run_id = m.run_id AND k.session_id = m.session_id
+                  AND {_same_author("k", "m")} AND k.comment = m.comment
+           )
+         ORDER BY m.updated_at
         """
     )
     for column in _OWNER_COLUMNS:

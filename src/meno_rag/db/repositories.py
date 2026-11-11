@@ -409,8 +409,8 @@ async def keep_feedback_comment(
     user_id: str | None = None,
     guest_session_id: str | None = None,
 ) -> None:
-    """Keep a comment text in the history (see FeedbackComment) unless this answer already has it or it is blank.
-    Written in the caller's transaction, beside the current value."""
+    """Keep a comment text in the history (see FeedbackComment) unless its author already has it on this answer or it
+    is blank. Written in the caller's transaction, beside the current value."""
     if comment is None or not comment.strip():
         return
     seen = await session.scalar(
@@ -418,6 +418,8 @@ async def keep_feedback_comment(
         .where(
             FeedbackComment.run_id == run_id,
             FeedbackComment.session_id == session_id,
+            FeedbackComment.user_id.is_not_distinct_from(user_id),
+            FeedbackComment.guest_session_id.is_not_distinct_from(guest_session_id),
             FeedbackComment.comment == comment,
         )
         .limit(1)

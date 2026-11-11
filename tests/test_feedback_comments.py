@@ -93,6 +93,17 @@ async def test_the_same_text_on_another_answer_is_kept_for_that_answer(db):
 
 
 @pytest.mark.asyncio
+async def test_the_same_text_from_someone_else_is_kept_for_them(db):
+    # Possible on a legacy (untagged) conversation, which anyone may rate; each keeps their own row, so erasing one
+    # of them leaves what the other wrote.
+    await _rate(db, "down", "устарело", guest_session_id="g1")
+    await _rate(db, "down", "устарело", user_id="u2")
+    await _rate(db, "down", "устарело", user_id="u2")
+
+    assert [(c[3], c[4], c[5]) for c in await _comments(db)] == [("устарело", None, "g1"), ("устарело", "u2", None)]
+
+
+@pytest.mark.asyncio
 async def test_deleting_a_conversation_deletes_its_comments(db):
     async with db.sessionmaker() as s:
         for sid in ("s1", "s2"):

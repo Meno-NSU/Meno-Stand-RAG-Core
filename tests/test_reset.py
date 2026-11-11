@@ -102,6 +102,28 @@ def test_run_reset_then_bootstrap_recovers_user_reported_state(tmp_path):
     assert rev == "0020_feedback_comments"
 
 
+def test_run_reset_also_drops_tables_an_older_migration_left(tmp_path):
+    """A database still at 0019 has feedback_events, which the current models no longer define (0020 replaced it).
+    Left behind, it would make the bootstrap after the reset fail at 0019 with "table already exists"."""
+    from alembic.config import Config as AlembicConfig
+
+    from alembic import command as alembic_command
+    from tests.test_migrate import REPO_ALEMBIC_INI
+
+    url = _sync_sqlite_url(tmp_path / "x.sqlite3")
+    cfg = AlembicConfig(str(REPO_ALEMBIC_INI))
+    cfg.set_main_option("sqlalchemy.url", url)
+    alembic_command.upgrade(cfg, "0019_keep_user_data")
+
+    assert run_reset(url, confirm=True) == 0
+    engine = create_engine(url)
+    try:
+        assert set(inspect(engine).get_table_names()) == set()
+    finally:
+        engine.dispose()
+    assert run_bootstrap(url) == 0
+
+
 def test_run_reset_noop_on_pristine_db(tmp_path, capsys):
     db = tmp_path / "x.sqlite3"
     url = _sync_sqlite_url(db)

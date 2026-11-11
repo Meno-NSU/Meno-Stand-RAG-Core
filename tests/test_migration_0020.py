@@ -22,6 +22,7 @@ EVENTS = [
     ("rating", "set", "r2", "s1", None, "g1", "up", "  ", "2026-11-11 08:04"),  # blank
     ("rating", "set", "r3", "s2", "u1", None, "down", "wrong", "2026-11-11 08:05"),  # same text, another answer
     ("survey", "set", None, "s1", None, "g1", "no", None, "2026-11-11 08:06"),
+    ("rating", "set", "r3", "s2", None, "g9", "up", "wrong", "2026-11-11 08:07"),  # same text, someone else
 ]
 
 
@@ -53,6 +54,13 @@ def test_0020_keeps_every_comment_from_the_log_and_round_trips(tmp_path):
                     "VALUES ('f1', 'r1', 's1', NULL, 'g1', 'down', 'wrong year', '2026-11-01', '2026-11-11 08:02:30')"
                 )
             )
+            # Written by code older than 0019 while the database was already at 0019 (a rollback): not in the log.
+            c.execute(
+                text(
+                    "INSERT INTO message_feedback (id, run_id, session_id, user_id, guest_session_id, value, comment, created_at, updated_at) "
+                    "VALUES ('f2', 'r4', 's3', 'u2', NULL, 'up', 'older code', '2026-11-01', '2026-11-10')"
+                )
+            )
             c.execute(
                 text(
                     "INSERT INTO session_surveys (id, session_id, user_id, guest_session_id, answer, created_at, updated_at) "
@@ -75,24 +83,38 @@ def test_0020_keeps_every_comment_from_the_log_and_round_trips(tmp_path):
             ("r1", "s1", None, "g1", "down", "wrong"),  # first seen in the snapshot, with the rating it had then
             ("r1", "s1", None, "g1", "down", "wrong year"),
             ("r3", "s2", "u1", None, "down", "wrong"),
+            ("r3", "s2", None, "g9", "up", "wrong"),
+            ("r4", "s3", "u2", None, "up", "older code"),  # from the current value; f1's text is in the log already
         ]
-        assert [str(k[6])[:16] for k in kept] == ["2026-11-05", "2026-11-11 08:02", "2026-11-11 08:05"]
+        assert [str(k[6])[:16] for k in kept] == [
+            "2026-11-05",
+            "2026-11-11 08:02",
+            "2026-11-11 08:05",
+            "2026-11-11 08:07",
+            "2026-11-10",
+        ]
 
         alembic_command.downgrade(_cfg(url), "0019_keep_user_data")
         names = inspect(engine)
         assert "feedback_comments" not in names.get_table_names()
         with engine.connect() as c:
-            log = c.execute(text("SELECT kind, action, run_id, value, comment FROM feedback_events ORDER BY id")).all()
-        assert [tuple(e) for e in log] == [
-            ("rating", "set", "r1", "down", "wrong"),
-            ("rating", "set", "r1", "down", "wrong year"),
-            ("rating", "snapshot", "r1", "down", "wrong year"),  # the current rating
-            ("rating", "set", "r3", "down", "wrong"),
-            ("survey", "snapshot", None, "no", None),
-        ]
+            log = c.execute(text("SELECT kind, action, run_id, value, comment FROM feedback_events")).all()
+        assert sorted((tuple(e) for e in log), key=repr) == sorted(
+            [
+                ("rating", "set", "r1", "down", "wrong"),
+                ("rating", "set", "r1", "down", "wrong year"),
+                ("rating", "snapshot", "r1", "down", "wrong year"),  # the current ratings
+                ("rating", "set", "r3", "down", "wrong"),
+                ("rating", "set", "r3", "up", "wrong"),
+                ("rating", "set", "r4", "up", "older code"),
+                ("rating", "snapshot", "r4", "up", "older code"),
+                ("survey", "snapshot", None, "no", None),
+            ],
+            key=repr,
+        )
 
         alembic_command.upgrade(_cfg(url), "head")  # and up again: nothing is doubled
         with engine.connect() as c:
-            assert c.execute(text("SELECT count(*) FROM feedback_comments")).scalar_one() == 3
+            assert c.execute(text("SELECT count(*) FROM feedback_comments")).scalar_one() == 5
     finally:
         engine.dispose()
