@@ -1812,10 +1812,8 @@ async def _stand_stream_response(
         if not stored and not bench:
             # The client left: keep the question and what the stand had streamed (see _stream_response).
             try:
-                if not relay.parts:  # a finish_reason without any text is no answer (stand_empty_answer)
-                    interrupted_at = "prepare"
-                else:
-                    interrupted_at = "after_answer" if relay.finished else "generation"
+                # A finish_reason without any text is no answer (stand_empty_answer): "prepare", not "after_answer".
+                interrupted_at = "prepare" if not relay.parts else "after_answer" if relay.finished else "generation"
                 logger.info(
                     "chat_stream_interrupted",
                     request_id=completion_id,
