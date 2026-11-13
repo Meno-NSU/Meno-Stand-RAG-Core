@@ -77,6 +77,35 @@ REFORMULATE_SYSTEM = (
     "Если вопрос составной (ответ на одну часть нужен, чтобы найти другую), используй найденные документы. "
     'Не повторяй прежние запросы. Ответ — JSON {"queries": [строки]}.'
 )
+SUFFICIENCY_TIMEOUT_S = 20
+SUFFICIENCY_SCHEMA = {
+    "type": "object",
+    "properties": {"sufficient": {"type": "boolean"}, "missing": {"type": "array", "items": {"type": "string"}}},
+    "required": ["sufficient", "missing"],
+    "additionalProperties": False,
+}
+SUFFICIENCY_SYSTEM = (
+    "Ты проверяешь, хватает ли найденных документов НГУ, чтобы точно ответить на вопрос. На вопрос не отвечай. "
+    "sufficient — true, только если в документах прямо сказано то, о чём спрашивают, по всем частям вопроса. "
+    "Документы на похожую тему без нужных сведений — это false. "
+    "missing — что ещё нужно найти: не больше трёх коротких формулировок на русском; если всего хватает, пустой список. "
+    'Ответ — JSON {"sufficient": true или false, "missing": [строки]}.'
+)
+HYPOTHETICAL_TIMEOUT_S = 20
+HYPOTHETICAL_SCHEMA = {
+    "type": "object",
+    "properties": {"passages": {"type": "array", "items": {"type": "string"}, "minItems": 1}},
+    "required": ["passages"],
+    "additionalProperties": False,
+}
+HYPOTHETICAL_SYSTEM = (
+    "Ты помогаешь искать документы на сайтах НГУ (Новосибирский государственный университет). "
+    "На каждую ненайденную часть вопроса напиши короткий фрагмент документа, 2–3 предложения, в котором мог бы быть "
+    "ответ: так, как это написано на сайте или в положении НГУ, с характерными терминами и полными названиями. "
+    "Точный ответ знать не нужно: это образец для поиска, а не ответ пользователю. Напиши хотя бы один фрагмент всегда. "
+    "Вместо неизвестных чисел, дат и фамилий просто опускай их, не выдумывай. "
+    'Не больше трёх фрагментов, в том же порядке, что и части. Ответ — JSON {"passages": [строки]}.'
+)
 _WORD_RE = re.compile(r"[^\W_]+")
 
 
@@ -222,8 +251,10 @@ class V2Pipeline:
         rounds = 0
         forced: list[Candidate] = []
         forms: list[str] = []
+        verdicts: list[dict] = []
         if searched:
-            ranked, queries, coverage, rounds, forced, forms = await self._search_rounds(an, today, runtime, emit)
+            ranked, queries, coverage, rounds, forced, forms, verdicts = await self._search_rounds(
+                an, today, runtime, emit)
 
         kept: list[Candidate] = []
         context = ""
@@ -281,7 +312,7 @@ class V2Pipeline:
             general_note = an.route == "general" and not kept
         trace = None
         if capture_trace:
-            trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings, s.v2_source_prior_weight)
+            trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings, s.v2_source_prior_weight, verdicts)
         outcome = V2Outcome(
             question=original_question,
             prepared_dialogue_history=_render_history(memory),
@@ -325,6 +356,9 @@ class V2Pipeline:
         coverage: dict[str, float] = {}
         all_queries: list[str] = []
         round_queries = _dedup([standalone, *subqueries])
+        round_rerank = round_queries  # what each query's candidates are scored against
+        adaptive = s.v2_search_trigger == "sufficiency" and an.route == "nsu"
+        verdicts: list[dict] = []
         # query -> the target it is meant to cover (None: helps, but covers nothing by itself)
         aims: dict[str, str | None] = {q: (q if q in target_cov else None) for q in round_queries}
         if not subqueries:
@@ -344,7 +378,7 @@ class V2Pipeline:
                 kw = {"lexical_top": s.v2_lexical_slots, "lexical_for": 1}
                 if forms:  # slots from the rare term alone: the question's other words would outweigh it
                     kw["lexical_tokens"] = tuple(forms)
-            result = await self.search.search(round_queries, round_queries, **kw)
+            result = await self.search.search(round_queries, round_rerank, **kw)
             if kw and rare:
                 forced = [
                     c for c in getattr(result, "lexical_top", []) if c.score < thr and self._has_term(c.chunk, forms)
@@ -364,7 +398,7 @@ class V2Pipeline:
             for q, v in result.coverage.items():
                 coverage[q] = max(coverage.get(q, 0.0), float(v))
                 t = aims.get(q)
-                if t is not None:
+                if t in target_cov:
                     target_cov[t] = max(target_cov[t], float(v))
             await emit(
                 StageName.RERANK,
@@ -377,18 +411,34 @@ class V2Pipeline:
                 },
             )
             uncovered = [t for t in targets if target_cov[t] < thr]
-            if rounds >= s.v2_max_rounds or not (uncovered or (an.chain and rounds == 1)):
+            if rounds >= s.v2_max_rounds:
                 break
             found = sorted(best.values(), key=lambda c: (-c.score, c.pos))
+            if adaptive:
+                context, kept = assemble_context(
+                    [*schedule_cands, *found], thr, s.v2_context_budget_tokens, s.v2_max_context_chunks, forced,
+                    s.v2_source_prior_weight,
+                )
+                if kept:  # with nothing above the threshold there is nothing to read: search on
+                    sufficient, missing = await self._check_sufficiency(standalone, context, rounds, runtime, emit)
+                    verdicts.append({"round": rounds, "sufficient": sufficient, "missing": missing})
+                    uncovered = [] if sufficient else (missing or targets)
+            if not (uncovered or (an.chain and rounds == 1)):
+                break
             titles = _dedup([c.chunk.title for c in [*schedule_cands, *found]])[:REFORMULATE_TITLES]
-            new = await self._reformulate(
-                standalone, uncovered, an.chain, all_queries, titles, rounds + 1, runtime, emit
-            )
+            if s.v2_reformulate_mode == "hyde":
+                new = await self._hypothetical(standalone, uncovered, all_queries, titles, rounds + 1, runtime, emit)
+                parts = uncovered or [standalone]
+                round_rerank = [parts[min(i, len(parts) - 1)] for i in range(len(new))]
+            else:
+                new = await self._reformulate(standalone, uncovered, an.chain, all_queries, titles, rounds + 1,
+                                              runtime, emit)
+                round_rerank = new
             round_queries = new
             aims = {q: (uncovered[min(i, len(uncovered) - 1)] if uncovered else None) for i, q in enumerate(new)}
 
         ranked = [*schedule_cands, *sorted(best.values(), key=lambda c: (-c.score, c.pos))]
-        return ranked, all_queries, coverage, rounds, forced, forms
+        return ranked, all_queries, coverage, rounds, forced, forms, verdicts
 
     def _rarest_term(self, text: str) -> tuple[str, list[str]]:
         """The question stem whose index forms (itself + shorter inflection variants) occur in the fewest
@@ -452,8 +502,86 @@ class V2Pipeline:
         await emit(StageName.QUERY_REWRITE, StageStatus.COMPLETED, _ms(t0), {"round": round_no, "queries": queries})
         return queries
 
+    async def _check_sufficiency(self, standalone, context, round_no, runtime, emit) -> tuple[bool, list[str]]:
+        """(do the documents answer the question, what is missing). Any failure: answer from what was found."""
+        messages = [
+            {"role": "system", "content": SUFFICIENCY_SYSTEM},
+            {"role": "user", "content": f"Вопрос: {standalone}\n\nНайденные документы:\n{context}"},
+        ]
+        await emit(StageName.QUERY_REWRITE, StageStatus.STARTED, None, {"round": round_no})
+        t0 = time.perf_counter()
+        sufficient, missing = True, []
+        try:
+            raw = await asyncio.wait_for(
+                self.llm_router.chat_completion_text(
+                    runtime=runtime.generation,
+                    messages=messages,
+                    stage=StageName.QUERY_REWRITE,
+                    temperature=0,
+                    max_tokens=256,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"name": "search_sufficiency", "schema": SUFFICIENCY_SCHEMA, "strict": True},
+                    },
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    timeout=SUFFICIENCY_TIMEOUT_S,
+                ),
+                SUFFICIENCY_TIMEOUT_S,
+            )
+            data = _extract_json(raw)
+            if not isinstance(data.get("sufficient"), bool):
+                raise ValueError("sufficient must be a boolean")
+            got = data.get("missing")
+            sufficient = data["sufficient"]
+            missing = [] if sufficient else _dedup(got if isinstance(got, list) else [])[:MAX_NEW_QUERIES]
+        except Exception as exc:
+            logger.warning("v2_sufficiency_failed", error=repr(exc))
+        await emit(StageName.QUERY_REWRITE, StageStatus.COMPLETED, _ms(t0),
+                   {"round": round_no, "sufficient": sufficient, "missing": missing})
+        return sufficient, missing
+
+    async def _hypothetical(self, standalone, uncovered, tried, titles, round_no, runtime, emit) -> list[str]:
+        """Passages that could hold the answer, to search by. Any failure: no passages, answer from what was found."""
+        parts = [f"Вопрос: {standalone}"]
+        if uncovered:
+            parts.append("Не найдено:\n" + "\n".join(f"- {q}" for q in uncovered))
+        if titles:
+            parts.append("Найденные документы:\n" + "\n".join(f"- {t}" for t in titles))
+        messages = [
+            {"role": "system", "content": HYPOTHETICAL_SYSTEM},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ]
+        await emit(StageName.QUERY_REWRITE, StageStatus.STARTED, None, {"round": round_no})
+        t0 = time.perf_counter()
+        passages: list[str] = []
+        try:
+            raw = await asyncio.wait_for(
+                self.llm_router.chat_completion_text(
+                    runtime=runtime.generation,
+                    messages=messages,
+                    stage=StageName.QUERY_REWRITE,
+                    temperature=0,
+                    max_tokens=512,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"name": "hypothetical_passages", "schema": HYPOTHETICAL_SCHEMA, "strict": True},
+                    },
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    timeout=HYPOTHETICAL_TIMEOUT_S,
+                ),
+                HYPOTHETICAL_TIMEOUT_S,
+            )
+            got = _extract_json(raw).get("passages")
+            seen = {q.casefold() for q in tried}
+            passages = [p for p in _dedup(got if isinstance(got, list) else []) if p.casefold() not in seen]
+            passages = passages[:MAX_NEW_QUERIES]
+        except Exception as exc:
+            logger.warning("v2_hypothetical_failed", error=repr(exc))
+        await emit(StageName.QUERY_REWRITE, StageStatus.COMPLETED, _ms(t0), {"round": round_no, "queries": passages})
+        return passages
+
     @staticmethod
-    def _trace(an, ranked, kept, queries, coverage, rounds, timings, source_weight: float = 0.0) -> dict:
+    def _trace(an, ranked, kept, queries, coverage, rounds, timings, source_weight: float = 0.0, verdicts=()) -> dict:
         kept_ids = {c.chunk.chunk_id for c in kept}
         order = sorted(ranked, key=lambda c: -priority(c, source_weight))  # same order assemble_context uses
         rank = {id(c): i + 1 for i, c in enumerate(order)}
@@ -481,6 +609,7 @@ class V2Pipeline:
                 "standalone_question": an.standalone_question,
                 "subqueries": list(an.subqueries),
                 "coverage": {q: round(float(v), 6) for q, v in coverage.items()},
+                "adaptive": list(verdicts),
                 "timings_ms": timings,
                 "sources_debug": None,
             },

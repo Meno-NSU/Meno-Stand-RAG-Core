@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -305,6 +306,15 @@ class Settings(BaseSettings):
     v2_max_sources: int = Field(default=5, validation_alias="V2_MAX_SOURCES")
     # Max search rounds per question.
     v2_max_rounds: int = Field(default=3, validation_alias="V2_MAX_ROUNDS")
+    # What starts another round. coverage: a target's best cross-encoder score is under V2_RERANK_THRESHOLD.
+    # sufficiency: the model reads the context the answer would get and says what is missing (nsu route only).
+    v2_search_trigger: Literal["coverage", "sufficiency"] = Field(default="coverage", validation_alias="V2_SEARCH_TRIGGER")
+    # What a further round searches by. queries: new search queries. hyde: a passage that could hold the answer,
+    # reranked against the part that is missing.
+    v2_reformulate_mode: Literal["queries", "hyde"] = Field(default="queries", validation_alias="V2_REFORMULATE_MODE")
+    # Threads that run search jobs (embedding, Qdrant, BM25, cross-encoder). They share the models, so GPU memory
+    # grows only by what jobs use at the same moment.
+    v2_search_workers: int = Field(default=1, ge=1, validation_alias="V2_SEARCH_WORKERS")
     # Candidates per query from each of dense and BM25.
     v2_candidates_per_query: int = Field(default=50, validation_alias="V2_CANDIDATES_PER_QUERY")
     # Fused candidates per query sent to the cross-encoder.

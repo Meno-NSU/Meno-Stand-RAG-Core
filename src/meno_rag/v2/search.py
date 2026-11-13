@@ -46,10 +46,10 @@ class SearchService:
         self.dense = dense
         self.reranker = reranker
         self.settings = settings
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v2-gpu")
+        self._executor = ThreadPoolExecutor(max_workers=settings.v2_search_workers, thread_name_prefix="v2-gpu")
 
     async def run_gpu(self, fn, *args):
-        """Run fn(*args) on the single worker thread shared by all GPU/BM25 work."""
+        """Run fn(*args) on the worker threads shared by all GPU/BM25 work (one by default)."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, fn, *args)
 

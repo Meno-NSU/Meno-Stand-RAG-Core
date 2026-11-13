@@ -180,3 +180,15 @@ async def test_lexical_tokens_take_the_slots_from_a_search_of_those_tokens_alone
     res = await svc.search(["q"], ["q"], lexical_top=2, lexical_tokens=("солихов", "солих"))
     assert [c.pos for c in res.lexical_top] == [7, 8]  # the name's own BM25 hits, not the question's
     assert {7, 8} <= {c.pos for c in res.candidates}
+
+
+async def test_search_workers_let_jobs_run_at_the_same_time():
+    svc = SearchService(_release(), FakeRetriever({}), FakeRetriever({}), FakeReranker({}),
+                        Settings(_env_file=None, v2_search_workers=2))
+    barrier = threading.Barrier(2, timeout=5)  # breaks unless both jobs are inside at once
+    await asyncio.gather(svc.run_gpu(barrier.wait), svc.run_gpu(barrier.wait))
+    svc._executor.shutdown(wait=False)
+
+
+def test_one_search_worker_by_default():
+    assert Settings(_env_file=None).v2_search_workers == 1
