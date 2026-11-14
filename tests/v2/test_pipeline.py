@@ -481,8 +481,9 @@ async def test_trace_is_readable_by_benchmark_runner():
     assert fit == {"chunk_id": "fit", "rank": 3, "score": 0.1, "kept": False}
     v2 = t["v2"]
     assert v2["adaptive"] == []  # the coverage trigger asks the model nothing
-    assert set(v2) == {"route", "rounds", "standalone_question", "subqueries", "coverage", "adaptive", "timings_ms",
-                       "sources_debug"}
+    assert v2["answerability"] is None  # the check is off by default
+    assert set(v2) == {"route", "rounds", "standalone_question", "subqueries", "coverage", "adaptive", "answerability",
+                       "timings_ms", "sources_debug"}
     assert v2["route"] == "nsu" and v2["rounds"] == 1 and v2["standalone_question"] == q
     assert v2["coverage"] == {q: 0.9}
     assert {"query_rewrite", "retrieval", "rerank", "context_assembly"} <= set(v2["timings_ms"])
@@ -778,6 +779,7 @@ async def test_documents_without_the_answer_add_a_note_and_keep_the_documents():
     system = out.qa_messages[0]["content"]
     assert NO_DIRECT_ANSWER_NOTE in system and STIP in system and not out.refusal
     assert out.stage_details["context_assembly"]["answerability"] == "no"
+    assert out.trace["v2"]["answerability"] == "no"  # the debug trace (bench records) shows which answers got the note
 
 
 async def test_documents_with_the_answer_change_nothing():

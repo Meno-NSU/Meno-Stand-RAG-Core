@@ -290,6 +290,7 @@ class V2Pipeline:
         refusal = an.route == "nsu" and not kept
         general_note = an.route == "general" and not kept
         no_direct_answer = False
+        verdict = None
         if s.v2_answerability_check == "soft" and an.route == "nsu" and kept:
             verdict = await self._check_answerable(an.standalone_question or question, context, runtime)
             no_direct_answer = verdict == "no"
@@ -331,7 +332,9 @@ class V2Pipeline:
             general_note = an.route == "general" and not kept
         trace = None
         if capture_trace:
-            trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings, s.v2_source_prior_weight, verdicts)
+            trace = self._trace(
+                an, ranked, kept, queries, coverage, rounds, timings, s.v2_source_prior_weight, verdicts, verdict
+            )
         outcome = V2Outcome(
             question=original_question,
             prepared_dialogue_history=_render_history(memory),
@@ -631,7 +634,9 @@ class V2Pipeline:
         return passages
 
     @staticmethod
-    def _trace(an, ranked, kept, queries, coverage, rounds, timings, source_weight: float = 0.0, verdicts=()) -> dict:
+    def _trace(
+        an, ranked, kept, queries, coverage, rounds, timings, source_weight: float = 0.0, verdicts=(), answerability=None
+    ) -> dict:
         kept_ids = {c.chunk.chunk_id for c in kept}
         order = sorted(ranked, key=lambda c: -priority(c, source_weight))  # same order assemble_context uses
         rank = {id(c): i + 1 for i, c in enumerate(order)}
@@ -660,6 +665,7 @@ class V2Pipeline:
                 "subqueries": list(an.subqueries),
                 "coverage": {q: round(float(v), 6) for q, v in coverage.items()},
                 "adaptive": list(verdicts),
+                "answerability": answerability,
                 "timings_ms": timings,
                 "sources_debug": None,
             },
