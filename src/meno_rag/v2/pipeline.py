@@ -280,6 +280,7 @@ class V2Pipeline:
                 s.v2_max_context_chunks,
                 forced,
                 s.v2_source_prior_weight,
+                s.v2_rare_term_reserved,
             )
             await emit(
                 StageName.CONTEXT_ASSEMBLY,
@@ -324,6 +325,7 @@ class V2Pipeline:
                     len(kept) - 1,
                     forced[: max(len(kept) - 1, 0) // 2],
                     s.v2_source_prior_weight,
+                    s.v2_rare_term_reserved,
                 )
                 qa_messages = build(context)
             refusal = an.route == "nsu" and not kept
@@ -437,7 +439,7 @@ class V2Pipeline:
             if adaptive:
                 context, kept = assemble_context(
                     [*schedule_cands, *found], thr, s.v2_context_budget_tokens, s.v2_max_context_chunks, forced,
-                    s.v2_source_prior_weight,
+                    s.v2_source_prior_weight, s.v2_rare_term_reserved,
                 )
                 if kept:  # with nothing above the threshold there is nothing to read: search on
                     sufficient, missing = await self._check_sufficiency(standalone, context, rounds, runtime, emit)

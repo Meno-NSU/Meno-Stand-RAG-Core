@@ -99,6 +99,38 @@ def test_max_chunks():
     assert [c.pos for c in kept] == [0, 1, 2]
 
 
+# Rare-term (forced) chunks: by default each one reserves a slot, so with 4 of them only 4 of 8 slots are left for the
+# chunks above the threshold (on benchmark v3, 297 of 582 questions; the forced chunks' median score was 0.005).
+# reserved=k: at most k of them displace above-threshold chunks, the rest only fill slots left free.
+
+def test_forced_chunks_reserve_their_slots_by_default():
+    above = [cand(i, 0.9 - i / 100) for i in range(6)]
+    forced = [cand(100 + i, 0.01) for i in range(2)]
+    _, kept = assemble_context([*above, *forced], threshold=0.3, budget_tokens=10_000, max_chunks=4, forced=forced)
+    assert [c.pos for c in kept] == [0, 1, 100, 101]
+
+
+def test_unreserved_forced_chunks_only_fill_free_slots():
+    above = [cand(i, 0.9 - i / 100) for i in range(6)]
+    forced = [cand(100 + i, 0.01) for i in range(2)]
+    _, kept = assemble_context(
+        [*above, *forced], threshold=0.3, budget_tokens=10_000, max_chunks=4, forced=forced, reserved=0
+    )
+    assert [c.pos for c in kept] == [0, 1, 2, 3]
+    _, kept = assemble_context([above[0], *forced], threshold=0.3, budget_tokens=10_000, max_chunks=4, forced=forced,
+                               reserved=0)
+    assert [c.pos for c in kept] == [0, 100, 101]  # with free slots the rare-term evidence still comes in
+
+
+def test_reserved_caps_the_displacing_forced_chunks():
+    above = [cand(i, 0.9 - i / 100) for i in range(6)]
+    forced = [cand(100 + i, 0.01) for i in range(3)]
+    _, kept = assemble_context(
+        [*above, *forced], threshold=0.3, budget_tokens=10_000, max_chunks=4, forced=forced, reserved=1
+    )
+    assert [c.pos for c in kept] == [0, 1, 2, 100]
+
+
 def test_block_header_has_type_and_date():
     cands = [
         cand(

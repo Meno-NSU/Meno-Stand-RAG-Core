@@ -713,6 +713,24 @@ async def test_rare_term_match_is_evidence_below_the_threshold():
     assert ctx["rare_term_chunks"] == 1
 
 
+async def _rare_term_context(table, **settings):
+    llm = FakeLLM(analysis(standalone=Q_PERSON), answer=STAFF)
+    pipe = make(llm, {Q_PERSON: table}, V2_LEXICAL_SLOTS=4, v2_max_context_chunks=2, **settings)
+    pipe.search.lexical = {"солихов": [("staff", 0.02)], Q_PERSON: [("dorm", 0.1)]}
+    pipe.search.bm25 = FakeBm25({"солихов": 3})
+    out, _ = await prepare(pipe, Q_PERSON)
+    return [c.chunk.chunk_id for c in out.context_chunks]
+
+
+async def test_rare_term_chunks_reserve_slots_by_default():
+    assert await _rare_term_context([("stip", 0.9), ("dorm", 0.8)]) == ["stip", "staff"]
+
+
+async def test_unreserved_rare_term_chunks_only_fill_free_slots():
+    assert await _rare_term_context([("stip", 0.9), ("dorm", 0.8)], V2_RARE_TERM_RESERVED=0) == ["stip", "dorm"]
+    assert await _rare_term_context([("stip", 0.9)], V2_RARE_TERM_RESERVED=0) == ["stip", "staff"]
+
+
 async def test_without_a_rare_term_low_scored_slots_stay_out():
     pipe = _person_pipe({}, V2_LEXICAL_SLOTS=4)  # every stem is common
     out, _ = await prepare(pipe, Q_PERSON)

@@ -205,16 +205,20 @@ def assemble_context(
     max_chunks: int,
     forced: list[Candidate] | tuple = (),
     source_weight: float = 0.0,
+    reserved: int | None = None,
 ) -> tuple[str, list[Candidate]]:
     """Blocks of the candidates scoring >= threshold, best first (by priority(): the score, or with source_weight the
     score adjusted by the source prior), then the forced ones (evidence the cross-encoder scores low, e.g. a rare-term
-    match), while they fit max_chunks and the budget."""
+    match), while they fit max_chunks and the budget. The first `reserved` forced chunks (all when None) take their
+    slots from the candidates above the threshold; the others only fill slots those leave free."""
     taken = {c.pos for c in forced}
     above = sorted(
         (c for c in candidates if c.score >= threshold and c.pos not in taken),
         key=lambda c: -priority(c, source_weight),
     )
-    ranked = [*above[: max(max_chunks - len(forced), 0)], *forced]
+    r = len(forced) if reserved is None else min(max(reserved, 0), len(forced))
+    cut = max(max_chunks - r, 0)
+    ranked = [*above[:cut], *forced[:r], *above[cut:], *forced[r:]]
     blocks: list[str] = []
     kept: list[Candidate] = []
     for cand in ranked:
