@@ -77,6 +77,22 @@ REFORMULATE_SYSTEM = (
     "Если вопрос составной (ответ на одну часть нужен, чтобы найти другую), используй найденные документы. "
     'Не повторяй прежние запросы. Ответ — JSON {"queries": [строки]}.'
 )
+ANSWERABILITY_TIMEOUT_S = 15
+ANSWERABILITY_SCHEMA = {
+    "type": "object",
+    "properties": {"local": {"type": "boolean"}, "answer": {"type": "string", "enum": ["yes", "partly", "no"]}},
+    "required": ["local", "answer"],
+    "additionalProperties": False,
+}
+ANSWERABILITY_SYSTEM = (
+    "Тебе дают вопрос пользователя виртуальному помощнику НГУ и документы, найденные по нему. Ответь JSON-объектом.\n"
+    "local: true, если для ответа нужны сведения о конкретных людях, организациях, подразделениях, мероприятиях или "
+    "местах НГУ, Академгородка или Новосибирска, о самом помощнике или о человеке, который не является общеизвестным; "
+    "false, если на вопрос можно ответить общими знаниями (понятия, наука, языки, рецепты, советы, задачи, общеизвестные "
+    "люди и события).\n"
+    "answer: есть ли в документах ответ именно на этот вопрос: yes — ответ есть; partly — есть только часть ответа; "
+    "no — ответа нет (документы о другом, о похожем, о другом человеке, другом годе или другой программе)."
+)
 _WORD_RE = re.compile(r"[^\W_]+")
 
 
@@ -246,12 +262,19 @@ class V2Pipeline:
             )
         refusal = an.route == "nsu" and not kept
         general_note = an.route == "general" and not kept
-
         # a "general" question about something the KB documents name by its rarest term (a person, a
         # platform, a program) is answered from those documents only, not from the model's memory
-        prompt_route = an.route
-        if an.route == "general" and forms and any(self._has_term(c.chunk, forms) for c in kept):
-            prompt_route = "nsu"
+        names_term = an.route == "general" and bool(forms) and any(self._has_term(c.chunk, forms) for c in kept)
+        verdict = None
+        if s.v2_answerability_check == "general" and an.route == "general" and kept:
+            verdict = await self._check_answerable(an.standalone_question or question, context, runtime)
+            if StageName.CONTEXT_ASSEMBLY in details:
+                details[StageName.CONTEXT_ASSEMBLY]["answerability"] = verdict
+            if verdict == "general_no":  # general knowledge suffices and the documents do not answer
+                context, kept = "", []
+                general_note = True
+                names_term = False
+        prompt_route = "nsu" if names_term else an.route
 
         def build(ctx: str) -> list[dict]:
             return build_messages(
@@ -281,7 +304,7 @@ class V2Pipeline:
             general_note = an.route == "general" and not kept
         trace = None
         if capture_trace:
-            trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings, s.v2_source_prior_weight)
+            trace = self._trace(an, ranked, kept, queries, coverage, rounds, timings, s.v2_source_prior_weight, verdict)
         outcome = V2Outcome(
             question=original_question,
             prepared_dialogue_history=_render_history(memory),
@@ -452,8 +475,43 @@ class V2Pipeline:
         await emit(StageName.QUERY_REWRITE, StageStatus.COMPLETED, _ms(t0), {"round": round_no, "queries": queries})
         return queries
 
+    async def _check_answerable(self, standalone, context, runtime) -> str:
+        """The verdict: "general_no" when general knowledge suffices (no local facts needed) and the documents do not
+        answer the question; otherwise "local_<answer>" / "general_<answer>" (yes, partly, no). Any failure: "yes"."""
+        messages = [
+            {"role": "system", "content": ANSWERABILITY_SYSTEM},
+            {"role": "user", "content": f"Вопрос: {standalone}\n\nНайденные документы:\n{context}"},
+        ]
+        try:
+            raw = await asyncio.wait_for(
+                self.llm_router.chat_completion_text(
+                    runtime=runtime.generation,
+                    messages=messages,
+                    stage=StageName.CONTEXT_ASSEMBLY,
+                    temperature=0,
+                    max_tokens=48,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"name": "answerability", "schema": ANSWERABILITY_SCHEMA, "strict": True},
+                    },
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    timeout=ANSWERABILITY_TIMEOUT_S,
+                ),
+                ANSWERABILITY_TIMEOUT_S,
+            )
+            data = _extract_json(raw)
+            verdict, local = data.get("answer"), data.get("local")
+            if verdict not in ("yes", "partly", "no") or not isinstance(local, bool):
+                raise ValueError(f"unexpected verdict {data!r}")
+            return f"{'local' if local else 'general'}_{verdict}"
+        except Exception as exc:
+            logger.warning("v2_answerability_failed", error=repr(exc))
+            return "yes"
+
     @staticmethod
-    def _trace(an, ranked, kept, queries, coverage, rounds, timings, source_weight: float = 0.0) -> dict:
+    def _trace(
+        an, ranked, kept, queries, coverage, rounds, timings, source_weight: float = 0.0, answerability=None
+    ) -> dict:
         kept_ids = {c.chunk.chunk_id for c in kept}
         order = sorted(ranked, key=lambda c: -priority(c, source_weight))  # same order assemble_context uses
         rank = {id(c): i + 1 for i, c in enumerate(order)}
@@ -481,6 +539,7 @@ class V2Pipeline:
                 "standalone_question": an.standalone_question,
                 "subqueries": list(an.subqueries),
                 "coverage": {q: round(float(v), 6) for q, v in coverage.items()},
+                "answerability": answerability,
                 "timings_ms": timings,
                 "sources_debug": None,
             },

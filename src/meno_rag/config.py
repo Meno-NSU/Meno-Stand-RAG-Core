@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -305,6 +306,11 @@ class Settings(BaseSettings):
     v2_max_sources: int = Field(default=5, validation_alias="V2_MAX_SOURCES")
     # Max search rounds per question.
     v2_max_rounds: int = Field(default=3, validation_alias="V2_MAX_ROUNDS")
+    # Whether a general question needs the documents at all (before the answer). general: one short model call on
+    # general-route questions; when the answer needs no facts about specific local people, organizations, events or
+    # places and the documents do not answer it, they are dropped and the answer comes from general knowledge, with
+    # the general-answer note. off: no call.
+    v2_answerability_check: Literal["off", "general"] = Field(default="off", validation_alias="V2_ANSWERABILITY_CHECK")
     # Candidates per query from each of dense and BM25.
     v2_candidates_per_query: int = Field(default=50, validation_alias="V2_CANDIDATES_PER_QUERY")
     # Fused candidates per query sent to the cross-encoder.
