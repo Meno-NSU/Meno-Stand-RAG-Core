@@ -796,3 +796,31 @@ async def test_a_broken_answerability_reply_answers_as_usual():
     pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
     out, _ = await prepare(pipe, q)
     assert NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"] and STIP in out.qa_messages[0]["content"]
+
+
+# On the general route (a question not about NSU) the night run's answers that began "the documents have no information"
+# and then recited loosely related documents scored 0.34 against 0.52; when the check says the documents do not answer a
+# general question, they are dropped and the question is answered from general knowledge, with the general-answer note.
+
+async def test_a_general_question_the_documents_do_not_answer_is_answered_from_general_knowledge():
+    q = "Как стать рэпером?"
+    llm = FakeLLM(analysis("general", q), answer="Пишите тексты и выступайте.", answerable={"answer": "no"})
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
+    out, _ = await prepare(pipe, q, trace=True)
+    assert "answerability" in llm.kinds()
+    assert out.context_chunks == [] and out.general_note and not out.refusal
+    system = out.qa_messages[0]["content"]
+    assert STIP not in system and NO_DIRECT_ANSWER_NOTE not in system
+    assert out.trace["v2"]["answerability"] == "no"
+    assert (await pipe.generate_text(outcome=out, runtime=RUNTIME)).endswith("\n\n" + GENERAL_NOTE)
+    assert await pipe.finalize_sources(out, "Пишите тексты и выступайте.") == []
+
+
+async def test_a_general_question_the_documents_partly_answer_keeps_them():
+    q = "Что такое стипендия?"
+    llm = FakeLLM(analysis("general", q), answer=STIP, answerable={"answer": "partly"})
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
+    out, _ = await prepare(pipe, q)
+    assert "answerability" in llm.kinds()
+    assert [c.chunk.chunk_id for c in out.context_chunks] == ["stip"] and not out.general_note
+    assert STIP in out.qa_messages[0]["content"] and NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"]

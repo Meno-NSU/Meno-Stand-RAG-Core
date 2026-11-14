@@ -291,11 +291,16 @@ class V2Pipeline:
         general_note = an.route == "general" and not kept
         no_direct_answer = False
         verdict = None
-        if s.v2_answerability_check == "soft" and an.route == "nsu" and kept:
+        if s.v2_answerability_check == "soft" and an.route in SEARCH_ROUTES and kept:
             verdict = await self._check_answerable(an.standalone_question or question, context, runtime)
-            no_direct_answer = verdict == "no"
             if StageName.CONTEXT_ASSEMBLY in details:
                 details[StageName.CONTEXT_ASSEMBLY]["answerability"] = verdict
+            if an.route == "nsu":
+                no_direct_answer = verdict == "no"
+            elif verdict == "no":
+                # a general question the documents do not answer: from general knowledge, with the general-answer note
+                context, kept = "", []
+                general_note = True
 
         # a "general" question about something the KB documents name by its rarest term (a person, a
         # platform, a program) is answered from those documents only, not from the model's memory
