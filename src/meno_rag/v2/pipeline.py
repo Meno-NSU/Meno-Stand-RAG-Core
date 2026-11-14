@@ -289,24 +289,18 @@ class V2Pipeline:
             )
         refusal = an.route == "nsu" and not kept
         general_note = an.route == "general" and not kept
-        no_direct_answer = False
+        # a "general" question about something the KB documents name by its rarest term (a person, a
+        # platform, a program) is answered from those documents only, not from the model's memory
+        names_term = an.route == "general" and bool(forms) and any(self._has_term(c.chunk, forms) for c in kept)
         verdict = None
-        if s.v2_answerability_check == "soft" and an.route in SEARCH_ROUTES and kept:
+        if s.v2_answerability_check == "general" and an.route == "general" and kept and not names_term:
             verdict = await self._check_answerable(an.standalone_question or question, context, runtime)
             if StageName.CONTEXT_ASSEMBLY in details:
                 details[StageName.CONTEXT_ASSEMBLY]["answerability"] = verdict
-            if an.route == "nsu":
-                no_direct_answer = verdict == "no"
-            elif verdict == "no":
-                # a general question the documents do not answer: from general knowledge, with the general-answer note
+            if verdict == "no":  # documents that do not answer a general question: from general knowledge
                 context, kept = "", []
                 general_note = True
-
-        # a "general" question about something the KB documents name by its rarest term (a person, a
-        # platform, a program) is answered from those documents only, not from the model's memory
-        prompt_route = an.route
-        if an.route == "general" and forms and any(self._has_term(c.chunk, forms) for c in kept):
-            prompt_route = "nsu"
+        prompt_route = "nsu" if names_term else an.route
 
         def build(ctx: str) -> list[dict]:
             return build_messages(
@@ -317,7 +311,6 @@ class V2Pipeline:
                 context=ctx,
                 today=today,
                 source_authority=s.v2_source_authority,
-                no_direct_answer=no_direct_answer,
             )
 
         qa_messages = build(context)

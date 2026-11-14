@@ -132,14 +132,6 @@ NO_CONTEXT_BLOCKS: dict[str, str] = {
     ),
 }
 
-# With V2_ANSWERABILITY_CHECK=soft, when the check says the documents do not answer the question. The documents stay:
-# the check is wrong for some answerable questions, and then the answer can still use them.
-NO_DIRECT_ANSWER_NOTE = (
-    "Проверка показала, что в документах, скорее всего, нет прямого ответа на этот вопрос. Если это так, начни "
-    "ответ с того, что точных сведений об этом у тебя нет, и посоветуй, где уточнить; близкие сведения из документов "
-    "приводи только с явной оговоркой, что это не ответ на вопрос. Если ответ в документах всё же есть, ответь по ним."
-)
-
 # With V2_SOURCE_AUTHORITY: official documents first, community posts as a supplement (appended to the route block).
 SOURCE_AUTHORITY_RULE = (
     "- Официальные документы НГУ (страницы сайтов НГУ, положения, приказы, сведения об образовательной организации) "
@@ -148,8 +140,7 @@ SOURCE_AUTHORITY_RULE = (
 )
 
 # Everything the model must never recite: the rules and every route block (not the persona).
-PROMPT_GUARD_TEXT = "\n\n".join([RULES, *ROUTE_BLOCKS.values(), *NO_CONTEXT_BLOCKS.values(), SOURCE_AUTHORITY_RULE,
-                                 NO_DIRECT_ANSWER_NOTE])
+PROMPT_GUARD_TEXT = "\n\n".join([RULES, *ROUTE_BLOCKS.values(), *NO_CONTEXT_BLOCKS.values(), SOURCE_AUTHORITY_RULE])
 
 MEMORY_HEADER = "Ранее в этом диалоге (старая часть разговора, не вошедшая в историю ниже):"
 STANDALONE_LABEL = "Вопрос пользователя (уточнённый):"
@@ -271,7 +262,6 @@ def build_messages(
     context: str,
     today: date,
     source_authority: bool = False,
-    no_direct_answer: bool = False,
 ) -> list[dict]:
     """One system message (prompt, route rules, documents, memory block) -> recent turns -> the question.
 
@@ -285,8 +275,6 @@ def build_messages(
     if route in SEARCH_ROUTES and context:
         anchor = standalone_question.strip() or question.strip()
         rules = ROUTE_BLOCKS[route] + ("\n" + SOURCE_AUTHORITY_RULE if source_authority else "")
-        if no_direct_answer:
-            rules += "\n" + NO_DIRECT_ANSWER_NOTE
         parts += [rules, context, f"{STANDALONE_LABEL} {anchor}"]
     elif route in SEARCH_ROUTES:
         parts.append(NO_CONTEXT_BLOCKS[route])

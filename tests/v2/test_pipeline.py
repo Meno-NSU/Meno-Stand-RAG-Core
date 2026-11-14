@@ -19,7 +19,7 @@ from meno_rag.v2.pipeline import (
     V2Outcome,
     V2Pipeline,
 )
-from meno_rag.v2.prompting import NO_DIRECT_ANSWER_NOTE, PROMPT_GUARD_TEXT
+from meno_rag.v2.prompting import PROMPT_GUARD_TEXT
 from meno_rag.v2.schedule import ScheduleBlock
 from meno_rag.v2.search import Candidate, SearchResult
 
@@ -755,63 +755,32 @@ async def test_the_most_specific_form_decides_the_rarity():
 
 
 # --- answerability check (V2_ANSWERABILITY_CHECK) -----------------------------------------
-# On benchmark v3 Menon 1.1 answered questions whose documents did not hold the answer (the next rector -> the current
-# one); a gemma check separates unanswerable from answerable-with-gold questions with AUC 0.83 but flags ~7% of the
-# answerable ones, so a "no" does not refuse: it adds a note and the documents stay, and the answer can still use them.
+# On benchmark v3, general-route answers that began "the documents have no information" and then recited loosely
+# related documents (rap -> a library exhibition, daiquiri -> a cafe post) scored 0.34 against 0.52. With the check a
+# general question the documents do not answer is answered from general knowledge (+0.12 answer correctness on those).
+# A general question whose rarest term the documents name (a surname) keeps them: dropped, the model invented a person.
 
 async def test_answerability_check_is_off_by_default():
-    q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable={"answer": "no"})
+    q = "Как стать рэпером?"
+    llm = FakeLLM(analysis("general", q), answer="Пишите тексты.", answerable={"answer": "no"})
     pipe = make(llm, {q: [("stip", 0.9)]})
     out, _ = await prepare(pipe, q)
     assert "answerability" not in llm.kinds()
-    assert NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"]
+    assert [c.chunk.chunk_id for c in out.context_chunks] == ["stip"]
 
-
-async def test_documents_without_the_answer_add_a_note_and_keep_the_documents():
-    q = "Кто будет следующим ректором НГУ?"
-    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable={"answer": "no"})
-    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
-    out, _ = await prepare(pipe, q, trace=True)
-    check = next(c for c in llm.calls if c["kind"] == "answerability")
-    assert q in check["messages"][-1]["content"] and STIP in check["messages"][-1]["content"]
-    assert check["temperature"] == 0
-    system = out.qa_messages[0]["content"]
-    assert NO_DIRECT_ANSWER_NOTE in system and STIP in system and not out.refusal
-    assert out.stage_details["context_assembly"]["answerability"] == "no"
-    assert out.trace["v2"]["answerability"] == "no"  # the debug trace (bench records) shows which answers got the note
-
-
-async def test_documents_with_the_answer_change_nothing():
-    q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable={"answer": "yes"})
-    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
-    out, _ = await prepare(pipe, q)
-    assert "answerability" in llm.kinds() and NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"]
-
-
-async def test_a_broken_answerability_reply_answers_as_usual():
-    q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable="{not json")
-    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
-    out, _ = await prepare(pipe, q)
-    assert NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"] and STIP in out.qa_messages[0]["content"]
-
-
-# On the general route (a question not about NSU) the night run's answers that began "the documents have no information"
-# and then recited loosely related documents scored 0.34 against 0.52; when the check says the documents do not answer a
-# general question, they are dropped and the question is answered from general knowledge, with the general-answer note.
 
 async def test_a_general_question_the_documents_do_not_answer_is_answered_from_general_knowledge():
     q = "Как стать рэпером?"
     llm = FakeLLM(analysis("general", q), answer="Пишите тексты и выступайте.", answerable={"answer": "no"})
-    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="general")
     out, _ = await prepare(pipe, q, trace=True)
-    assert "answerability" in llm.kinds()
+    check = next(c for c in llm.calls if c["kind"] == "answerability")
+    assert q in check["messages"][-1]["content"] and STIP in check["messages"][-1]["content"]
+    assert check["temperature"] == 0
     assert out.context_chunks == [] and out.general_note and not out.refusal
-    system = out.qa_messages[0]["content"]
-    assert STIP not in system and NO_DIRECT_ANSWER_NOTE not in system
-    assert out.trace["v2"]["answerability"] == "no"
+    assert STIP not in out.qa_messages[0]["content"]
+    assert out.stage_details["context_assembly"]["answerability"] == "no"
+    assert out.trace["v2"]["answerability"] == "no"  # the debug trace (bench records) shows the dropped documents
     assert (await pipe.generate_text(outcome=out, runtime=RUNTIME)).endswith("\n\n" + GENERAL_NOTE)
     assert await pipe.finalize_sources(out, "Пишите тексты и выступайте.") == []
 
@@ -819,8 +788,36 @@ async def test_a_general_question_the_documents_do_not_answer_is_answered_from_g
 async def test_a_general_question_the_documents_partly_answer_keeps_them():
     q = "Что такое стипендия?"
     llm = FakeLLM(analysis("general", q), answer=STIP, answerable={"answer": "partly"})
-    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="general")
     out, _ = await prepare(pipe, q)
     assert "answerability" in llm.kinds()
     assert [c.chunk.chunk_id for c in out.context_chunks] == ["stip"] and not out.general_note
-    assert STIP in out.qa_messages[0]["content"] and NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"]
+    assert STIP in out.qa_messages[0]["content"]
+
+
+async def test_a_broken_answerability_reply_keeps_the_documents():
+    q = "Как стать рэпером?"
+    llm = FakeLLM(analysis("general", q), answer=STIP, answerable="{not json")
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="general")
+    out, _ = await prepare(pipe, q)
+    assert [c.chunk.chunk_id for c in out.context_chunks] == ["stip"] and STIP in out.qa_messages[0]["content"]
+
+
+async def test_nsu_questions_are_not_checked():
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable={"answer": "no"})
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="general")
+    out, _ = await prepare(pipe, q)
+    assert "answerability" not in llm.kinds() and [c.chunk.chunk_id for c in out.context_chunks] == ["stip"]
+
+
+async def test_a_general_question_naming_a_kb_entity_keeps_its_documents_unchecked():
+    from meno_rag.v2.prompting import ROUTE_BLOCKS
+
+    llm = FakeLLM(analysis("general", Q_PERSON), answer=STAFF, answerable={"answer": "no"})
+    pipe = make(llm, {Q_PERSON: [("staff", 0.9), ("dorm", 0.1)]}, V2_LEXICAL_SLOTS=4, v2_answerability_check="general")
+    pipe.search.bm25 = FakeBm25({"солихов": 3})
+    out, _ = await prepare(pipe, Q_PERSON)
+    assert "answerability" not in llm.kinds()
+    assert [c.chunk.chunk_id for c in out.context_chunks] == ["staff"] and not out.general_note
+    assert ROUTE_BLOCKS["nsu"].splitlines()[0] in out.qa_messages[0]["content"]
