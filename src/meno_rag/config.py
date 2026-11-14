@@ -312,6 +312,9 @@ class Settings(BaseSettings):
     # What a further round searches by. queries: new search queries. hyde: a passage that could hold the answer,
     # reranked against the part that is missing.
     v2_reformulate_mode: Literal["queries", "hyde"] = Field(default="queries", validation_alias="V2_REFORMULATE_MODE")
+    # Whether the documents answer the question at all (nsu route, before the answer). soft: one short model call;
+    # a "no" adds a note that the documents most likely hold no direct answer, the documents stay. off: no call.
+    v2_answerability_check: Literal["off", "soft"] = Field(default="off", validation_alias="V2_ANSWERABILITY_CHECK")
     # Threads that run search jobs (embedding, Qdrant, BM25, cross-encoder). They share the models, so GPU memory
     # grows only by what jobs use at the same moment.
     v2_search_workers: int = Field(default=1, ge=1, validation_alias="V2_SEARCH_WORKERS")

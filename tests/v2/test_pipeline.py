@@ -19,7 +19,7 @@ from meno_rag.v2.pipeline import (
     V2Outcome,
     V2Pipeline,
 )
-from meno_rag.v2.prompting import PROMPT_GUARD_TEXT
+from meno_rag.v2.prompting import NO_DIRECT_ANSWER_NOTE, PROMPT_GUARD_TEXT
 from meno_rag.v2.schedule import ScheduleBlock
 from meno_rag.v2.search import Candidate, SearchResult
 
@@ -124,7 +124,9 @@ class FakeSearch:
 
 
 class FakeLLM:
-    def __init__(self, analysis, answer="Здравствуйте! Чем помочь?", reformulations=(), verdicts=(), passages=()):
+    def __init__(self, analysis, answer="Здравствуйте! Чем помочь?", reformulations=(), verdicts=(), passages=(),
+                 answerable=None):
+        self.answerable = answerable  # the answerability check's reply: a dict, a str (a broken reply) or None
         self.analysis = analysis
         self.answer = answer
         self.reformulations = list(reformulations)
@@ -145,6 +147,9 @@ class FakeLLM:
             return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
         if name == "hypothetical_passages":
             return json.dumps({"passages": self.passages.pop(0) if self.passages else []}, ensure_ascii=False)
+        if name == "answerability":
+            v = self.answerable if self.answerable is not None else {"answer": "yes"}
+            return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
         if name == "source_check":
             return json.dumps({"keep": [0, 1, 2, 3, 4]})
         if stage == StageName.GENERATION:
@@ -745,3 +750,47 @@ async def test_the_most_specific_form_decides_the_rarity():
     pipe = _person_pipe({"солихов": 40, "солих": 2}, V2_LEXICAL_SLOTS=4)  # shorter form's df does not decide
     rare, forms = pipe._rarest_term("Солихова")
     assert rare == "солихова" and forms == ["солихов", "солих"]
+
+
+
+# --- answerability check (V2_ANSWERABILITY_CHECK) -----------------------------------------
+# On benchmark v3 Menon 1.1 answered questions whose documents did not hold the answer (the next rector -> the current
+# one); a gemma check separates unanswerable from answerable-with-gold questions with AUC 0.83 but flags ~7% of the
+# answerable ones, so a "no" does not refuse: it adds a note and the documents stay, and the answer can still use them.
+
+async def test_answerability_check_is_off_by_default():
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable={"answer": "no"})
+    pipe = make(llm, {q: [("stip", 0.9)]})
+    out, _ = await prepare(pipe, q)
+    assert "answerability" not in llm.kinds()
+    assert NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"]
+
+
+async def test_documents_without_the_answer_add_a_note_and_keep_the_documents():
+    q = "Кто будет следующим ректором НГУ?"
+    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable={"answer": "no"})
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
+    out, _ = await prepare(pipe, q, trace=True)
+    check = next(c for c in llm.calls if c["kind"] == "answerability")
+    assert q in check["messages"][-1]["content"] and STIP in check["messages"][-1]["content"]
+    assert check["temperature"] == 0
+    system = out.qa_messages[0]["content"]
+    assert NO_DIRECT_ANSWER_NOTE in system and STIP in system and not out.refusal
+    assert out.stage_details["context_assembly"]["answerability"] == "no"
+
+
+async def test_documents_with_the_answer_change_nothing():
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable={"answer": "yes"})
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
+    out, _ = await prepare(pipe, q)
+    assert "answerability" in llm.kinds() and NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"]
+
+
+async def test_a_broken_answerability_reply_answers_as_usual():
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM(analysis(standalone=q), answer=STIP, answerable="{not json")
+    pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="soft")
+    out, _ = await prepare(pipe, q)
+    assert NO_DIRECT_ANSWER_NOTE not in out.qa_messages[0]["content"] and STIP in out.qa_messages[0]["content"]

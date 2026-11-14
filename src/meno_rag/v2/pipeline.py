@@ -77,6 +77,18 @@ REFORMULATE_SYSTEM = (
     "Если вопрос составной (ответ на одну часть нужен, чтобы найти другую), используй найденные документы. "
     'Не повторяй прежние запросы. Ответ — JSON {"queries": [строки]}.'
 )
+ANSWERABILITY_TIMEOUT_S = 15
+ANSWERABILITY_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string", "enum": ["yes", "partly", "no"]}},
+    "required": ["answer"],
+    "additionalProperties": False,
+}
+ANSWERABILITY_SYSTEM = (
+    "Тебе дают вопрос пользователя виртуальному помощнику НГУ и документы, найденные по нему. Определи, есть ли в "
+    "документах ответ именно на этот вопрос: yes — ответ есть; partly — есть только часть ответа; no — ответа нет "
+    "(документы о другом, о похожем, о другом человеке, другом годе или другой программе). Ответь JSON-объектом."
+)
 SUFFICIENCY_TIMEOUT_S = 20
 SUFFICIENCY_SCHEMA = {
     "type": "object",
@@ -277,6 +289,12 @@ class V2Pipeline:
             )
         refusal = an.route == "nsu" and not kept
         general_note = an.route == "general" and not kept
+        no_direct_answer = False
+        if s.v2_answerability_check == "soft" and an.route == "nsu" and kept:
+            verdict = await self._check_answerable(an.standalone_question or question, context, runtime)
+            no_direct_answer = verdict == "no"
+            if StageName.CONTEXT_ASSEMBLY in details:
+                details[StageName.CONTEXT_ASSEMBLY]["answerability"] = verdict
 
         # a "general" question about something the KB documents name by its rarest term (a person, a
         # platform, a program) is answered from those documents only, not from the model's memory
@@ -293,6 +311,7 @@ class V2Pipeline:
                 context=ctx,
                 today=today,
                 source_authority=s.v2_source_authority,
+                no_direct_answer=no_direct_answer,
             )
 
         qa_messages = build(context)
@@ -501,6 +520,37 @@ class V2Pipeline:
             logger.warning("v2_reformulation_failed", error=repr(exc))
         await emit(StageName.QUERY_REWRITE, StageStatus.COMPLETED, _ms(t0), {"round": round_no, "queries": queries})
         return queries
+
+    async def _check_answerable(self, standalone, context, runtime) -> str:
+        """yes / partly / no: do the documents answer the question. Any failure: "yes" (answer as usual)."""
+        messages = [
+            {"role": "system", "content": ANSWERABILITY_SYSTEM},
+            {"role": "user", "content": f"Вопрос: {standalone}\n\nНайденные документы:\n{context}"},
+        ]
+        try:
+            raw = await asyncio.wait_for(
+                self.llm_router.chat_completion_text(
+                    runtime=runtime.generation,
+                    messages=messages,
+                    stage=StageName.CONTEXT_ASSEMBLY,
+                    temperature=0,
+                    max_tokens=32,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"name": "answerability", "schema": ANSWERABILITY_SCHEMA, "strict": True},
+                    },
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    timeout=ANSWERABILITY_TIMEOUT_S,
+                ),
+                ANSWERABILITY_TIMEOUT_S,
+            )
+            verdict = _extract_json(raw).get("answer")
+            if verdict not in ("yes", "partly", "no"):
+                raise ValueError(f"unexpected verdict {verdict!r}")
+            return verdict
+        except Exception as exc:
+            logger.warning("v2_answerability_failed", error=repr(exc))
+            return "yes"
 
     async def _check_sufficiency(self, standalone, context, round_no, runtime, emit) -> tuple[bool, list[str]]:
         """(do the documents answer the question, what is missing). Any failure: answer from what was found."""
