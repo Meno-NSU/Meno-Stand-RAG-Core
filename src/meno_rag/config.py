@@ -315,9 +315,10 @@ class Settings(BaseSettings):
     # What a further round searches by. queries: new search queries. hyde: a passage that could hold the answer,
     # reranked against the part that is missing.
     v2_reformulate_mode: Literal["queries", "hyde"] = Field(default="queries", validation_alias="V2_REFORMULATE_MODE")
-    # Whether the documents answer a general question at all (before the answer). general: one short model call on
-    # general-route questions whose documents do not name the question's rare term; a "no" drops the documents and
-    # the answer comes from general knowledge, with the general-answer note. off: no call.
+    # Whether a general question needs the documents at all (before the answer). general: one short model call on
+    # general-route questions; when the answer needs no facts about specific local people, organizations, events or
+    # places and the documents do not answer it, they are dropped and the answer comes from general knowledge, with
+    # the general-answer note. off: no call.
     v2_answerability_check: Literal["off", "general"] = Field(default="off", validation_alias="V2_ANSWERABILITY_CHECK")
     # Threads that run search jobs (embedding, Qdrant, BM25, cross-encoder). They share the models, so GPU memory
     # grows only by what jobs use at the same moment.

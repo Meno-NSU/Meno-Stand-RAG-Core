@@ -80,14 +80,18 @@ REFORMULATE_SYSTEM = (
 ANSWERABILITY_TIMEOUT_S = 15
 ANSWERABILITY_SCHEMA = {
     "type": "object",
-    "properties": {"answer": {"type": "string", "enum": ["yes", "partly", "no"]}},
-    "required": ["answer"],
+    "properties": {"local": {"type": "boolean"}, "answer": {"type": "string", "enum": ["yes", "partly", "no"]}},
+    "required": ["local", "answer"],
     "additionalProperties": False,
 }
 ANSWERABILITY_SYSTEM = (
-    "Тебе дают вопрос пользователя виртуальному помощнику НГУ и документы, найденные по нему. Определи, есть ли в "
-    "документах ответ именно на этот вопрос: yes — ответ есть; partly — есть только часть ответа; no — ответа нет "
-    "(документы о другом, о похожем, о другом человеке, другом годе или другой программе). Ответь JSON-объектом."
+    "Тебе дают вопрос пользователя виртуальному помощнику НГУ и документы, найденные по нему. Ответь JSON-объектом.\n"
+    "local: true, если для ответа нужны сведения о конкретных людях, организациях, подразделениях, мероприятиях или "
+    "местах НГУ, Академгородка или Новосибирска, о самом помощнике или о человеке, который не является общеизвестным; "
+    "false, если на вопрос можно ответить общими знаниями (понятия, наука, языки, рецепты, советы, задачи, общеизвестные "
+    "люди и события).\n"
+    "answer: есть ли в документах ответ именно на этот вопрос: yes — ответ есть; partly — есть только часть ответа; "
+    "no — ответа нет (документы о другом, о похожем, о другом человеке, другом годе или другой программе)."
 )
 SUFFICIENCY_TIMEOUT_S = 20
 SUFFICIENCY_SCHEMA = {
@@ -294,13 +298,14 @@ class V2Pipeline:
         # platform, a program) is answered from those documents only, not from the model's memory
         names_term = an.route == "general" and bool(forms) and any(self._has_term(c.chunk, forms) for c in kept)
         verdict = None
-        if s.v2_answerability_check == "general" and an.route == "general" and kept and not names_term:
+        if s.v2_answerability_check == "general" and an.route == "general" and kept:
             verdict = await self._check_answerable(an.standalone_question or question, context, runtime)
             if StageName.CONTEXT_ASSEMBLY in details:
                 details[StageName.CONTEXT_ASSEMBLY]["answerability"] = verdict
-            if verdict == "no":  # documents that do not answer a general question: from general knowledge
+            if verdict == "general_no":  # general knowledge suffices and the documents do not answer
                 context, kept = "", []
                 general_note = True
+                names_term = False
         prompt_route = "nsu" if names_term else an.route
 
         def build(ctx: str) -> list[dict]:
@@ -525,7 +530,8 @@ class V2Pipeline:
         return queries
 
     async def _check_answerable(self, standalone, context, runtime) -> str:
-        """yes / partly / no: do the documents answer the question. Any failure: "yes" (answer as usual)."""
+        """"general_no" when general knowledge suffices (no local facts needed) and the documents do not answer the
+        question; otherwise "local_<answer>" / "general_<answer>" (yes, partly, no). Any failure: "yes" (as usual)."""
         messages = [
             {"role": "system", "content": ANSWERABILITY_SYSTEM},
             {"role": "user", "content": f"Вопрос: {standalone}\n\nНайденные документы:\n{context}"},
@@ -537,7 +543,7 @@ class V2Pipeline:
                     messages=messages,
                     stage=StageName.CONTEXT_ASSEMBLY,
                     temperature=0,
-                    max_tokens=32,
+                    max_tokens=48,
                     response_format={
                         "type": "json_schema",
                         "json_schema": {"name": "answerability", "schema": ANSWERABILITY_SCHEMA, "strict": True},
@@ -547,10 +553,11 @@ class V2Pipeline:
                 ),
                 ANSWERABILITY_TIMEOUT_S,
             )
-            verdict = _extract_json(raw).get("answer")
-            if verdict not in ("yes", "partly", "no"):
-                raise ValueError(f"unexpected verdict {verdict!r}")
-            return verdict
+            data = _extract_json(raw)
+            verdict, local = data.get("answer"), data.get("local")
+            if verdict not in ("yes", "partly", "no") or not isinstance(local, bool):
+                raise ValueError(f"unexpected verdict {data!r}")
+            return f"{'local' if local else 'general'}_{verdict}"
         except Exception as exc:
             logger.warning("v2_answerability_failed", error=repr(exc))
             return "yes"
