@@ -13,11 +13,15 @@ GEMMA = "Менон 1.1 (Gemma 4)"
 
 
 class FakeRegistry:
-    def __init__(self, ids):
+    def __init__(self, ids, down=()):
         self.ids = ids
+        self.down = down
 
     async def list_models(self):
         return [{"id": i, "endpoint": "http://fake/v1"} for i in self.ids]
+
+    def unavailable_models(self):
+        return [{"id": i, "endpoint": "http://fake/v1"} for i in self.down]
 
 
 def _client(make_client, ids=("meno-lite", "gemma-4-12B-it", "other"), **kw):  # noqa: F811
@@ -50,6 +54,15 @@ def test_list_has_virtual_entries(make_client):  # noqa: F811  (fixture)
     assert v["endpoint"] == data["meno-lite"]["endpoint"]
     assert data["meno-lite"]["display_name"] == "meno-lite" and "pipeline" not in data["meno-lite"]
     assert "other@menon-1.1" not in data
+
+
+def test_a_menon_11_copy_of_a_down_model_is_unreachable_too(make_client):  # noqa: F811  (fixture)
+    c, _ = _client(make_client, ids=("gemma-4-12B-it",))
+    c.app.state.vllm_registry.down = ("meno-lite",)
+    data = {m["id"]: m for m in c.get("/v1/models").json()["data"]}
+    assert data["meno-lite"]["status"]["state"] == "unreachable"
+    assert data["meno-lite@menon-1.1"]["status"]["state"] == "unreachable"
+    assert data["gemma-4-12B-it@menon-1.1"]["status"]["state"] == "available"
 
 
 def test_absent_base_no_entry(make_client):  # noqa: F811  (fixture)

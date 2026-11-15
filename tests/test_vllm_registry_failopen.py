@@ -132,3 +132,40 @@ async def test_lookup_endpoint_stable_for_single_endpoint():
         await reg.discover()
         assert reg.lookup_endpoint("m1") == "http://e1"
         assert reg.lookup_endpoint("m1") == "http://e1"
+
+
+@pytest.mark.asyncio
+async def test_models_of_a_down_endpoint_are_reported_unavailable():
+    # meno-lite was served by e2 only; e2 goes down while e1 keeps serving m1.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "e2" in str(request.url):
+            if state["e2_down"]:
+                raise httpx.ConnectError("down", request=request)
+            return httpx.Response(200, json={"data": [{"id": "meno-lite"}, {"id": "m1"}]})
+        return httpx.Response(200, json={"data": [{"id": "m1"}]})
+
+    state = {"e2_down": False}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        reg = VLLMRegistry(["http://e1", "http://e2"], http_client=http, timeout=1.0, cache_ttl=60.0)
+        await reg.discover()
+        assert reg.unavailable_models() == []
+        state["e2_down"] = True
+        await reg.discover()
+        # m1 is still served by e1, so only meno-lite is unavailable.
+        assert [m["id"] for m in reg.unavailable_models()] == ["meno-lite"]
+        state["e2_down"] = False
+        await reg.discover()
+        assert reg.unavailable_models() == []
+
+
+@pytest.mark.asyncio
+async def test_every_model_is_unavailable_while_all_endpoints_are_down():
+    state: dict[str, Any] = {"model": "m1"}
+    async with _http(state) as http:
+        reg = VLLMRegistry(["http://e"], http_client=http, timeout=1.0, cache_ttl=60.0)
+        await reg.discover()
+        state["all_down"] = True
+        stale = await reg.discover()
+    # Still served for routing (fail-open), but not presented as available.
+    assert [m["id"] for m in stale] == ["m1"]
+    assert [m["id"] for m in reg.unavailable_models()] == ["m1"]
