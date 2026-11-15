@@ -613,6 +613,7 @@ async def test_the_most_specific_form_decides_the_rarity():
 # Only when the answer needs no facts about specific local people, organizations, events or places (local=false): with
 # the documents dropped for "Что ты знаешь про Анастасию Забродину?" the model invented a TV presenter.
 
+
 async def test_answerability_check_is_off_by_default():
     q = "Как стать рэпером?"
     llm = FakeLLM(analysis("general", q), answer="Пишите тексты.", answerable={"local": False, "answer": "no"})
@@ -624,8 +625,9 @@ async def test_answerability_check_is_off_by_default():
 
 async def test_a_general_question_the_documents_do_not_answer_is_answered_from_general_knowledge():
     q = "Как стать рэпером?"
-    llm = FakeLLM(analysis("general", q), answer="Пишите тексты и выступайте.",
-                  answerable={"local": False, "answer": "no"})
+    llm = FakeLLM(
+        analysis("general", q), answer="Пишите тексты и выступайте.", answerable={"local": False, "answer": "no"}
+    )
     pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="general")
     out, _ = await prepare(pipe, q, trace=True)
     check = next(c for c in llm.calls if c["kind"] == "answerability")
@@ -634,7 +636,9 @@ async def test_a_general_question_the_documents_do_not_answer_is_answered_from_g
     assert out.context_chunks == [] and out.general_note and not out.refusal
     assert STIP not in out.qa_messages[0]["content"]
     assert out.stage_details["context_assembly"]["answerability"] == "general_no"
-    assert out.trace["v2"]["answerability"] == "general_no"  # the debug trace (bench records) shows the dropped documents
+    assert (
+        out.trace["v2"]["answerability"] == "general_no"
+    )  # the debug trace (bench records) shows the dropped documents
     assert (await pipe.generate_text(outcome=out, runtime=RUNTIME)).endswith("\n\n" + GENERAL_NOTE)
     assert await pipe.finalize_sources(out, "Пишите тексты и выступайте.") == []
 
