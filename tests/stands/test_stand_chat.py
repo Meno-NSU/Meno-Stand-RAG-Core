@@ -545,7 +545,8 @@ def test_the_model_list_runs_menon_10_then_11_then_the_stands(make_client, tmp_p
     monkeypatch.setenv("LLM_DISPLAY_NAMES", "gemma=Гемма")
     c, _, _ = stand_client(make_client, tmp_path, stand_handler([]))
     c.app.state.vllm_registry = SimpleNamespace(
-        list_models=AsyncMock(return_value=[{"id": "meno-lite", "endpoint": "http://fake/v1"}])
+        list_models=AsyncMock(return_value=[{"id": "meno-lite", "endpoint": "http://fake/v1"}]),
+        unavailable_models=list,
     )
     data = c.get("/v1/models").json()["data"]
     order: list[str] = []

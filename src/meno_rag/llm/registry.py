@@ -38,6 +38,11 @@ class VLLMRegistry:
         self._failure_retry = min(cache_ttl, 10.0)
         self._discovery_lock = asyncio.Lock()
         self.last_discovery_ok = False
+        # What each endpoint served when it last answered, and which endpoints did
+        # not answer the latest probe: a model is presented as available only
+        # while one of its endpoints answers.
+        self._last_seen: dict[str, list[ModelRecord]] = {}
+        self._down: set[str] = set()
         # Round-robin cursor per model_id, so a model served by several
         # endpoints spreads load instead of pinning every request to the first.
         self._rr_cursor: dict[str, int] = {}
@@ -52,18 +57,22 @@ class VLLMRegistry:
                 response.raise_for_status()
                 body = response.json()
                 success_count += 1
-                for model in body.get("data", []):
-                    models.append(
-                        {
-                            "id": model.get("id", "unknown"),
-                            "object": "model",
-                            "created": model.get("created", int(time.time())),
-                            "owned_by": model.get("owned_by", "vllm"),
-                            "endpoint": base_url,
-                        }
-                    )
+                served = [
+                    {
+                        "id": model.get("id", "unknown"),
+                        "object": "model",
+                        "created": model.get("created", int(time.time())),
+                        "owned_by": model.get("owned_by", "vllm"),
+                        "endpoint": base_url,
+                    }
+                    for model in body.get("data", [])
+                ]
+                models.extend(served)
+                self._last_seen[base_url] = served
+                self._down.discard(base_url)
                 logger.info("vllm_models_discovered", endpoint=base_url, count=len(body.get("data", [])))
             except Exception as exc:
+                self._down.add(base_url)
                 logger.warning("vllm_model_discovery_failed", endpoint=base_url, error=str(exc))
 
         # Fail-open: a total discovery failure must not blank the last good
@@ -105,6 +114,28 @@ class VLLMRegistry:
 
     async def refresh(self) -> list[ModelRecord]:
         return await self.discover()
+
+    def unavailable_models(self) -> list[ModelRecord]:
+        """Models last served by an endpoint that did not answer the latest probe and
+        that no answering endpoint serves — what the model list must not present as
+        available (they may still be in the stale cache kept for routing)."""
+        up_ids = {
+            model["id"]
+            for endpoint, served in self._last_seen.items()
+            if endpoint not in self._down
+            for model in served
+        }
+        out: list[ModelRecord] = []
+        seen: set[str] = set()
+        for endpoint in self._endpoints:
+            if endpoint not in self._down:
+                continue
+            for model in self._last_seen.get(endpoint, []):
+                if model["id"] in up_ids or model["id"] in seen:
+                    continue
+                seen.add(model["id"])
+                out.append(model)
+        return out
 
     async def resolve_model(
         self, requested_model: str | None, configured_default: str | None = None

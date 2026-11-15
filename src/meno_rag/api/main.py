@@ -586,8 +586,13 @@ async def list_models(request: Request):
     vllm_models = await vllm_registry.list_models()
     or_models = await or_registry.list_models() if or_registry is not None else []
 
+    # A model whose endpoints stopped answering stays listed, marked unreachable, so
+    # the site shows it as unavailable instead of offering it (it may still be in
+    # the registry's stale cache, which is kept for routing only).
+    unavailable = {m["id"]: m for m in vllm_registry.unavailable_models()}
+    listed = {m["id"] for m in vllm_models}
     merged: list[dict] = []
-    for m in vllm_models:
+    for m in [*vllm_models, *(m for model_id, m in unavailable.items() if model_id not in listed)]:
         merged.append(
             {
                 "id": m["id"],
@@ -597,7 +602,11 @@ async def list_models(request: Request):
                 "provider": "vllm",
                 "featured": False,
                 "stages": ["rewrite", "rerank", "generation"],
-                "status": {"state": "available", "until": None, "last_error": None},
+                "status": (
+                    {"state": "unreachable", "until": None, "last_error": "endpoint not answering"}
+                    if m["id"] in unavailable
+                    else {"state": "available", "until": None, "last_error": None}
+                ),
                 "display_name": m["id"],
                 "context_length": m.get("context_length"),
                 "endpoint": m.get("endpoint"),

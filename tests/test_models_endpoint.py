@@ -63,3 +63,26 @@ def test_an_openrouter_entry_is_a_menon_10_model_named_by_its_display_name(clien
     assert entry["llm_id"] == entry["id"]
     assert entry["llm_name"] == entry["display_name"]
     assert entry["stand_name"] == "Менон 1.0"
+
+
+def test_a_model_whose_endpoint_is_down_is_listed_as_unreachable(client_with_or):
+    from meno_rag.api.main import app
+
+    app.state.vllm_registry.unavailable_models = lambda: [
+        {"id": "meno-lite", "endpoint": "http://down", "created": 100, "object": "model", "owned_by": "vllm"}
+    ]
+    by_id = {m["id"]: m for m in client_with_or.get("/v1/models").json()["data"]}
+    assert by_id["menon-1"]["status"]["state"] == "available"
+    assert by_id["meno-lite"]["status"]["state"] == "unreachable"
+    assert by_id["meno-lite"]["provider"] == "vllm"
+
+
+def test_a_stale_model_kept_for_routing_is_not_presented_as_available(client_with_or):
+    from meno_rag.api.main import app
+
+    app.state.vllm_registry.unavailable_models = lambda: [
+        {"id": "menon-1", "endpoint": "http://v", "created": 100, "object": "model", "owned_by": "vllm"}
+    ]
+    entries = [m for m in client_with_or.get("/v1/models").json()["data"] if m["id"] == "menon-1"]
+    assert len(entries) == 1
+    assert entries[0]["status"]["state"] == "unreachable"
