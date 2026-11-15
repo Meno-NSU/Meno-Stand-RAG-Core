@@ -270,7 +270,8 @@ class V2Pipeline:
         verdicts: list[dict] = []
         if searched:
             ranked, queries, coverage, rounds, forced, forms, verdicts = await self._search_rounds(
-                an, today, runtime, emit)
+                an, today, runtime, emit
+            )
 
         kept: list[Candidate] = []
         context = ""
@@ -443,8 +444,13 @@ class V2Pipeline:
             found = sorted(best.values(), key=lambda c: (-c.score, c.pos))
             if adaptive:
                 context, kept = assemble_context(
-                    [*schedule_cands, *found], thr, s.v2_context_budget_tokens, s.v2_max_context_chunks, forced,
-                    s.v2_source_prior_weight, s.v2_rare_term_reserved,
+                    [*schedule_cands, *found],
+                    thr,
+                    s.v2_context_budget_tokens,
+                    s.v2_max_context_chunks,
+                    forced,
+                    s.v2_source_prior_weight,
+                    s.v2_rare_term_reserved,
                 )
                 if kept:  # with nothing above the threshold there is nothing to read: search on
                     sufficient, missing = await self._check_sufficiency(standalone, context, rounds, runtime, emit)
@@ -458,8 +464,9 @@ class V2Pipeline:
                 parts = uncovered or [standalone]
                 round_rerank = [parts[min(i, len(parts) - 1)] for i in range(len(new))]
             else:
-                new = await self._reformulate(standalone, uncovered, an.chain, all_queries, titles, rounds + 1,
-                                              runtime, emit)
+                new = await self._reformulate(
+                    standalone, uncovered, an.chain, all_queries, titles, rounds + 1, runtime, emit
+                )
                 round_rerank = new
             round_queries = new
             aims = {q: (uncovered[min(i, len(uncovered) - 1)] if uncovered else None) for i, q in enumerate(new)}
@@ -530,7 +537,7 @@ class V2Pipeline:
         return queries
 
     async def _check_answerable(self, standalone, context, runtime) -> str:
-        """"general_no" when general knowledge suffices (no local facts needed) and the documents do not answer the
+        """ "general_no" when general knowledge suffices (no local facts needed) and the documents do not answer the
         question; otherwise "local_<answer>" / "general_<answer>" (yes, partly, no). Any failure: "yes" (as usual)."""
         messages = [
             {"role": "system", "content": ANSWERABILITY_SYSTEM},
@@ -596,8 +603,12 @@ class V2Pipeline:
             missing = [] if sufficient else _dedup(got if isinstance(got, list) else [])[:MAX_NEW_QUERIES]
         except Exception as exc:
             logger.warning("v2_sufficiency_failed", error=repr(exc))
-        await emit(StageName.QUERY_REWRITE, StageStatus.COMPLETED, _ms(t0),
-                   {"round": round_no, "sufficient": sufficient, "missing": missing})
+        await emit(
+            StageName.QUERY_REWRITE,
+            StageStatus.COMPLETED,
+            _ms(t0),
+            {"round": round_no, "sufficient": sufficient, "missing": missing},
+        )
         return sufficient, missing
 
     async def _hypothetical(self, standalone, uncovered, tried, titles, round_no, runtime, emit) -> list[str]:
@@ -642,7 +653,16 @@ class V2Pipeline:
 
     @staticmethod
     def _trace(
-        an, ranked, kept, queries, coverage, rounds, timings, source_weight: float = 0.0, verdicts=(), answerability=None
+        an,
+        ranked,
+        kept,
+        queries,
+        coverage,
+        rounds,
+        timings,
+        source_weight: float = 0.0,
+        verdicts=(),
+        answerability=None,
     ) -> dict:
         kept_ids = {c.chunk.chunk_id for c in kept}
         order = sorted(ranked, key=lambda c: -priority(c, source_weight))  # same order assemble_context uses

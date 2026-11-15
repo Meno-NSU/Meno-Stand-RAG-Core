@@ -124,8 +124,9 @@ class FakeSearch:
 
 
 class FakeLLM:
-    def __init__(self, analysis, answer="Здравствуйте! Чем помочь?", reformulations=(), verdicts=(), passages=(),
-                 answerable=None):
+    def __init__(
+        self, analysis, answer="Здравствуйте! Чем помочь?", reformulations=(), verdicts=(), passages=(), answerable=None
+    ):
         self.answerable = answerable  # the answerability check's reply: a dict, a str (a broken reply) or None
         self.analysis = analysis
         self.answer = answer
@@ -140,8 +141,9 @@ class FakeLLM:
         if name == "turn_analysis":
             return json.dumps(self.analysis, ensure_ascii=False)
         if name == "search_queries":
-            return json.dumps({"queries": self.reformulations.pop(0) if self.reformulations else []},
-                              ensure_ascii=False)
+            return json.dumps(
+                {"queries": self.reformulations.pop(0) if self.reformulations else []}, ensure_ascii=False
+            )
         if name == "search_sufficiency":
             v = self.verdicts.pop(0) if self.verdicts else {"sufficient": True, "missing": []}
             return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
@@ -326,10 +328,15 @@ async def test_sufficient_documents_end_the_search_after_one_round():
 async def test_topical_documents_without_the_answer_search_for_what_is_missing():
     # the cross-encoder is happy (0.9), so the coverage rule would stop here; the documents don't answer
     q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q), answer=STIP,
-                  verdicts=[{"sufficient": False, "missing": ["размер академической стипендии"]},
-                            {"sufficient": True, "missing": []}],
-                  reformulations=[["стипендия рублей в месяц"]])
+    llm = FakeLLM(
+        analysis(standalone=q),
+        answer=STIP,
+        verdicts=[
+            {"sufficient": False, "missing": ["размер академической стипендии"]},
+            {"sufficient": True, "missing": []},
+        ],
+        reformulations=[["стипендия рублей в месяц"]],
+    )
     pipe = make(llm, {q: [("fit", 0.9)], "стипендия рублей в месяц": [("stip", 0.8)]}, v2_search_trigger="sufficiency")
     out, events = await prepare(pipe, q, trace=True)
     assert [c[0] for c in pipe.search.calls] == [[q], ["стипендия рублей в месяц"]]
@@ -343,8 +350,12 @@ async def test_topical_documents_without_the_answer_search_for_what_is_missing()
 
 async def test_the_last_round_is_not_checked():
     q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q), answer=STIP, verdicts=[{"sufficient": False, "missing": ["размер"]}] * 5,
-                  reformulations=[["один"], ["два"], ["три"]])
+    llm = FakeLLM(
+        analysis(standalone=q),
+        answer=STIP,
+        verdicts=[{"sufficient": False, "missing": ["размер"]}] * 5,
+        reformulations=[["один"], ["два"], ["три"]],
+    )
     table = {q: [("fit", 0.9)], "один": [("dorm", 0.8)], "два": [("stip", 0.8)]}
     pipe = make(llm, table, v2_search_trigger="sufficiency", v2_max_rounds=3)
     await prepare(pipe, q)
@@ -353,11 +364,19 @@ async def test_the_last_round_is_not_checked():
 
 async def test_insufficient_without_a_list_searches_for_the_question_itself():
     q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q), answer=STIP, verdicts=[{"sufficient": False, "missing": []}],
-                  reformulations=[["другие слова"]])
-    pipe = make(llm, {q: [("fit", 0.9)], "другие слова": [("stip", 0.8)]}, v2_search_trigger="sufficiency", v2_max_rounds=2)
+    llm = FakeLLM(
+        analysis(standalone=q),
+        answer=STIP,
+        verdicts=[{"sufficient": False, "missing": []}],
+        reformulations=[["другие слова"]],
+    )
+    pipe = make(
+        llm, {q: [("fit", 0.9)], "другие слова": [("stip", 0.8)]}, v2_search_trigger="sufficiency", v2_max_rounds=2
+    )
     await prepare(pipe, q)
-    assert f"Не найдено:\n- {q}" in next(c for c in llm.calls if c["kind"] == "search_queries")["messages"][-1]["content"]
+    assert (
+        f"Не найдено:\n- {q}" in next(c for c in llm.calls if c["kind"] == "search_queries")["messages"][-1]["content"]
+    )
 
 
 async def test_a_broken_verdict_answers_from_what_was_found():
@@ -371,8 +390,12 @@ async def test_a_broken_verdict_answers_from_what_was_found():
 
 async def test_nothing_above_threshold_needs_no_verdict():
     q = "Кто ректор НГУ в 1970 году?"
-    llm = FakeLLM(analysis(standalone=q), reformulations=[["ректор 1970"]], verdicts=[{"sufficient": True, "missing": []}])
-    pipe = make(llm, {q: [("fit", 0.1)], "ректор 1970": [("dorm", 0.8)]}, v2_search_trigger="sufficiency", v2_max_rounds=2)
+    llm = FakeLLM(
+        analysis(standalone=q), reformulations=[["ректор 1970"]], verdicts=[{"sufficient": True, "missing": []}]
+    )
+    pipe = make(
+        llm, {q: [("fit", 0.1)], "ректор 1970": [("dorm", 0.8)]}, v2_search_trigger="sufficiency", v2_max_rounds=2
+    )
     await prepare(pipe, q)
     assert len(pipe.search.calls) == 2 and "search_sufficiency" not in llm.kinds()
 
@@ -387,8 +410,12 @@ async def test_general_route_keeps_the_coverage_rule():
 
 async def test_chain_question_gets_its_second_step_even_when_judged_sufficient():
     q = "Где работает заведующий кафедрой?"
-    llm = FakeLLM(analysis(standalone=q, chain=True), answer=STIP, verdicts=[{"sufficient": True, "missing": []}],
-                  reformulations=[["второй шаг"]])
+    llm = FakeLLM(
+        analysis(standalone=q, chain=True),
+        answer=STIP,
+        verdicts=[{"sufficient": True, "missing": []}],
+        reformulations=[["второй шаг"]],
+    )
     pipe = make(llm, {q: [("fit", 0.9)], "второй шаг": [("stip", 0.8)]}, v2_search_trigger="sufficiency")
     await prepare(pipe, q)
     assert [c[0] for c in pipe.search.calls] == [[q], ["второй шаг"]]
@@ -400,10 +427,19 @@ async def test_chain_question_gets_its_second_step_even_when_judged_sufficient()
 async def test_hypothetical_passage_is_searched_and_the_missing_part_is_reranked():
     q = "Какой размер стипендии в НГУ?"
     passage = "Размер академической стипендии устанавливается приказом ректора."
-    llm = FakeLLM(analysis(standalone=q), answer=STIP,
-                  verdicts=[{"sufficient": False, "missing": ["размер стипендии"]}], passages=[[passage]])
-    pipe = make(llm, {q: [("fit", 0.9)], passage: [("stip", 0.8)]}, v2_search_trigger="sufficiency",
-                v2_reformulate_mode="hyde", v2_max_rounds=2)
+    llm = FakeLLM(
+        analysis(standalone=q),
+        answer=STIP,
+        verdicts=[{"sufficient": False, "missing": ["размер стипендии"]}],
+        passages=[[passage]],
+    )
+    pipe = make(
+        llm,
+        {q: [("fit", 0.9)], passage: [("stip", 0.8)]},
+        v2_search_trigger="sufficiency",
+        v2_reformulate_mode="hyde",
+        v2_max_rounds=2,
+    )
     out, events = await prepare(pipe, q)
     assert pipe.search.calls == [([q], [q]), ([passage], ["размер стипендии"])]
     assert "search_queries" not in llm.kinds()
@@ -417,7 +453,9 @@ async def test_hypothetical_passage_is_searched_and_the_missing_part_is_reranked
 async def test_hypothetical_search_works_with_the_coverage_trigger():
     q = "Стипендия и общежитие ФИТ"
     passage = "Общежития расположены на улице Пирогова."
-    llm = FakeLLM(analysis(standalone=q, subqueries=["стипендия ФИТ", "общежитие ФИТ"]), answer=STIP, passages=[[passage]])
+    llm = FakeLLM(
+        analysis(standalone=q, subqueries=["стипендия ФИТ", "общежитие ФИТ"]), answer=STIP, passages=[[passage]]
+    )
     table = {"стипендия ФИТ": [("stip", 0.9)], "общежитие ФИТ": [("fit", 0.1)], passage: [("dorm", 0.8)]}
     pipe = make(llm, table, v2_reformulate_mode="hyde")
     await prepare(pipe, q)
@@ -432,7 +470,9 @@ def test_the_hypothetical_call_requires_a_passage():
 
 async def test_no_passage_ends_the_search():
     q = "Какой размер стипендии в НГУ?"
-    llm = FakeLLM(analysis(standalone=q), answer=STIP, verdicts=[{"sufficient": False, "missing": ["размер"]}], passages=[[]])
+    llm = FakeLLM(
+        analysis(standalone=q), answer=STIP, verdicts=[{"sufficient": False, "missing": ["размер"]}], passages=[[]]
+    )
     pipe = make(llm, {q: [("stip", 0.9)]}, v2_search_trigger="sufficiency", v2_reformulate_mode="hyde")
     out, _ = await prepare(pipe, q)
     assert len(pipe.search.calls) == 1 and [c.chunk.chunk_id for c in out.context_chunks] == ["stip"]
@@ -482,8 +522,17 @@ async def test_trace_is_readable_by_benchmark_runner():
     v2 = t["v2"]
     assert v2["adaptive"] == []  # the coverage trigger asks the model nothing
     assert v2["answerability"] is None  # the check is off by default
-    assert set(v2) == {"route", "rounds", "standalone_question", "subqueries", "coverage", "adaptive", "answerability",
-                       "timings_ms", "sources_debug"}
+    assert set(v2) == {
+        "route",
+        "rounds",
+        "standalone_question",
+        "subqueries",
+        "coverage",
+        "adaptive",
+        "answerability",
+        "timings_ms",
+        "sources_debug",
+    }
     assert v2["route"] == "nsu" and v2["rounds"] == 1 and v2["standalone_question"] == q
     assert v2["coverage"] == {q: 0.9}
     assert {"query_rewrite", "retrieval", "rerank", "context_assembly"} <= set(v2["timings_ms"])
@@ -771,13 +820,13 @@ async def test_the_most_specific_form_decides_the_rarity():
     assert rare == "солихова" and forms == ["солихов", "солих"]
 
 
-
 # --- answerability check (V2_ANSWERABILITY_CHECK) -----------------------------------------
 # On benchmark v3, general-route answers that began "the documents have no information" and then recited loosely
 # related documents (rap -> a library exhibition, daiquiri -> a cafe post) scored 0.34 against 0.52. With the check a
 # general question the documents do not answer is answered from general knowledge (+0.12 answer correctness on those).
 # Only when the answer needs no facts about specific local people, organizations, events or places (local=false): with
 # the documents dropped for "Что ты знаешь про Анастасию Забродину?" the model invented a TV presenter.
+
 
 async def test_answerability_check_is_off_by_default():
     q = "Как стать рэпером?"
@@ -790,8 +839,9 @@ async def test_answerability_check_is_off_by_default():
 
 async def test_a_general_question_the_documents_do_not_answer_is_answered_from_general_knowledge():
     q = "Как стать рэпером?"
-    llm = FakeLLM(analysis("general", q), answer="Пишите тексты и выступайте.",
-                  answerable={"local": False, "answer": "no"})
+    llm = FakeLLM(
+        analysis("general", q), answer="Пишите тексты и выступайте.", answerable={"local": False, "answer": "no"}
+    )
     pipe = make(llm, {q: [("stip", 0.9)]}, v2_answerability_check="general")
     out, _ = await prepare(pipe, q, trace=True)
     check = next(c for c in llm.calls if c["kind"] == "answerability")
@@ -800,7 +850,9 @@ async def test_a_general_question_the_documents_do_not_answer_is_answered_from_g
     assert out.context_chunks == [] and out.general_note and not out.refusal
     assert STIP not in out.qa_messages[0]["content"]
     assert out.stage_details["context_assembly"]["answerability"] == "general_no"
-    assert out.trace["v2"]["answerability"] == "general_no"  # the debug trace (bench records) shows the dropped documents
+    assert (
+        out.trace["v2"]["answerability"] == "general_no"
+    )  # the debug trace (bench records) shows the dropped documents
     assert (await pipe.generate_text(outcome=out, runtime=RUNTIME)).endswith("\n\n" + GENERAL_NOTE)
     assert await pipe.finalize_sources(out, "Пишите тексты и выступайте.") == []
 

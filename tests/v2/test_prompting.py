@@ -103,6 +103,7 @@ def test_max_chunks():
 # chunks above the threshold (on benchmark v3, 297 of 582 questions; the forced chunks' median score was 0.005).
 # reserved=k: at most k of them displace above-threshold chunks, the rest only fill slots left free.
 
+
 def test_forced_chunks_reserve_their_slots_by_default():
     above = [cand(i, 0.9 - i / 100) for i in range(6)]
     forced = [cand(100 + i, 0.01) for i in range(2)]
@@ -117,8 +118,9 @@ def test_unreserved_forced_chunks_only_fill_free_slots():
         [*above, *forced], threshold=0.3, budget_tokens=10_000, max_chunks=4, forced=forced, reserved=0
     )
     assert [c.pos for c in kept] == [0, 1, 2, 3]
-    _, kept = assemble_context([above[0], *forced], threshold=0.3, budget_tokens=10_000, max_chunks=4, forced=forced,
-                               reserved=0)
+    _, kept = assemble_context(
+        [above[0], *forced], threshold=0.3, budget_tokens=10_000, max_chunks=4, forced=forced, reserved=0
+    )
     assert [c.pos for c in kept] == [0, 100, 101]  # with free slots the rare-term evidence still comes in
 
 

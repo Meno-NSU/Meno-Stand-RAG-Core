@@ -311,7 +311,9 @@ class Settings(BaseSettings):
     v2_max_rounds: int = Field(default=3, validation_alias="V2_MAX_ROUNDS")
     # What starts another round. coverage: a target's best cross-encoder score is under V2_RERANK_THRESHOLD.
     # sufficiency: the model reads the context the answer would get and says what is missing (nsu route only).
-    v2_search_trigger: Literal["coverage", "sufficiency"] = Field(default="coverage", validation_alias="V2_SEARCH_TRIGGER")
+    v2_search_trigger: Literal["coverage", "sufficiency"] = Field(
+        default="coverage", validation_alias="V2_SEARCH_TRIGGER"
+    )
     # What a further round searches by. queries: new search queries. hyde: a passage that could hold the answer,
     # reranked against the part that is missing.
     v2_reformulate_mode: Literal["queries", "hyde"] = Field(default="queries", validation_alias="V2_REFORMULATE_MODE")
