@@ -236,7 +236,9 @@ async def test_nsu_covered_first_round_is_single_round():
     assert out.search_queries == [q, "размер стипендии", "общежития НГУ"]
     assert STIP in out.context and DORM in out.context
     # timeouts: analysis 20 s, generation from settings; answer tokens capped
-    assert next(c for c in llm.calls if c["kind"] == "turn_analysis")["timeout"] == 20
+    assert (
+        next(c for c in llm.calls if c["kind"] == "turn_analysis")["timeout"] == pipe.settings.rewrite_timeout_seconds
+    )
     answer = await stream(pipe, out, max_tokens=99_999)
     gen = next(c for c in llm.calls if c["kind"] == "stream")
     assert gen["max_tokens"] == pipe.settings.v2_max_answer_tokens
@@ -330,7 +332,9 @@ async def test_trace_is_readable_by_benchmark_runner():
         "coverage",
         "timings_ms",
         "sources_debug",
+        "analysis_fallback",
     }
+    assert v2["analysis_fallback"] is False
     assert v2["route"] == "nsu" and v2["rounds"] == 1 and v2["standalone_question"] == q
     assert v2["coverage"] == {q: 0.9}
     assert {"query_rewrite", "retrieval", "rerank", "context_assembly"} <= set(v2["timings_ms"])
@@ -339,6 +343,26 @@ async def test_trace_is_readable_by_benchmark_runner():
     assert t["v2"]["sources_debug"]
     assert "generation" in t["v2"]["timings_ms"] and answer
     json.dumps(t, ensure_ascii=False)  # serialisable for the bench response
+
+
+async def test_turn_analysis_waits_rewrite_timeout():
+    # under load the analysis call queues behind other requests; its budget is REWRITE_TIMEOUT_SECONDS (as RAGU's),
+    # not a hard-coded 20 s after which the turn silently loses its rewrite and subqueries
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM(analysis(standalone=q))
+    pipe = make(llm, {q: [("stip", 0.9)]}, rewrite_timeout_seconds=42.0)
+    await prepare(pipe, q)
+    call = next(c for c in llm.calls if c["kind"] == "turn_analysis")
+    assert call["timeout"] == 42.0
+
+
+async def test_trace_shows_analysis_fallback():
+    q = "Какой размер стипендии в НГУ?"
+    llm = FakeLLM({"route": "nsu"})  # malformed analysis -> the raw question is searched
+    pipe = make(llm, {q: [("stip", 0.9)]})
+    out, _ = await prepare(pipe, q, trace=True)
+    assert out.trace["v2"]["analysis_fallback"] is True
+    assert out.trace["v2"]["standalone_question"] == q
 
 
 async def test_no_trace_without_capture():

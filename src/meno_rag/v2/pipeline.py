@@ -45,7 +45,6 @@ from meno_rag.v2.sources import attribute, llm_check, to_sources
 logger = structlog.get_logger(__name__)
 
 TZ = ZoneInfo("Asia/Novosibirsk")
-ANALYSIS_TIMEOUT_S = 20
 REFORMULATE_TIMEOUT_S = 15
 MAX_NEW_QUERIES = 3
 REFORMULATE_TITLES = 8
@@ -199,7 +198,9 @@ class V2Pipeline:
             recent=memory.recent,
             summary=memory.summary,
             today=today,
-            timeout_s=ANALYSIS_TIMEOUT_S,
+            # the call may queue behind other requests on a busy model; past this budget the turn falls back to the
+            # raw question (no rewrite, no subqueries), so it gets the same budget as the other rewrite calls
+            timeout_s=s.rewrite_timeout_seconds,
         )
         timings["analysis"] = _ms(t1)
         await emit(
@@ -483,6 +484,7 @@ class V2Pipeline:
                 "coverage": {q: round(float(v), 6) for q, v in coverage.items()},
                 "timings_ms": timings,
                 "sources_debug": None,
+                "analysis_fallback": an.fallback,
             },
         }
 
