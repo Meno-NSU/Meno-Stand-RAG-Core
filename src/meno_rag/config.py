@@ -25,13 +25,27 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(default="EMPTY", validation_alias=AliasChoices("OPENAI_API_KEY", "VLLM_API_KEY"))
     vllm_endpoints: str = Field(default="http://127.0.0.1:9020", validation_alias="VLLM_ENDPOINTS")
-    # Where requests for a model id served by several VLLM_ENDPOINTS go. "round_robin" alternates between them.
-    # "priority" sends every request to the first of them in VLLM_ENDPOINTS order that is not known to be down (it did
-    # not answer the latest /v1/models probe, or a chat call to it could not connect or timed out); the later ones are
-    # fallbacks only. The model list shows such a model once, with the endpoint a request would go to now.
+    # Where requests for a model id served by several VLLM_ENDPOINTS go. "round_robin" alternates between those not
+    # known to be down (between all of them when every one is). "priority" sends every request to the first of them in
+    # VLLM_ENDPOINTS order that is not known to be down (it did not answer the latest /v1/models discovery, failed
+    # VLLM_HEALTH_PROBE_FAILURES health probes in a row, or a chat call to it could not connect or timed out); the later
+    # ones are fallbacks only. The model list shows such a model once, with the endpoint a request would go to now.
     vllm_endpoint_policy: Literal["round_robin", "priority"] = Field(
         default="round_robin", validation_alias="VLLM_ENDPOINT_POLICY"
     )
+    # Background health probe of VLLM_ENDPOINTS: every VLLM_HEALTH_PROBE_INTERVAL_SECONDS each endpoint's GET /health is
+    # asked, all at once, with a timeout of VLLM_HEALTH_PROBE_TIMEOUT_SECONDS. After VLLM_HEALTH_PROBE_FAILURES failed
+    # rounds in a row the endpoint is known down: lookups skip it at once (both policies) instead of waiting for a chat
+    # call to it to time out. A down endpoint that answers again has its models asked and gets its traffic back with
+    # that round. An interval of 0 turns the probe off: endpoints are then known down only by discovery and failed chat
+    # calls, as before.
+    vllm_health_probe_interval_seconds: float = Field(
+        default=10.0, ge=0, allow_inf_nan=False, validation_alias="VLLM_HEALTH_PROBE_INTERVAL_SECONDS"
+    )
+    vllm_health_probe_timeout_seconds: float = Field(
+        default=3.0, gt=0, allow_inf_nan=False, validation_alias="VLLM_HEALTH_PROBE_TIMEOUT_SECONDS"
+    )
+    vllm_health_probe_failures: int = Field(default=2, ge=1, validation_alias="VLLM_HEALTH_PROBE_FAILURES")
     default_model: str | None = Field(default=None, validation_alias=AliasChoices("DEFAULT_MODEL", "LLM_MODEL_NAME"))
 
     stand_resources_dir: Path = Field(default=Path("resources/stand_nsu"), validation_alias="STAND_RESOURCES_DIR")

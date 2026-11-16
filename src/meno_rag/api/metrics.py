@@ -138,6 +138,13 @@ _STAND_UP = Gauge(
     labelnames=("stand",),
     registry=REGISTRY,
 )
+_VLLM_ENDPOINT_UP = Gauge(
+    "meno_vllm_endpoint_up",
+    "1 while the vLLM endpoint is not known to be down; 0 after a failed discovery, VLLM_HEALTH_PROBE_FAILURES failed "
+    "health probes in a row or (priority policy) a chat call that could not reach it, until it answers again.",
+    labelnames=("endpoint",),
+    registry=REGISTRY,
+)
 _STAND_CONFIG_ERRORS = Counter(
     "meno_stand_config_errors",
     "Times the stands file could not be read; the previous list stays in use (at the start: no stands).",
@@ -298,6 +305,10 @@ def set_admission(*, active: int, limit: int) -> None:
 
 def set_stand_up(stand: str, up: bool) -> None:
     _STAND_UP.labels(stand=stand).set(1 if up else 0)
+
+
+def set_vllm_endpoint_up(endpoint: str, up: bool) -> None:
+    _VLLM_ENDPOINT_UP.labels(endpoint=endpoint).set(1 if up else 0)
 
 
 def record_stand_config_error() -> None:

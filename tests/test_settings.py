@@ -113,3 +113,45 @@ def test_an_unknown_vllm_endpoint_policy_is_rejected(monkeypatch):
     monkeypatch.setenv("VLLM_ENDPOINT_POLICY", "fastest")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_vllm_health_probe_defaults(monkeypatch):
+    for key in (
+        "VLLM_HEALTH_PROBE_INTERVAL_SECONDS",
+        "VLLM_HEALTH_PROBE_TIMEOUT_SECONDS",
+        "VLLM_HEALTH_PROBE_FAILURES",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    s = Settings()
+    assert s.vllm_health_probe_interval_seconds == 10.0
+    assert s.vllm_health_probe_timeout_seconds == 3.0
+    assert s.vllm_health_probe_failures == 2
+
+
+def test_vllm_health_probe_settings_from_env(monkeypatch):
+    monkeypatch.setenv("VLLM_HEALTH_PROBE_INTERVAL_SECONDS", "0")  # 0 turns the probe off
+    monkeypatch.setenv("VLLM_HEALTH_PROBE_TIMEOUT_SECONDS", "1.5")
+    monkeypatch.setenv("VLLM_HEALTH_PROBE_FAILURES", "1")
+    s = Settings()
+    assert s.vllm_health_probe_interval_seconds == 0.0
+    assert s.vllm_health_probe_timeout_seconds == 1.5
+    assert s.vllm_health_probe_failures == 1
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("VLLM_HEALTH_PROBE_INTERVAL_SECONDS", "-1"),
+        ("VLLM_HEALTH_PROBE_INTERVAL_SECONDS", "inf"),
+        ("VLLM_HEALTH_PROBE_INTERVAL_SECONDS", "soon"),
+        ("VLLM_HEALTH_PROBE_TIMEOUT_SECONDS", "0"),
+        ("VLLM_HEALTH_PROBE_TIMEOUT_SECONDS", "-3"),
+        ("VLLM_HEALTH_PROBE_TIMEOUT_SECONDS", "nan"),
+        ("VLLM_HEALTH_PROBE_FAILURES", "0"),
+        ("VLLM_HEALTH_PROBE_FAILURES", "1.5"),
+    ],
+)
+def test_bad_vllm_health_probe_settings_are_rejected(monkeypatch, key, value):
+    monkeypatch.setenv(key, value)
+    with pytest.raises(ValidationError):
+        Settings()

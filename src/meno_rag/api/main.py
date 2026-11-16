@@ -212,6 +212,8 @@ async def lifespan(app: FastAPI):
         timeout=settings.model_discovery_timeout_seconds,
         cache_ttl=settings.model_cache_ttl_seconds,
         policy=settings.vllm_endpoint_policy,
+        probe_timeout=settings.vllm_health_probe_timeout_seconds,
+        probe_failures=settings.vllm_health_probe_failures,
     )
     try:
         await registry.discover()
@@ -374,8 +376,12 @@ async def lifespan(app: FastAPI):
     app.state.retrieval_executor = retrieval_executor
     app.state.trace_writer = trace_writer
 
+    # Started last, so nothing above that fails can leave it running; requests are served only from here on anyway.
+    registry.start_health_probe(settings.vllm_health_probe_interval_seconds)
+
     yield
 
+    await registry.aclose()
     # Answers still being stored (a client that left just before shutdown) need the database and the trace writer.
     await drain_persist_tasks(PERSIST_DRAIN_TIMEOUT_S)
     if backup_task is not None:
