@@ -547,6 +547,7 @@ def test_the_model_list_runs_menon_10_then_11_then_the_stands(make_client, tmp_p
     c.app.state.vllm_registry = SimpleNamespace(
         list_models=AsyncMock(return_value=[{"id": "meno-lite", "endpoint": "http://fake/v1"}]),
         unavailable_models=list,
+        one_entry_per_model=lambda models: models,
     )
     data = c.get("/v1/models").json()["data"]
     order: list[str] = []

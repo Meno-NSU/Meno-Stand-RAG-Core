@@ -1,5 +1,6 @@
 import asyncio
 
+import httpx
 import pytest
 
 from meno_rag.llm.router import LLMRouter
@@ -173,3 +174,108 @@ async def test_chat_completion_text_records_cancelled_not_error_on_cancellation(
         'meno_llm_calls_total{endpoint="http://e-cancel-text/v1",outcome="cancelled",provider="vllm",stage="generation"}'
         in text
     )
+
+
+# ---- a vLLM endpoint that cannot be reached is reported to the registry (no retry: the error still reaches the caller)
+
+
+class _Marks:
+    def __init__(self) -> None:
+        self.marked: list[str] = []
+
+    def mark_unreachable(self, endpoint: str) -> None:
+        self.marked.append(endpoint)
+
+
+def _request() -> httpx.Request:
+    return httpx.Request("POST", "http://h100:9022/v1/chat/completions")
+
+
+class _FailingVLLM:
+    def __init__(self, exc: Exception, tokens: tuple[str, ...] = ()) -> None:
+        self.exc = exc
+        self.tokens = tokens
+        self.calls = 0
+
+    async def chat_completion(self, **kwargs):
+        self.calls += 1
+        raise self.exc
+
+    async def chat_completion_text(self, **kwargs):
+        self.calls += 1
+        raise self.exc
+
+    async def stream_chat_completion(self, **kwargs):
+        self.calls += 1
+        for token in self.tokens:
+            yield token
+        raise self.exc
+
+
+_UNREACHABLE = [
+    httpx.ConnectError("refused", request=_request()),
+    httpx.ConnectTimeout("connect timed out", request=_request()),
+    httpx.ReadTimeout("read timed out", request=_request()),
+    httpx.ReadError("connection reset", request=_request()),
+    httpx.RemoteProtocolError("server disconnected", request=_request()),
+]
+
+
+async def _call(router: LLMRouter, method: str, rt: ModelRuntime) -> None:
+    if method == "stream":
+        async for _ in router.stream_chat_completion(runtime=rt, messages=[], stage="generation"):
+            pass
+    else:
+        await getattr(router, method)(runtime=rt, messages=[], stage="rerank")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["chat_completion", "chat_completion_text", "stream"])
+@pytest.mark.parametrize("exc", _UNREACHABLE, ids=lambda e: type(e).__name__)
+async def test_an_unreachable_vllm_endpoint_is_marked_and_the_error_reraised(method, exc):
+    marks, vllm = _Marks(), _FailingVLLM(exc, tokens=("a",))
+    router = LLMRouter(vllm=vllm, openrouter=None, vllm_registry=marks)
+    rt = ModelRuntime(provider="vllm", model_id="gemma", base_url="http://h100:9022/v1")
+    with pytest.raises(type(exc)):
+        await _call(router, method, rt)
+    assert marks.marked == ["http://h100:9022"]
+    assert vllm.calls == 1  # not retried
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("boom"),
+        httpx.HTTPStatusError("400", request=_request(), response=httpx.Response(400, request=_request())),
+        httpx.PoolTimeout("our own connection pool is full", request=_request()),
+        asyncio.CancelledError(),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+async def test_other_failures_do_not_mark_the_endpoint(exc):
+    marks = _Marks()
+    router = LLMRouter(vllm=_FailingVLLM(exc), openrouter=None, vllm_registry=marks)
+    rt = ModelRuntime(provider="vllm", model_id="gemma", base_url="http://h100:9022/v1")
+    with pytest.raises(type(exc)):
+        await router.chat_completion(runtime=rt, messages=[], stage="rerank")
+    assert marks.marked == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_openrouter_is_not_reported_to_the_vllm_registry():
+    marks = _Marks()
+    failing = _FailingVLLM(httpx.ConnectError("refused", request=_request()))
+    router = LLMRouter(vllm=FakeVLLM(), openrouter=failing, vllm_registry=marks)
+    rt = ModelRuntime(provider="openrouter", model_id="d/c:free", base_url="http://or/v1")
+    with pytest.raises(httpx.ConnectError):
+        await router.chat_completion_text(runtime=rt, messages=[], stage="generation")
+    assert marks.marked == []
+
+
+@pytest.mark.asyncio
+async def test_without_a_registry_an_unreachable_endpoint_only_raises():
+    router = LLMRouter(vllm=_FailingVLLM(httpx.ConnectError("refused", request=_request())), openrouter=None)
+    rt = ModelRuntime(provider="vllm", model_id="gemma", base_url="http://h100:9022/v1")
+    with pytest.raises(httpx.ConnectError):
+        await router.chat_completion(runtime=rt, messages=[], stage="rerank")

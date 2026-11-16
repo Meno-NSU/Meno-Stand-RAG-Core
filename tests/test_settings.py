@@ -2,6 +2,9 @@
 
 from importlib import reload
 
+import pytest
+from pydantic import ValidationError
+
 import meno_rag.config as config_module
 from meno_rag.config import Settings
 
@@ -94,3 +97,19 @@ def test_openrouter_enabled_true_when_key_set(monkeypatch):
     reload(config_module)
     s = config_module.get_settings.__wrapped__()
     assert s.openrouter_enabled is True
+
+
+def test_vllm_endpoint_policy_defaults_to_round_robin(monkeypatch):
+    monkeypatch.delenv("VLLM_ENDPOINT_POLICY", raising=False)
+    assert Settings().vllm_endpoint_policy == "round_robin"
+
+
+def test_vllm_endpoint_policy_priority(monkeypatch):
+    monkeypatch.setenv("VLLM_ENDPOINT_POLICY", "priority")
+    assert Settings().vllm_endpoint_policy == "priority"
+
+
+def test_an_unknown_vllm_endpoint_policy_is_rejected(monkeypatch):
+    monkeypatch.setenv("VLLM_ENDPOINT_POLICY", "fastest")
+    with pytest.raises(ValidationError):
+        Settings()

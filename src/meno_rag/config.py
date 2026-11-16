@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,13 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(default="EMPTY", validation_alias=AliasChoices("OPENAI_API_KEY", "VLLM_API_KEY"))
     vllm_endpoints: str = Field(default="http://127.0.0.1:9020", validation_alias="VLLM_ENDPOINTS")
+    # Where requests for a model id served by several VLLM_ENDPOINTS go. "round_robin" alternates between them.
+    # "priority" sends every request to the first of them in VLLM_ENDPOINTS order that is not known to be down (it did
+    # not answer the latest /v1/models probe, or a chat call to it could not connect or timed out); the later ones are
+    # fallbacks only. The model list shows such a model once, with the endpoint a request would go to now.
+    vllm_endpoint_policy: Literal["round_robin", "priority"] = Field(
+        default="round_robin", validation_alias="VLLM_ENDPOINT_POLICY"
+    )
     default_model: str | None = Field(default=None, validation_alias=AliasChoices("DEFAULT_MODEL", "LLM_MODEL_NAME"))
 
     stand_resources_dir: Path = Field(default=Path("resources/stand_nsu"), validation_alias="STAND_RESOURCES_DIR")

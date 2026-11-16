@@ -23,6 +23,9 @@ class FakeRegistry:
     def unavailable_models(self):
         return [{"id": i, "endpoint": "http://fake/v1"} for i in self.down]
 
+    def one_entry_per_model(self, models):
+        return models
+
 
 def _client(make_client, ids=("meno-lite", "gemma-4-12B-it", "other"), **kw):  # noqa: F811
     c, db = make_client(**kw)

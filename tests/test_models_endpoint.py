@@ -86,3 +86,67 @@ def test_a_stale_model_kept_for_routing_is_not_presented_as_available(client_wit
     entries = [m for m in client_with_or.get("/v1/models").json()["data"] if m["id"] == "menon-1"]
     assert len(entries) == 1
     assert entries[0]["status"]["state"] == "unreachable"
+
+
+# ---- one entry per vLLM model id: the endpoint the router would pick now
+
+H100, A6000 = "http://h100:9022", "http://a6000:9020"
+_TWO_ENDPOINT_MODELS = [
+    {"id": "gemma", "endpoint": A6000, "created": 100, "object": "model", "owned_by": "vllm"},
+    {"id": "a6000-only", "endpoint": A6000, "created": 101, "object": "model", "owned_by": "vllm"},
+    {"id": "gemma", "endpoint": H100, "created": 102, "object": "model", "owned_by": "vllm"},
+]
+
+
+def _two_endpoint_registry(policy: str, endpoints: tuple[str, ...] = (H100, A6000), models=_TWO_ENDPOINT_MODELS):
+    import httpx
+
+    from meno_rag.api.main import app
+    from meno_rag.llm.registry import VLLMRegistry
+
+    registry = VLLMRegistry(list(endpoints), http_client=httpx.AsyncClient(), policy=policy)
+    registry.list_models = AsyncMock(return_value=list(models))
+    app.state.vllm_registry = registry
+    return registry
+
+
+def _vllm_entries(client) -> list[dict]:
+    return [m for m in client.get("/v1/models").json()["data"] if m["provider"] == "vllm"]
+
+
+def test_a_model_served_by_two_endpoints_is_listed_once_with_the_priority_endpoint(client_with_or):
+    _two_endpoint_registry("priority")
+    entries = _vllm_entries(client_with_or)
+    gemma = [m for m in entries if m["id"] == "gemma"]
+    assert len(gemma) == 1
+    assert gemma[0]["endpoint"] == H100
+    assert gemma[0]["created"] == 102  # the H100's own entry, not the A6000's
+    assert gemma[0]["status"]["state"] == "available"
+    assert [(m["id"], m["endpoint"]) for m in entries if m["id"] == "a6000-only"] == [("a6000-only", A6000)]
+
+
+def test_the_listed_endpoint_follows_the_priority_failover(client_with_or):
+    registry = _two_endpoint_registry("priority")
+    registry.mark_unreachable(H100)
+    gemma = [m for m in _vllm_entries(client_with_or) if m["id"] == "gemma"]
+    assert [(m["endpoint"], m["status"]["state"]) for m in gemma] == [(A6000, "available")]
+
+
+def test_round_robin_lists_a_shared_model_once_with_the_first_endpoint(client_with_or):
+    _two_endpoint_registry("round_robin")
+    gemma = [m for m in _vllm_entries(client_with_or) if m["id"] == "gemma"]
+    assert [m["endpoint"] for m in gemma] == [H100]
+
+
+def test_a_deduplicated_entry_keeps_every_field_the_site_reads(client_with_or):
+    # The fixture's one-endpoint menon-1, then the same model served by a second endpoint too: the site gets the
+    # very same entry, field for field.
+    single = [m for m in client_with_or.get("/v1/models").json()["data"] if m["id"] == "menon-1"]
+    both = [
+        {"id": "menon-1", "endpoint": "http://v", "created": 100, "object": "model", "owned_by": "vllm"},
+        {"id": "menon-1", "endpoint": A6000, "created": 100, "object": "model", "owned_by": "vllm"},
+    ]
+    _two_endpoint_registry("priority", endpoints=("http://v", A6000), models=both)
+    deduplicated = [m for m in client_with_or.get("/v1/models").json()["data"] if m["id"] == "menon-1"]
+    assert len(single) == 1
+    assert deduplicated == single

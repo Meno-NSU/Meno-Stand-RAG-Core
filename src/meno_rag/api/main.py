@@ -211,6 +211,7 @@ async def lifespan(app: FastAPI):
         http_client=http_client,
         timeout=settings.model_discovery_timeout_seconds,
         cache_ttl=settings.model_cache_ttl_seconds,
+        policy=settings.vllm_endpoint_policy,
     )
     try:
         await registry.discover()
@@ -274,6 +275,7 @@ async def lifespan(app: FastAPI):
     llm_router = LLMRouter(
         vllm=VLLMClient(http_client=http_client, api_key=settings.openai_api_key),
         openrouter=openrouter_client,
+        vllm_registry=registry,
     )
 
     retrieval_workers = settings.retrieval_executor_max_workers or (
@@ -592,7 +594,9 @@ async def list_models(request: Request):
     unavailable = {m["id"]: m for m in vllm_registry.unavailable_models()}
     listed = {m["id"] for m in vllm_models}
     merged: list[dict] = []
-    for m in [*vllm_models, *(m for model_id, m in unavailable.items() if model_id not in listed)]:
+    # A model served by several endpoints is listed once, with the endpoint a request would go to now.
+    available = vllm_registry.one_entry_per_model(vllm_models)
+    for m in [*available, *(m for model_id, m in unavailable.items() if model_id not in listed)]:
         merged.append(
             {
                 "id": m["id"],

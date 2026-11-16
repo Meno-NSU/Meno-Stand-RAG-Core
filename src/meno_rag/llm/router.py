@@ -10,16 +10,38 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
+
 from meno_rag.api import metrics
 from meno_rag.llm.client import VLLMClient
 from meno_rag.llm.openrouter_client import OpenRouterClient
+from meno_rag.llm.registry import VLLMRegistry
 from meno_rag.stand.pipeline import ModelRuntime
+
+# A vLLM call failing this way says the endpoint is not there: refused, reset, hung up, or silent past the timeout.
+# Not a pool timeout (our own connection pool is full) and not an HTTP error status (the endpoint did answer).
+_UNREACHABLE_ERRORS = (
+    httpx.NetworkError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+)
 
 
 class LLMRouter:
-    def __init__(self, *, vllm: VLLMClient, openrouter: OpenRouterClient | None) -> None:
+    def __init__(
+        self,
+        *,
+        vllm: VLLMClient,
+        openrouter: OpenRouterClient | None,
+        vllm_registry: VLLMRegistry | None = None,
+    ) -> None:
         self._vllm = vllm
         self._openrouter = openrouter
+        # Told of a vLLM endpoint that could not be reached, so the next requests can go elsewhere (the "priority"
+        # endpoint policy). The failed call itself is not retried: its error reaches the caller as before.
+        self._vllm_registry = vllm_registry
 
     async def chat_completion(
         self, *, runtime: ModelRuntime, messages: list[dict[str, str]], stage: str = "unknown", **kwargs: Any
@@ -36,8 +58,9 @@ class LLMRouter:
         except asyncio.CancelledError:
             self._record(runtime, stage, "cancelled", started)
             raise
-        except Exception:
+        except Exception as exc:
             self._record(runtime, stage, "error", started)
+            self._note_unreachable(runtime, exc)
             raise
         self._record(runtime, stage, "ok", started)
         return result
@@ -57,8 +80,9 @@ class LLMRouter:
         except asyncio.CancelledError:
             self._record(runtime, stage, "cancelled", started)
             raise
-        except Exception:
+        except Exception as exc:
             self._record(runtime, stage, "error", started)
+            self._note_unreachable(runtime, exc)
             raise
         self._record(runtime, stage, "ok", started)
         return result
@@ -87,8 +111,9 @@ class LLMRouter:
             # distinctly so it doesn't inflate the error rate, then re-raise.
             self._record(runtime, stage, "cancelled", started)
             raise
-        except Exception:
+        except Exception as exc:
             self._record(runtime, stage, "error", started)
+            self._note_unreachable(runtime, exc)
             raise
         else:
             self._record(runtime, stage, "ok", started)
@@ -102,6 +127,11 @@ class LLMRouter:
             outcome=outcome,
             seconds=time.perf_counter() - started,
         )
+
+    def _note_unreachable(self, runtime: ModelRuntime, exc: Exception) -> None:
+        if self._vllm_registry is None or runtime.provider != "vllm" or not isinstance(exc, _UNREACHABLE_ERRORS):
+            return
+        self._vllm_registry.mark_unreachable(runtime.base_url.rstrip("/").removesuffix("/v1"))
 
     def _require_openrouter(self) -> OpenRouterClient:
         if self._openrouter is None:
